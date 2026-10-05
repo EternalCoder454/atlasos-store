@@ -93,8 +93,11 @@ enters, in `atlas-store-core`:
   LRU disk cache. QML only ever gets `file:` URLs.
 - Flathub API JSON: size cap, schema checked, every ID matched against local
   AppStream before it is shown.
-- flatpakref and flatpakrepo: size cap, known keys only, https only, the GPG
-  key checked, `RuntimeRepo=` never followed without its own confirmation.
+- flatpakref and flatpakrepo: read as GLib key files with limits (256 KiB,
+  4096 lines, 64 KiB per value), known keys only, translated and unknown keys
+  refused, https only, the GPG key parsed and its fingerprint shown,
+  `RuntimeRepo=` never followed without its own confirmation. libflatpak
+  only ever gets the Store's own `to_bytes()` rewrite, never the file.
 - Cache files live under `~/.cache/atlas-store` (0700), written atomically,
   files that are symlinks refused, and the cache folder itself must not be
   one (folders above it may be, for a moved `~/.cache`). A cache folder that is not

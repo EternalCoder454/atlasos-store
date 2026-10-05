@@ -12,3 +12,5 @@ log.workspace = true
 quick-xml.workspace = true
 flate2.workspace = true
 libc.workspace = true
+sha1.workspace = true
+sha2.workspace = true
