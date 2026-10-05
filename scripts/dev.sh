@@ -23,15 +23,18 @@ mkdir -p "$work"
 if ! podman image exists "$image"; then
     rpms=${ATLAS_LOCAL_RPMS:?the dev image needs atlas-framework RPMs: set ATLAS_LOCAL_RPMS=<dir>}
     rpms=$(cd "$rpms" && pwd)
-    # The dir is mounted with an SELinux relabel (:z): refuse anything but a
-    # dir of RPMs, so a wrong value can't relabel $HOME.
+    # Only a dir of atlas-framework's RPMs, so a wrong value fails here
+    # instead of halfway through the image build.
     if [ -n "$(find "$rpms" -mindepth 1 ! -name '*.rpm' -print -quit)" ] ||
         ! compgen -G "$rpms/atlas-ui-[0-9]*.rpm" >/dev/null; then
         echo "ATLAS_LOCAL_RPMS=$rpms must hold only atlas-framework's RPMs (atlas-ui-*.rpm and atlas-symbols-fonts-*.rpm)" >&2
         exit 1
     fi
-    ctr=$(podman run -d -v "$repo/packaging":/packaging:ro,Z \
-        -v "$rpms":/atlas-rpms:ro,z \
+    # No SELinux relabelling (:z/:Z) of host folders: it would lock other
+    # containers and tools out of them. Labels are off for the container.
+    ctr=$(podman run -d --security-opt label=disable \
+        -v "$repo/packaging":/packaging:ro \
+        -v "$rpms":/atlas-rpms:ro \
         -v atlas-dnf:/var/cache/libdnf5 \
         registry.fedoraproject.org/fedora:44 sleep infinity)
     trap 'podman rm -f "$ctr" >/dev/null' EXIT
@@ -51,9 +54,9 @@ fi
 
 tty=()
 [ -t 0 ] && tty=(-it)
-exec podman run --rm "${tty[@]}" \
-    -v "$repo":/src:Z -w /src \
-    -v "$work":/work:Z \
+exec podman run --rm "${tty[@]}" --security-opt label=disable \
+    -v "$repo":/src -w /src \
+    -v "$work":/work \
     -v atlas-cargo:/root/.cargo/registry \
     -v atlas-cargo-git:/root/.cargo/git \
     -e CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/work/target/dev}" \

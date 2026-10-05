@@ -73,7 +73,7 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
 | Tests | `scripts/dev.sh cargo test --workspace --locked` |
 | App build | `scripts/dev.sh bash -c 'cmake -S apps/atlas-store -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
 | Smoke run | `scripts/dev.sh dbus-run-session -- env QT_QPA_PLATFORM=offscreen /work/cmake/dev/atlas-store` |
-| RPM | `podman run --rm -v "$PWD":/src:Z -v <framework rpms>:/atlas-rpms:ro,z -e ATLAS_LOCAL_RPMS=/atlas-rpms -v atlas-cargo:/root/.cargo/registry -v atlas-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
+| RPM | `podman run --rm --security-opt label=disable -v "$PWD":/src -v <framework rpms>:/atlas-rpms:ro -e ATLAS_LOCAL_RPMS=/atlas-rpms -v atlas-cargo:/root/.cargo/registry -v atlas-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
 | Atlas checks | `git -C ~/Documents/Atlas\ Framework archive v1.4.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/atlas-store` and `<dir>/tools/check-app-names.sh apps/atlas-store` |
 
 `<framework rpms>` is the out dir of atlas-framework's `packaging/build-rpm.sh`:
