@@ -75,7 +75,13 @@ qt_add_qml_module(atlas-store-app
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/AppGrid.qml
+        qml/AppTile.qml
+        qml/CatalogState.qml
+        qml/CategoryPage.qml
+        qml/CategoryTile.qml
         qml/HomePage.qml
+        qml/SearchPage.qml
         qml/PlaceholderPage.qml
 )
 

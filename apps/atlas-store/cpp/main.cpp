@@ -18,7 +18,13 @@
 #include <memory>
 
 // Defined in src/lib.rs.
-extern "C" void *atlas_backend_new();
+struct AtlasObjects {
+    void *backend;
+    void *catalog;
+    void *search;
+    void *browse;
+};
+extern "C" AtlasObjects atlas_objects_new();
 
 // Hands a launch's arguments (without the program name) to the backend.
 static void activate(QObject *backend, const QStringList &arguments, const QString &cwd)
@@ -82,12 +88,21 @@ int main(int argc, char *argv[])
     // activateRequested; without a session bus each launch runs on its own.
     KDBusService service(KDBusService::Unique | KDBusService::NoExitOnFailure);
 
-    // The backend outlives the engine: the window's bindings read it until
-    // the engine is gone.
-    std::unique_ptr<QObject> backend(static_cast<QObject *>(atlas_backend_new()));
+    // The backend, catalog and models outlive the engine: the window's
+    // bindings read them until the engine is gone.
+    const AtlasObjects made = atlas_objects_new();
+    std::unique_ptr<QObject> backend(static_cast<QObject *>(made.backend));
+    std::unique_ptr<QObject> catalog(static_cast<QObject *>(made.catalog));
+    std::unique_ptr<QObject> searchModel(static_cast<QObject *>(made.search));
+    std::unique_ptr<QObject> browseModel(static_cast<QObject *>(made.browse));
     auto engine = std::make_unique<QQmlApplicationEngine>();
     QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-    engine->setInitialProperties({{QStringLiteral("backend"), QVariant::fromValue(backend.get())}});
+    engine->setInitialProperties({
+        {QStringLiteral("backend"), QVariant::fromValue(backend.get())},
+        {QStringLiteral("catalog"), QVariant::fromValue(catalog.get())},
+        {QStringLiteral("searchModel"), QVariant::fromValue(searchModel.get())},
+        {QStringLiteral("browseModel"), QVariant::fromValue(browseModel.get())},
+    });
     engine->loadFromModule("net.eterneon.atlas.store", "Main");
     if (engine->rootObjects().isEmpty()) {
         return 1;

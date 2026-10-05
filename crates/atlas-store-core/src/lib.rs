@@ -3,6 +3,7 @@
 //! untrusted and is checked where it enters (see docs/DESIGN.md, Security).
 
 pub mod appstream;
+pub mod catalog;
 pub mod flatpak;
 pub mod flatpakref;
 pub mod keyfile;

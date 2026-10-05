@@ -143,7 +143,8 @@ EOF
     <launchable type=\"desktop-id\">$app.desktop</launchable>
     <icon type=\"cached\" width=\"64\" height=\"64\">$app.png</icon>
     <icon type=\"cached\" width=\"128\" height=\"128\">$app.png</icon>
-    <categories><category>Utility</category></categories>
+    <categories><category>Utility</category><category>Education</category></categories>
+    <keywords><keyword>greeting</keyword><keyword>salutation</keyword></keywords>
     <url type=\"homepage\">https://github.com/EternalCoder454/atlasos-store</url>
     <content_rating type=\"oars-1.1\"/>
     <releases>

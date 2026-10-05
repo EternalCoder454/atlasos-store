@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="beta">
+  <component type="desktop-application">
+    <id>org.example.Browser.desktop</id>
+    <name>Browser Beta</name>
+    <summary>Surf, beta</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Network</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Browser/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.OnlyBeta</id>
+    <name>Only Beta</name>
+    <summary>Beta only</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Science</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.OnlyBeta/x86_64/stable</bundle>
+  </component>
+</components>

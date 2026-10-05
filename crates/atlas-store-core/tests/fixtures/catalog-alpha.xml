@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="alpha">
+  <component type="desktop-application">
+    <id>org.example.Browser</id>
+    <name>Browser</name>
+    <summary>Surf</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Network</category></categories>
+    <icon type="cached" width="64" height="64">org.example.Browser.png</icon>
+    <icon type="cached" width="128" height="128">org.example.Browser.png</icon>
+    <releases><release version="1.0" date="2026-03-01"/></releases>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Browser/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.FireBrowser</id>
+    <name>Fire Browser</name>
+    <summary>Surf fast</summary>
+    <project_license>MPL-2.0</project_license>
+    <categories><category>Network</category></categories>
+    <keywords><keyword>web</keyword></keywords>
+    <releases><release version="1.0" date="2026-02-01"/></releases>
+    <custom><value key="flathub::verification::verified">true</value></custom>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.FireBrowser/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Anon</id>
+    <name>Browsers Anonymous</name>
+    <summary>Surf privately</summary>
+    <project_license>GPL-3.0-or-later</project_license>
+    <categories><category>Network</category></categories>
+    <releases><release version="1.0" date="2025-12-01"/></releases>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Anon/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Tabs</id>
+    <name>Tabs</name>
+    <summary>Many windows</summary>
+    <project_license>Apache-2.0 OR LicenseRef-proprietary</project_license>
+    <categories><category>Network</category><category>Utility</category></categories>
+    <keywords><keyword>browser</keyword></keywords>
+    <releases><release version="1.0" date="2025-06-01"/></releases>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Tabs/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.browser.Zeta</id>
+    <name>Zeta</name>
+    <summary>Something</summary>
+    <project_license>LicenseRef-proprietary</project_license>
+    <categories><category>System</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.browser.Zeta/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Pictures</id>
+    <name>Pictures</name>
+    <summary>A browser for pictures</summary>
+    <project_license>GPL-2.0-only AND MIT</project_license>
+    <categories><category>Graphics</category></categories>
+    <releases><release version="1.0" date="2026-01-15"/></releases>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Pictures/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Notes</id>
+    <name>Notes</name>
+    <summary>Write things</summary>
+    <project_license>CC-BY-SA-4.0</project_license>
+    <developer_name>Browser Labs</developer_name>
+    <categories><category>Office</category><category>Utility</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Notes/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Cafe</id>
+    <name>Café Lumière</name>
+    <summary>Coffee shop manager</summary>
+    <project_license>GPL-3.0+</project_license>
+    <developer_name>Zoë Müller</developer_name>
+    <categories><category>Utility</category><category>Office</category></categories>
+    <keywords><keyword>boulangerie</keyword></keywords>
+    <releases><release version="1.0" date="2024-05-05"/></releases>
+    <custom><value key="flathub::verification::verified">true</value></custom>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Cafe/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Player</id>
+    <name>Audio Player</name>
+    <summary>Play sounds</summary>
+    <project_license>LGPL-2.1-or-later</project_license>
+    <categories><category>Audio</category><category>Video</category><category>AudioVideo</category><category>Player</category><category>audio</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Player/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.GameOne</id>
+    <name>Game One</name>
+    <summary>Fun</summary>
+    <project_license>Proprietary</project_license>
+    <categories><category>Game</category><category>Education</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.GameOne/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.Suffix.desktop</id>
+    <name>Suffix App</name>
+    <summary>Id with suffix</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Development</category><category>Science</category><category>System</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Suffix/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>org.example.NoBundle</id>
+    <name>No Bundle</name>
+    <summary>Not listed</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Network</category></categories>
+  </component>
+  <component type="addon">
+    <id>org.example.Addon</id>
+    <name>An Addon</name>
+    <summary>Not an app</summary>
+    <project_license>MIT</project_license>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Addon/x86_64/stable</bundle>
+  </component>
+  <component type="runtime">
+    <id>org.example.Runtime</id>
+    <name>A Runtime</name>
+    <summary>Not an app</summary>
+    <project_license>MIT</project_license>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Runtime/x86_64/stable</bundle>
+  </component>
+  <component type="console-application">
+    <id>org.example.Cli</id>
+    <name>Cli Tool</name>
+    <summary>Runs in a terminal</summary>
+    <project_license>MIT</project_license>
+    <categories><category>Utility</category></categories>
+    <bundle type="flatpak" runtime="org.test.Platform/x86_64/stable">app/org.example.Cli/x86_64/stable</bundle>
+  </component>
+</components>

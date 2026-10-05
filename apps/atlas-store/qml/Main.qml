@@ -10,6 +10,11 @@ AtlasWindow {
 
     // The Rust backend (src/backend.rs); main.cpp sets it.
     required property var backend
+    // The catalogs and the two lists of apps (src/catalog.rs): one for the
+    // search page, one for a category page.
+    required property var catalog
+    required property var searchModel
+    required property var browseModel
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -31,9 +36,52 @@ AtlasWindow {
         { key: "sources", text: qsTr("Sources"), symbol: Symbols.Dns }
     ]
 
+    // The Store's categories, in the order of Catalog.categoryKey.
+    readonly property var categories: [
+        { text: qsTr("Audio & Video"), symbol: Symbols.Movie },
+        { text: qsTr("Development"), symbol: Symbols.Code },
+        { text: qsTr("Education"), symbol: Symbols.School },
+        { text: qsTr("Games"), symbol: Symbols.SportsEsports },
+        { text: qsTr("Graphics"), symbol: Symbols.Brush },
+        { text: qsTr("Network"), symbol: Symbols.Public },
+        { text: qsTr("Office"), symbol: Symbols.Work },
+        { text: qsTr("Science"), symbol: Symbols.Science },
+        { text: qsTr("System"), symbol: Symbols.Settings },
+        { text: qsTr("Utilities"), symbol: Symbols.Build }
+    ]
+
     function openPlace(key) {
         root.place = key;
         stack.popToRoot();
+    }
+
+    // The search page, filled in; one search page at a time.
+    function openSearch(text) {
+        if (stack.currentItem && stack.currentItem.isSearch === true) {
+            stack.currentItem.setQuery(text);
+            return;
+        }
+        if (stack.currentItem && stack.currentItem.message === true) {
+            stack.pop();
+        }
+        stack.push(searchPage, { query: text });
+    }
+
+    function openCategory(index) {
+        const key = root.catalog.categoryKey(index);
+        if (key.length === 0) {
+            return;
+        }
+        stack.push(categoryPage, { categoryKey: key, title: root.categories[index].text });
+    }
+
+    // The app's own page is a later item: until then the request is shown.
+    function openApp(id) {
+        root.showMessage({
+            title: qsTr("Not Yet Available"),
+            heading: root.requestHeadings.app,
+            text: id
+        });
     }
 
     // What a launch asked for. Pages for apps, searches, files and links
@@ -94,6 +142,15 @@ AtlasWindow {
         function onRequested(kind, value) {
             if (kind === "page") {
                 root.openPlace(value);
+                return;
+            }
+            if (kind === "search") {
+                root.openPlace("home");
+                root.openSearch(value);
+                return;
+            }
+            if (kind === "app") {
+                root.openApp(value);
                 return;
             }
             root.showMessage({
@@ -211,6 +268,29 @@ AtlasWindow {
         id: homePage
         HomePage {
             backend: root.backend
+            catalog: root.catalog
+            categories: root.categories
+            onSearchRequested: text => root.openSearch(text)
+            onCategoryRequested: index => root.openCategory(index)
+            onOpenSources: root.openPlace("sources")
+        }
+    }
+    Component {
+        id: searchPage
+        SearchPage {
+            catalog: root.catalog
+            model: root.searchModel
+            onAppRequested: id => root.openApp(id)
+            onOpenSources: root.openPlace("sources")
+        }
+    }
+    Component {
+        id: categoryPage
+        CategoryPage {
+            catalog: root.catalog
+            model: root.browseModel
+            onAppRequested: id => root.openApp(id)
+            onOpenSources: root.openPlace("sources")
         }
     }
     Component {
