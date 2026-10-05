@@ -103,8 +103,18 @@ enters, in `atlas-store-core`:
   checks (characters, IDs, URLs, icon files, bundle references, runtimes and
   SDKs, text lengths and whitespace, the bundle matching the component, a
   bundle where one is required, no duplicate IDs), caps sizes and the total
-  decoded, and anything wrong means a rebuild. It cannot re-check what only
-  the XML shows (such as which of several languages was chosen).
+  decoded, and anything wrong means a rebuild. Its caps are the parser's own
+  (derived from `Limits` and the constants beside it, so they cannot drift),
+  and the parser stops, with an error, when what it keeps would not fit the
+  index's file and decode caps. It cannot re-check what only the XML shows
+  (such as which of several languages was chosen).
+  The header holds the layout `FORMAT` (bumped on any change to `Catalog`,
+  `Component` or the encoding) and the `PARSER_REV` (bumped when the parser
+  returns something different for the same XML); either one changing means a
+  rebuild. A read never changes the cache folder (a group- or other-writable
+  one is refused, and the next write sets it to 0700); no file is `Missing`,
+  not a fault. After a write only index files last written before it began are
+  removed, so a slower writer cannot delete a newer index.
 
 **Confirmation:** nothing is installed, removed or added as a source without
 the Store's own dialog, showing the app, the remote, sizes and permissions.

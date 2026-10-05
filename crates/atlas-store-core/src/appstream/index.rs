@@ -12,14 +12,17 @@
 //! characters, one line, within the parser's lengths), ID, URL, icon file,
 //! bundle reference, runtime and SDK, requires the bundle to match the
 //! component and to exist where the parser requires it, refuses duplicate
-//! IDs, requires the catalog's origin to be the key's, and stops at a total budget of decoded
-//! data, so a small hostile file can't expand without limit. The cache
-//! directory must be the user's own and not writable by group or others, or
-//! the index is neither read nor written.
+//! IDs, requires the catalog's origin to be the key's, and stops at a total
+//! budget of decoded data, so a small hostile file can't expand without
+//! limit. Every cap the decoder applies is the parser's own ([`Limits`] and
+//! the constants beside it), so what the parser keeps is always accepted.
+//! The cache directory must be the user's own: [`read`] refuses one that
+//! group or others can write to (the caller rebuilds, and [`write`] sets it
+//! to 0700 first), and neither reads nor writes through a link.
 //!
-//! Layout, little-endian: the magic `ATLASIDX`, the format version, the key
-//! (origin, commit, languages), the payload length, a checksum of everything
-//! before it and of the payload, then the payload.
+//! Layout, little-endian: the magic `ATLASIDX`, the format version, the
+//! parser revision, the key (origin, commit, languages), the payload length,
+//! a checksum of everything before it and of the payload, then the payload.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -30,35 +33,49 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use super::parse::{Limits, bundle_matches, needs_bundle};
+use super::parse::{
+    Limits, MAX_EXTENDS, MAX_ICON_SIZES, MAX_RATING_ATTRS, MAX_SPANS, PARSER_REV, RELEASES,
+    bundle_matches, needs_bundle,
+};
 use super::{
     Block, Branding, Bundle, Catalog, Component, ContentRating, Icon, Image, Intensity, Kind,
     RatingScheme, Release, ReleaseKind, Screenshot, Span, Style, UrlKind, Verification,
 };
 use crate::text;
 
-/// The layout version this code writes and reads.
-pub const FORMAT: u32 = 1;
+/// The layout version this code writes and reads. Bump it on any change to
+/// [`Catalog`], [`Component`] or what they hold, or to how they are encoded:
+/// an index of another version is refused and rebuilt. A change to what the
+/// parser returns for the same XML, with the same types, bumps
+/// [`PARSER_REV`] instead.
+///
+/// 2: `Catalog::duplicates`, the parser revision in the header.
+pub const FORMAT: u32 = 2;
 
 const MAGIC: &[u8; 8] = b"ATLASIDX";
 /// Largest index file read, and largest written. The real Flathub index is
 /// about 14 MB, so this leaves more than twice that.
+///
+/// The parser's retained-text budget (48 MB) is larger than this, so the file
+/// is not sized to it. The other way round: the parser adds up what each kept
+/// component costs here ([`cost`]) and stops with an error past
+/// [`MAX_PAYLOAD`] and [`MAX_CHARGE`], so a catalog that parsed always fits
+/// and a rebuilt index is never refused for its size.
 const MAX_FILE: u64 = 32 << 20;
 /// Most that decoding may account for: the bytes of every string plus 24 for
 /// its header, 16 for every list item and 512 for every component. The real
 /// Flathub index comes to about 30 MB by this count; 96 MiB is over three
 /// times that, and bounds the memory a hostile file can make us use.
-const MAX_DECODED: usize = 96 << 20;
+pub(crate) const MAX_DECODED: usize = 96 << 20;
+/// Room kept in the file and the decode budget for what isn't a component:
+/// the header, the origin and the counts.
+const SLACK: usize = 4096;
+/// Most the components of a catalog may take in the file.
+pub(crate) const MAX_PAYLOAD: usize = MAX_FILE as usize - SLACK;
+/// Most the components of a catalog may be charged when decoded.
+pub(crate) const MAX_CHARGE: usize = MAX_DECODED - SLACK;
 /// Temp files of a crashed write older than this are removed.
 const STALE_TEMP: Duration = Duration::from_secs(600);
-
-// Caps on what a file may claim, matching the parser's.
-const MAX_STR: usize = 64 << 10;
-const MAX_COMPONENTS: usize = 100_000;
-const MAX_BLOCKS: usize = 64;
-const MAX_ITEMS: usize = 256;
-const MAX_SPANS: usize = 8192;
-const MAX_LIST: usize = 64;
 
 /// What an index was built from. A file is only used for the same key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +95,10 @@ pub struct IndexKey {
 pub enum IndexError {
     /// The key has an origin or commit that isn't allowed in a file name.
     InvalidKey(&'static str),
-    /// The file could not be opened or read (including a symlink).
+    /// There is no index file: the first run, or it was removed. Not a fault.
+    Missing,
+    /// The file could not be opened or read (including a symlink), or the
+    /// folder is not safe to read from.
     Io(String),
     /// Bigger than the cap.
     TooLarge,
@@ -96,6 +116,7 @@ impl fmt::Display for IndexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IndexError::InvalidKey(w) => write!(f, "invalid index key: {w}"),
+            IndexError::Missing => write!(f, "there is no index yet"),
             IndexError::Io(e) => write!(f, "can't read the index: {e}"),
             IndexError::TooLarge => write!(f, "the index file is too large"),
             IndexError::BadHeader(w) => write!(f, "not a usable index: {w}"),
@@ -133,8 +154,13 @@ impl IndexKey {
         Ok(())
     }
 
+    /// FNV-1a of the parser revision and the languages, so a new parser
+    /// reads and writes a file of its own.
     fn langs_hash(&self) -> u32 {
         let mut h: u32 = 0x811c_9dc5;
+        for b in PARSER_REV.to_le_bytes() {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
         for l in &self.langs {
             for b in l.bytes().chain(std::iter::once(0)) {
                 h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
@@ -145,7 +171,8 @@ impl IndexKey {
 }
 
 /// The index file for `key` in `cache_dir`:
-/// `index-<origin>-<first 16 of commit>-<8 hex of the languages>.bin`.
+/// `index-<origin>-<first 16 of commit>-<8 hex of the languages and parser
+/// revision>.bin`.
 /// Fails when the origin or commit could not be a safe file name.
 pub fn cache_file(cache_dir: &Path, key: &IndexKey) -> Result<PathBuf, IndexError> {
     key.check()?;
@@ -421,10 +448,63 @@ fn url_kind_from(c: u8) -> Result<UrlKind, IndexError> {
     })
 }
 
+/// What one component costs in an index: the bytes it takes in the file, and
+/// what decoding it is charged (see [`MAX_DECODED`], and including the 16 the
+/// component list charges for each). The parser sums these so that what it
+/// keeps always fits the caps above. A test holds both to the real encoder and
+/// decoder.
+pub(crate) fn cost(c: &Component) -> (usize, usize) {
+    let mut e = Enc(Vec::with_capacity(1024));
+    e.component(c);
+    let file = e.0.len();
+    let s = |t: &str| t.len() + 24;
+    let opt = |t: &Option<String>| t.as_deref().map_or(0, s);
+    let strs = |v: &[String]| 16 * v.len() + v.iter().map(|t| s(t)).sum::<usize>();
+    let spans = |v: &[Span]| 16 * v.len() + v.iter().map(|x| s(&x.text)).sum::<usize>();
+    let blocks = |bl: &[Block]| {
+        16 * bl.len()
+            + bl.iter()
+                .map(|b| match b {
+                    Block::Paragraph(v) => spans(v),
+                    Block::List { items, .. } => {
+                        16 * items.len() + items.iter().map(|i| spans(i)).sum::<usize>()
+                    }
+                })
+                .sum::<usize>()
+    };
+    let mut g = 16 + 512 + s(&c.id) + s(&c.name) + s(&c.summary) + blocks(&c.description);
+    g += s(&c.developer) + s(&c.license) + strs(&c.categories) + strs(&c.keywords);
+    if let Some(i) = &c.icon {
+        g += s(&i.file) + 16 * i.sizes.len();
+    }
+    g += 16 * c.urls.len() + c.urls.iter().map(|(_, u)| s(u)).sum::<usize>();
+    g += 16 * c.screenshots.len();
+    for sh in &c.screenshots {
+        g += s(&sh.caption) + 16 * sh.images.len();
+        g += sh.images.iter().map(|i| s(&i.url)).sum::<usize>();
+    }
+    g += 16 * c.releases.len();
+    for r in &c.releases {
+        g += s(&r.version) + blocks(&r.description);
+    }
+    if let Some(r) = &c.content_rating {
+        g += 16 * r.attrs.len() + r.attrs.iter().map(|(t, _)| s(t)).sum::<usize>();
+    }
+    if let Some(b) = &c.bundle {
+        g += s(&b.reference) + opt(&b.runtime) + opt(&b.sdk);
+    }
+    g += strs(&c.extends) + opt(&c.launchable);
+    if let Some(v) = &c.verification {
+        g += s(&v.method) + s(&v.website) + s(&v.login_name) + s(&v.login_provider);
+    }
+    (file, g)
+}
+
 fn encode(key: &IndexKey, cat: &Catalog) -> Vec<u8> {
     let mut p = Enc(Vec::with_capacity(1 << 20));
     p.str(&cat.origin);
     p.u32(cat.skipped);
+    p.u32(cat.duplicates);
     p.len(cat.components.len());
     for c in &cat.components {
         p.component(c);
@@ -434,6 +514,7 @@ fn encode(key: &IndexKey, cat: &Catalog) -> Vec<u8> {
     let mut h = Enc(Vec::with_capacity(payload.len() + 256));
     h.0.extend_from_slice(MAGIC);
     h.u32(key.format);
+    h.u32(PARSER_REV);
     for s in [&key.origin, &key.commit] {
         h.u16(s.len() as u16);
         h.0.extend_from_slice(s.as_bytes());
@@ -472,6 +553,12 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
+/// An error mapper that says what was being done and to which path, keeping
+/// the error's kind.
+fn ctx<'a>(op: &'a str, path: &'a Path) -> impl Fn(io::Error) -> io::Error + 'a {
+    move |e| io::Error::new(e.kind(), format!("can't {op} {}: {e}", path.display()))
+}
+
 /// Whether `name` is a temp file of a write of `origin`'s index:
 /// `.<index file>.tmp.<pid>.<n>`.
 fn is_temp_of(origin: &str, name: &str) -> bool {
@@ -491,8 +578,10 @@ fn is_temp_of(origin: &str, name: &str) -> bool {
 /// Refuses a cache directory that is a symlink, not a directory or not the
 /// user's own. One that only group or others can write to (Fedora's umask 002
 /// does that to a directory something else created) is the user's to fix: it
-/// is set to 0700 with a warning. A directory that doesn't exist yet is fine.
-fn check_dir(dir: &Path) -> io::Result<()> {
+/// is set to 0700 with a warning when `repair` is set (a write), and refused
+/// otherwise (a read never changes anything). A directory that doesn't exist
+/// yet is fine.
+fn check_dir(dir: &Path, repair: bool) -> io::Result<()> {
     // Checked and repaired through one descriptor opened without following
     // a link, so the folder can't be swapped between the check and the chmod.
     let opened = fs::OpenOptions::new()
@@ -529,6 +618,16 @@ fn check_dir(dir: &Path) -> io::Result<()> {
         ));
     }
     if meta.mode() & 0o022 != 0 {
+        if !repair {
+            log::warn!(
+                "not reading from the cache directory {}: group or others can write to it",
+                dir.display()
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is writable by group or others", dir.display()),
+            ));
+        }
         log::warn!(
             "the cache directory {} is writable by group or others; setting it to 0700",
             dir.display()
@@ -545,8 +644,10 @@ fn check_dir(dir: &Path) -> io::Result<()> {
 /// with mode 0700; an existing one is refused when it is a link or not the
 /// user's, and set to 0700 when group or others can write to it.
 /// The catalog must be of the key's origin and the key of this layout version.
-/// Afterwards older index files and stale temp files of the same origin are
-/// removed. A failure leaves no temp file and the previous index as it was.
+/// Afterwards index files of the same origin that were last written before
+/// this write began, and stale temp files, are removed; a file another writer
+/// finished meanwhile stays. A failure leaves no temp file and the previous
+/// index as it was; an error says what was being done and to which path.
 pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<PathBuf> {
     key.check().map_err(|e| invalid(e.to_string()))?;
     if key.format != FORMAT {
@@ -559,6 +660,7 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
     if cache_dir.as_os_str().is_empty() || cache_dir == Path::new(".") {
         return Err(invalid("the cache directory is empty"));
     }
+    let started = SystemTime::now();
     let path = cache_file(cache_dir, key).map_err(|e| invalid(e.to_string()))?;
     let name = path
         .file_name()
@@ -569,12 +671,13 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
     if bytes.len() as u64 > MAX_FILE {
         return Err(invalid("the index would be larger than the cap"));
     }
-    check_dir(dir)?;
+    check_dir(dir, true).map_err(ctx("use the cache directory", dir))?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(dir)?;
-    check_dir(dir)?;
+        .create(dir)
+        .map_err(ctx("create the cache directory", dir))?;
+    check_dir(dir, true).map_err(ctx("use the cache directory", dir))?;
 
     let mut attempts = 0;
     let (mut file, tmp) = loop {
@@ -594,17 +697,19 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
             Ok(f) => break (f, tmp),
             // A leftover of a crashed run with the same pid and counter.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 16 => attempts += 1,
-            Err(e) => return Err(e),
+            Err(e) => return Err(ctx("create the temporary index file", &tmp)(e)),
         }
     };
     let mut guard = TempGuard {
         path: &tmp,
         armed: true,
     };
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+    file.write_all(&bytes)
+        .map_err(ctx("write the temporary index file", &tmp))?;
+    file.sync_all()
+        .map_err(ctx("sync the temporary index file", &tmp))?;
     drop(file);
-    fs::rename(&tmp, &path)?;
+    fs::rename(&tmp, &path).map_err(ctx("move the index into place at", &path))?;
     guard.armed = false;
     // The new index is in place; a failed directory sync only means it might
     // not survive a power cut, and the old files must still be cleaned up.
@@ -612,14 +717,17 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
         log::warn!("can't sync the cache directory {}: {e}", dir.display());
     }
 
-    remove_older(dir, &key.origin, &name);
+    remove_older(dir, &key.origin, &name, started);
     Ok(path)
 }
 
-/// Best-effort removal of the other index files of `origin`, and of its temp
-/// files older than ten minutes (a running write's is newer). Symlinks are
-/// removed as links, never followed.
-fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr) {
+/// Best-effort removal of the other index files of `origin` that were last
+/// written before `started` (when the write that is cleaning up began), and of
+/// its temp files older than ten minutes (a running write's is newer). A file
+/// written since then belongs to a writer that finished while this one ran, so
+/// it may be the newer index and stays; so does one whose time can't be read.
+/// Symlinks are removed as links, never followed.
+fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr, started: SystemTime) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -642,16 +750,17 @@ fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr) {
         if !(ft.is_file() || ft.is_symlink()) {
             continue;
         }
+        // Not followed: the time of the entry itself.
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
         if temp {
-            // Not followed: the age of the entry itself.
-            let age = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| now.duration_since(t).ok());
+            let age = now.duration_since(modified).ok();
             if !age.is_some_and(|a| a >= STALE_TEMP) {
                 continue;
             }
+        } else if modified >= started {
+            continue;
         }
         if let Err(e) = fs::remove_file(entry.path()) {
             log::warn!("can't remove the old index file {n}: {e}");
@@ -665,6 +774,10 @@ struct Dec<'a> {
     b: &'a [u8],
     /// What may still be decoded, see [`MAX_DECODED`].
     budget: usize,
+    /// The parser's caps, which every count and length is held to.
+    lim: Limits,
+    /// The longest string the parser can keep, in bytes.
+    max_str: usize,
 }
 
 /// Whether `s` has none of the characters the parser drops: controls (other
@@ -690,9 +803,12 @@ fn valid_website(s: &str) -> bool {
 
 impl<'a> Dec<'a> {
     fn new(b: &'a [u8]) -> Dec<'a> {
+        let lim = Limits::default();
         Dec {
             b,
             budget: MAX_DECODED,
+            max_str: lim.max_string_bytes(),
+            lim,
         }
     }
     fn charge(&mut self, n: usize) -> Result<(), IndexError> {
@@ -752,7 +868,7 @@ impl<'a> Dec<'a> {
     }
     fn str(&mut self) -> Result<String, IndexError> {
         let n = self.u32()? as usize;
-        if n > MAX_STR {
+        if n > self.max_str {
             return Err(IndexError::Corrupt("string over the cap"));
         }
         self.charge(n + 24)?;
@@ -801,13 +917,13 @@ impl<'a> Dec<'a> {
         Ok(v)
     }
     fn blocks(&mut self) -> Result<Vec<Block>, IndexError> {
-        let n = self.count(MAX_BLOCKS)?;
+        let n = self.count(self.lim.desc_blocks)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             v.push(match self.u8()? {
                 0 => Block::Paragraph(self.spans()?),
                 t @ (1 | 2) => {
-                    let m = self.count(MAX_ITEMS)?;
+                    let m = self.count(self.lim.desc_items)?;
                     let items = (0..m).map(|_| self.spans()).collect::<Result<_, _>>()?;
                     Block::List {
                         ordered: t == 2,
@@ -834,7 +950,7 @@ impl<'a> Dec<'a> {
             4 => Kind::Other,
             _ => return Err(IndexError::Corrupt("kind")),
         };
-        let lim = Limits::default();
+        let lim = self.lim.clone();
         let name = self.line(lim.name)?;
         if name.is_empty() {
             return Err(IndexError::Corrupt("empty name"));
@@ -843,7 +959,7 @@ impl<'a> Dec<'a> {
         let description = self.blocks()?;
         let developer = self.line(lim.developer)?;
         let license = self.str()?;
-        let categories = self.strs(MAX_LIST)?;
+        let categories = self.strs(lim.categories)?;
         let n = self.count(lim.keywords)?;
         let keywords = (0..n)
             .map(|_| self.line(lim.keyword))
@@ -853,13 +969,13 @@ impl<'a> Dec<'a> {
             if !text::valid_icon_file(&file) {
                 return Err(IndexError::Corrupt("icon file"));
             }
-            let n = self.count(MAX_LIST)?;
+            let n = self.count(MAX_ICON_SIZES)?;
             let sizes = (0..n).map(|_| self.u16()).collect::<Result<_, _>>()?;
             Some(Icon { file, sizes })
         } else {
             None
         };
-        let n = self.count(MAX_LIST)?;
+        let n = self.count(lim.urls)?;
         let mut urls = Vec::with_capacity(n);
         for _ in 0..n {
             let k = url_kind_from(self.u8()?)?;
@@ -869,12 +985,12 @@ impl<'a> Dec<'a> {
             }
             urls.push((k, u));
         }
-        let n = self.count(MAX_LIST)?;
+        let n = self.count(lim.screenshots)?;
         let mut screenshots = Vec::with_capacity(n);
         for _ in 0..n {
             let default = self.flag()?;
             let caption = self.str()?;
-            let m = self.count(MAX_LIST)?;
+            let m = self.count(lim.images)?;
             let mut images = Vec::with_capacity(m);
             for _ in 0..m {
                 let thumbnail = self.flag()?;
@@ -897,7 +1013,7 @@ impl<'a> Dec<'a> {
                 images,
             });
         }
-        let n = self.count(MAX_LIST)?;
+        let n = self.count(RELEASES)?;
         let mut releases = Vec::with_capacity(n);
         for _ in 0..n {
             let version = self.str()?;
@@ -923,7 +1039,7 @@ impl<'a> Dec<'a> {
                 2 => RatingScheme::Other,
                 _ => return Err(IndexError::Corrupt("rating scheme")),
             };
-            let n = self.count(MAX_LIST)?;
+            let n = self.count(MAX_RATING_ATTRS)?;
             let mut attrs = Vec::with_capacity(n);
             for _ in 0..n {
                 let id = self.str()?;
@@ -966,7 +1082,7 @@ impl<'a> Dec<'a> {
         if bundle.is_none() && needs_bundle(kind) {
             return Err(IndexError::Corrupt("missing bundle"));
         }
-        let extends = self.strs(MAX_LIST)?;
+        let extends = self.strs(MAX_EXTENDS)?;
         if !extends.iter().all(|e| text::valid_id(e)) {
             return Err(IndexError::Corrupt("extends id"));
         }
@@ -1026,22 +1142,30 @@ impl<'a> Dec<'a> {
 }
 
 /// Reads the index at `path` if it was built for `key`. The directory must be
-/// the user's own and not a link; the file is opened without following a symlink, must
-/// be a regular file of at most 32 MiB and must pass every check in the
-/// module description.
+/// the user's own, not a link and not writable by group or others (it is
+/// refused, never changed: [`write`] repairs it); the file is opened without
+/// following a symlink, must be a regular file of at most 32 MiB and must pass
+/// every check in the module description. [`IndexError::Missing`] when there
+/// is no file.
 pub fn read(path: &Path, key: &IndexKey) -> Result<Catalog, IndexError> {
     key.check()?;
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty() && *p != Path::new("."))
         .ok_or_else(|| IndexError::Io(format!("{} has no cache directory", path.display())))?;
-    check_dir(dir).map_err(|e| IndexError::Io(e.to_string()))?;
+    check_dir(dir, false).map_err(|e| IndexError::Io(e.to_string()))?;
     let io_err = |e: io::Error| IndexError::Io(format!("{}: {e}", path.display()));
     let file = File::options()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(io_err)?;
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                IndexError::Missing
+            } else {
+                io_err(e)
+            }
+        })?;
     let meta = file.metadata().map_err(io_err)?;
     if !meta.is_file() {
         return Err(IndexError::Io(format!(
@@ -1073,6 +1197,9 @@ fn decode_with(bytes: &[u8], key: &IndexKey, budget: usize) -> Result<Catalog, I
     }
     if d.u32()? != key.format || key.format != FORMAT {
         return Err(IndexError::BadHeader("format version"));
+    }
+    if d.u32()? != PARSER_REV {
+        return Err(IndexError::BadHeader("parser revision"));
     }
     let short = |d: &mut Dec<'_>| -> Result<String, IndexError> {
         let n = d.u16()? as usize;
@@ -1110,7 +1237,8 @@ fn decode_with(bytes: &[u8], key: &IndexKey, budget: usize) -> Result<Catalog, I
         return Err(IndexError::KeyMismatch);
     }
     let skipped = d.u32()?;
-    let n = d.count(MAX_COMPONENTS)?;
+    let duplicates = d.u32()?;
+    let n = d.count(d.lim.max_components)?;
     let mut components = Vec::with_capacity(n);
     let mut seen = HashSet::with_capacity(n);
     for _ in 0..n {
@@ -1127,6 +1255,7 @@ fn decode_with(bytes: &[u8], key: &IndexKey, budget: usize) -> Result<Catalog, I
         origin: cat_origin,
         components,
         skipped,
+        duplicates,
     })
 }
 
@@ -1177,8 +1306,9 @@ mod tests {
     }
 
     fn payload_of(b: &[u8]) -> &[u8] {
-        // For the empty catalog: the origin string (4 + 7), skipped (4), count (4).
-        &b[b.len() - 19..]
+        // For the empty catalog: the origin string (4 + 7), skipped (4),
+        // duplicates (4), count (4).
+        &b[b.len() - 23..]
     }
 
     /// Decodes the sample catalog after `edit`, which must break one rule.
@@ -1272,6 +1402,7 @@ mod tests {
             let mut d = Dec::new(&bytes);
             d.take(8).unwrap();
             d.u32().unwrap();
+            d.u32().unwrap();
             for _ in 0..2 {
                 let n = d.u16().unwrap() as usize;
                 d.take(n).unwrap();
@@ -1329,8 +1460,8 @@ mod tests {
         assert!(matches!(decode(&bytes, &k), Err(IndexError::Damaged(_))));
         // A string longer than the bytes left.
         let mut bytes = encode(&k, &empty());
-        let hl = bytes.len() - 19;
-        bytes[hl..hl + 4].copy_from_slice(&60_000u32.to_le_bytes());
+        let hl = bytes.len() - 23;
+        bytes[hl..hl + 4].copy_from_slice(&10_000u32.to_le_bytes());
         refix(&mut bytes, &k);
         assert!(matches!(decode(&bytes, &k), Err(IndexError::Damaged(_))));
         bytes[hl..hl + 4].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -1477,8 +1608,9 @@ mod tests {
         // Many tiny strings cost more than their bytes: 4 bytes on disk, 24 charged.
         let mut cat = empty();
         let mut c = catalog().components.swap_remove(0);
-        c.keywords = vec![String::new(); MAX_LIST];
-        c.categories = vec![String::new(); MAX_LIST];
+        let lim = Limits::default();
+        c.keywords = vec![String::new(); lim.keywords];
+        c.categories = vec![String::new(); lim.categories];
         cat.components = (0..200)
             .map(|i| {
                 let mut c = c.clone();
@@ -1490,8 +1622,54 @@ mod tests {
             })
             .collect();
         let bytes = encode(&key(), &cat);
-        // Each component costs at least 5120: 128 strings at 24 and 128 list items at 16.
+        // Each component costs at least 3200: 80 strings at 24 and 80 list
+        // items at 16, on top of the 512.
         assert!(decode_with(&bytes, &key(), MAX_DECODED).is_ok());
-        assert!(decode_with(&bytes, &key(), 200 * 5000).is_err());
+        assert!(decode_with(&bytes, &key(), 200 * 3000).is_err());
+    }
+
+    /// `cost` is what the encoder writes and the decoder charges, exactly: the
+    /// parser relies on it to keep a catalog inside the index's caps.
+    #[test]
+    fn cost_matches_the_encoder_and_the_decoder() {
+        let cat = catalog();
+        let (mut file, mut charge) = (0, 0);
+        for c in &cat.components {
+            let (f, g) = cost(c);
+            file += f;
+            charge += g;
+        }
+        let bytes = encode(&key(), &cat);
+        // The payload around the components: origin, skipped, duplicates, count.
+        let fixed = 4 + cat.origin.len() + 4 + 4 + 4;
+        assert_eq!(bytes.len() - payload_start(&bytes, &key()), fixed + file);
+        let budget = cat.origin.len() + 24 + charge;
+        assert!(decode_with(&bytes, &key(), budget).is_ok());
+        assert!(decode_with(&bytes, &key(), budget - 1).is_err());
+    }
+
+    /// Where the payload starts: after the header of the same key.
+    fn payload_start(bytes: &[u8], k: &IndexKey) -> usize {
+        let _ = bytes;
+        encode(k, &empty()).len() - 23
+    }
+
+    #[test]
+    fn another_parser_revision_is_refused_and_has_its_own_file() {
+        let k = key();
+        let mut bytes = encode(&k, &catalog());
+        // The revision follows the magic and the format version.
+        bytes[12..16].copy_from_slice(&(PARSER_REV + 1).to_le_bytes());
+        refix(&mut bytes, &k);
+        assert_eq!(
+            decode(&bytes, &k),
+            Err(IndexError::BadHeader("parser revision"))
+        );
+        // The name hash holds the revision: the same key hashes differently.
+        let mut h: u32 = 0x811c_9dc5;
+        for b in k.langs.iter().flat_map(|l| l.bytes().chain([0])) {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+        assert_ne!(k.langs_hash(), h);
     }
 }

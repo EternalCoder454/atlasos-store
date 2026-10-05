@@ -5,7 +5,7 @@
 //! what is merely too long is cut. Nothing here panics on input.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -16,6 +16,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
+use super::index;
 use super::lang::LangPrefs;
 use super::{
     Block, Branding, Bundle, Catalog, Component, ContentRating, Icon, Image, Intensity, Kind,
@@ -86,7 +87,7 @@ impl Default for Limits {
             max_retained_bytes: MAX_RETAINED_BYTES,
             max_retained_objects: MAX_RETAINED_OBJECTS,
             max_depth: 32,
-            max_components: 100_000,
+            max_components: MAX_COMPONENTS,
             name: 200,
             summary: 400,
             caption: 300,
@@ -116,9 +117,67 @@ const MAX_DECOMPRESSED: u64 = 150_000_000;
 /// 234,000 objects, 2026-10), with about 4x headroom.
 const MAX_RETAINED_BYTES: usize = 48_000_000;
 const MAX_RETAINED_OBJECTS: usize = 1_000_000;
+const MAX_COMPONENTS: usize = 100_000;
+
+/// The revision of what the parser produces. Bump it whenever a change makes
+/// the parser return something different for the same XML (a fix, a new rule,
+/// a changed cap): the on-disk index stores it, so a cache built by an older
+/// parser is rebuilt instead of served. A change to the shape of
+/// [`Catalog`] or [`Component`] bumps [`super::index::FORMAT`] instead.
+///
+/// 2: empty translations never win, icons keyed by file and width, exactly
+/// one default screenshot, best duplicate kept and counted apart, block
+/// elements inside inline content separated, unknown inline elements keep the
+/// style, `xml:lang="C"` is untagged, one content rating.
+pub const PARSER_REV: u32 = 2;
 
 /// Most spans in one paragraph or list item; text past it is cut.
-const MAX_SPANS: usize = 256;
+pub(crate) const MAX_SPANS: usize = 256;
+/// How many releases a component keeps.
+pub(crate) const RELEASES: usize = 10;
+/// Most sizes kept of an icon.
+pub(crate) const MAX_ICON_SIZES: usize = 16;
+/// Most distinct icon files read before the best is chosen.
+const MAX_ICONS: usize = 8;
+/// Most `<extends>` kept.
+pub(crate) const MAX_EXTENDS: usize = 16;
+/// Most attributes of a content rating kept.
+pub(crate) const MAX_RATING_ATTRS: usize = 64;
+/// Longest component ID, icon file, launchable or extends, in characters.
+const MAX_ID_CHARS: usize = 300;
+/// Longest URL, in characters.
+const MAX_URL_CHARS: usize = 2048;
+/// Longest bundle reference, in characters.
+const MAX_BUNDLE_CHARS: usize = 600;
+/// Longest verification value, in characters.
+const MAX_CUSTOM_CHARS: usize = 256;
+
+impl Limits {
+    /// The longest string the parser can keep, in bytes (4 per character at
+    /// most). The index decoder's string cap, so it can't drift from the
+    /// parser's.
+    pub(crate) fn max_string_bytes(&self) -> usize {
+        [
+            self.name,
+            self.summary,
+            self.caption,
+            self.developer,
+            self.license,
+            self.version,
+            self.keyword,
+            self.category,
+            self.desc_para,
+            MAX_ID_CHARS,
+            MAX_URL_CHARS,
+            MAX_BUNDLE_CHARS,
+            MAX_CUSTOM_CHARS,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        .saturating_mul(4)
+    }
+}
 
 /// What to parse for.
 #[derive(Debug, Clone, Default)]
@@ -138,34 +197,93 @@ pub enum ParseError {
     Io(String),
     /// Not well-formed XML: a syntax error, a mismatched tag, a truncated
     /// file or an invalid character reference. `position` is a byte offset.
-    Xml { position: u64, message: String },
+    Xml {
+        position: u64,
+        message: String,
+        /// The ID of the component being read, when it was known.
+        component: Option<String>,
+    },
     /// A DOCTYPE is never accepted.
     DocType,
     /// An entity other than `&amp; &lt; &gt; &quot; &apos;`.
-    Entity(String),
+    Entity {
+        name: String,
+        /// The ID of the component being read, when it was known.
+        component: Option<String>,
+    },
     /// Elements nested deeper than [`Limits::max_depth`].
-    TooDeep,
+    TooDeep {
+        /// The ID of the component being read, when it was known.
+        component: Option<String>,
+    },
     /// A size or count cap was passed; names which.
-    Limit(&'static str),
+    Limit {
+        what: &'static str,
+        /// The ID of the component being read, when it was known.
+        component: Option<String>,
+    },
     /// Well-formed XML that is not an AppStream catalog.
     NotCatalog,
+}
+
+impl ParseError {
+    /// A cap hit, with no component known yet ([`parse`] adds it).
+    pub(crate) fn limit(what: &'static str) -> ParseError {
+        ParseError::Limit {
+            what,
+            component: None,
+        }
+    }
+
+    /// The component ID the error carries, if any.
+    pub fn component(&self) -> Option<&str> {
+        match self {
+            ParseError::Xml { component, .. }
+            | ParseError::Entity { component, .. }
+            | ParseError::TooDeep { component }
+            | ParseError::Limit { component, .. } => component.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Fills in the component of the variants that carry one, if still empty.
+    fn in_component(mut self, id: Option<String>) -> ParseError {
+        if let ParseError::Xml { component, .. }
+        | ParseError::Entity { component, .. }
+        | ParseError::TooDeep { component }
+        | ParseError::Limit { component, .. } = &mut self
+            && component.is_none()
+        {
+            *component = id;
+        }
+        self
+    }
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::Io(e) => write!(f, "can't read the AppStream data: {e}"),
-            ParseError::Xml { position, message } => {
-                write!(f, "AppStream XML is damaged at byte {position}: {message}")
+            ParseError::Io(e) => write!(f, "can't read the AppStream data: {e}")?,
+            ParseError::Xml {
+                position, message, ..
+            } => {
+                write!(f, "AppStream XML is damaged at byte {position}: {message}")?;
             }
-            ParseError::DocType => write!(f, "AppStream XML has a DOCTYPE, which is refused"),
-            ParseError::Entity(e) => {
-                write!(f, "AppStream XML uses the entity &{e};, which is refused")
+            ParseError::DocType => write!(f, "AppStream XML has a DOCTYPE, which is refused")?,
+            ParseError::Entity { name, .. } => {
+                write!(
+                    f,
+                    "AppStream XML uses the entity &{name};, which is refused"
+                )?;
             }
-            ParseError::TooDeep => write!(f, "AppStream XML is nested too deeply"),
-            ParseError::Limit(what) => write!(f, "AppStream data is too large: {what}"),
-            ParseError::NotCatalog => write!(f, "the file is not an AppStream catalog"),
+            ParseError::TooDeep { .. } => write!(f, "AppStream XML is nested too deeply")?,
+            ParseError::Limit { what, .. } => write!(f, "AppStream data is too large: {what}")?,
+            ParseError::NotCatalog => write!(f, "the file is not an AppStream catalog")?,
         }
+        if let Some(id) = self.component() {
+            write!(f, " (in component {id})")?;
+        }
+        Ok(())
     }
 }
 
@@ -368,24 +486,41 @@ pub fn parse_gz_file(path: &Path, opts: &ParseOptions) -> Result<Catalog, ParseE
         )));
     }
     if meta.len() > opts.limits.max_compressed {
-        return Err(ParseError::Limit("compressed size"));
+        return Err(ParseError::limit("compressed size"));
     }
     let raw = BufReader::with_capacity(64 << 10, file.take(opts.limits.max_compressed));
     parse(flate2::bufread::GzDecoder::new(raw), opts)
 }
 
-/// Parses an uncompressed catalog.
+/// Parses an uncompressed catalog. An error names the component being read
+/// when its ID was already known.
 pub fn parse<R: Read>(reader: R, opts: &ParseOptions) -> Result<Catalog, ParseError> {
     let lim = &opts.limits;
     let guard = Guard::new(reader, lim);
     let mut rd = Reader::from_reader(BufReader::with_capacity(64 << 10, guard));
     let mut st = State::new(opts);
+    match drive(&mut rd, &mut st, lim) {
+        Ok(()) => {}
+        Err(e) => {
+            let id = st.cur_id();
+            return Err(e.in_component(id));
+        }
+    }
+    let id = st.cur_id();
+    st.finish().map_err(|e| e.in_component(id))
+}
+
+fn drive<R: io::BufRead>(
+    rd: &mut Reader<R>,
+    st: &mut State<'_>,
+    lim: &Limits,
+) -> Result<(), ParseError> {
     let mut buf = Vec::with_capacity(8 << 10);
     loop {
         // The previous event's buffer: whatever the scanner let through, no
         // event may be larger than a node.
         if buf.len() > lim.max_token {
-            return Err(ParseError::Limit("one text node or tag"));
+            return Err(ParseError::limit("one text node or tag"));
         }
         buf.clear();
         let ev = match rd.read_event_into(&mut buf) {
@@ -394,7 +529,7 @@ pub fn parse<R: Read>(reader: R, opts: &ParseOptions) -> Result<Catalog, ParseEr
         };
         st.pos = rd.buffer_position();
         match ev {
-            Event::Eof => break,
+            Event::Eof => return Ok(()),
             Event::Start(e) => st.start(&e)?,
             Event::Empty(e) => {
                 st.start(&e)?;
@@ -408,19 +543,19 @@ pub fn parse<R: Read>(reader: R, opts: &ParseOptions) -> Result<Catalog, ParseEr
             Event::Decl(_) | Event::PI(_) | Event::Comment(_) => {}
         }
     }
-    st.finish()
 }
 
 fn map_error(e: quick_xml::Error, position: u64) -> ParseError {
     if let quick_xml::Error::Io(io) = &e {
         if let Some(hit) = io.get_ref().and_then(|i| i.downcast_ref::<LimitHit>()) {
-            return ParseError::Limit(hit.0);
+            return ParseError::limit(hit.0);
         }
         return ParseError::Io(io.to_string());
     }
     ParseError::Xml {
         position,
         message: e.to_string(),
+        component: None,
     }
 }
 
@@ -450,6 +585,9 @@ enum El {
     Item,
     /// An inline element inside a paragraph or item.
     Inline,
+    /// A `<p>`, `<ul>`, `<ol>` or `<li>` inside a paragraph or item: read as
+    /// inline text, set apart by a space.
+    InlineBlock,
     /// Unknown, or in a language not wanted: the whole subtree is ignored.
     Skip,
 }
@@ -584,7 +722,8 @@ struct Cur {
     license: String,
     categories: Vec<String>,
     keywords: LocList,
-    icon: Option<Icon>,
+    /// Every cached icon file with its sizes; the best one is kept.
+    icons: Vec<Icon>,
     urls: Vec<(UrlKind, String)>,
     shots: Vec<Screenshot>,
     shot: Option<ShotB>,
@@ -615,7 +754,7 @@ impl Cur {
                 rank: usize::MAX,
                 v: Vec::new(),
             },
-            icon: None,
+            icons: Vec::new(),
             urls: Vec::new(),
             shots: Vec::new(),
             shot: None,
@@ -671,11 +810,24 @@ impl Inline {
         }
         if !self.cur.is_empty() {
             let style = self.style();
-            self.spans.push(Span {
-                text: std::mem::take(&mut self.cur),
-                style,
-            });
+            // A plain run split by an element that adds no style (or by a
+            // separator) is one span.
+            match self.spans.last_mut() {
+                Some(last) if style == Style::Plain && last.style == Style::Plain => {
+                    last.text.push_str(&self.cur);
+                    self.cur.clear();
+                }
+                _ => self.spans.push(Span {
+                    text: std::mem::take(&mut self.cur),
+                    style,
+                }),
+            }
         }
+    }
+
+    /// Ends a run of text: what follows starts after a space.
+    fn separate(&mut self) {
+        self.pending = self.chars > 0;
     }
 
     fn enter(&mut self, style: Style) {
@@ -692,13 +844,19 @@ impl Inline {
         self.chars += 1;
         self.bytes += c.len_utf8();
         // A space between a plain run and a styled one belongs to the plain
-        // run, so a styled span never starts or ends with a space.
-        if c == ' '
-            && self.cur.is_empty()
-            && self.style() != Style::Plain
-            && let Some(last) = self.spans.last_mut()
-        {
-            last.text.push(' ');
+        // run, so a styled span never starts or ends with a space. Between two
+        // styled spans it is a plain span of its own.
+        if c == ' ' && self.cur.is_empty() && self.style() != Style::Plain {
+            let room = self.spans.len() < MAX_SPANS;
+            match self.spans.last_mut() {
+                Some(last) if last.style == Style::Plain => last.text.push(' '),
+                Some(_) if room => self.spans.push(Span {
+                    text: " ".into(),
+                    style: Style::Plain,
+                }),
+                // At the span cap the space is dropped with the rest.
+                Some(_) | None => {}
+            }
             return;
         }
         self.cur.push(c);
@@ -759,9 +917,15 @@ struct State<'o> {
     stack: Vec<El>,
     pos: u64,
     saw_root: bool,
-    seen: HashSet<String>,
+    /// The index in `comps` of each ID kept.
+    seen: HashMap<String, usize>,
     comps: Vec<Component>,
     skipped: u32,
+    duplicates: u32,
+    /// What the components kept cost in the index file and when decoded,
+    /// see [`index::cost`].
+    index_file: usize,
+    index_charge: usize,
     n_components: usize,
     retained_bytes: usize,
     retained_objects: usize,
@@ -860,9 +1024,12 @@ impl<'o> State<'o> {
             stack: Vec::with_capacity(16),
             pos: 0,
             saw_root: false,
-            seen: HashSet::new(),
+            seen: HashMap::new(),
             comps: Vec::new(),
             skipped: 0,
+            duplicates: 0,
+            index_file: 0,
+            index_charge: 0,
             n_components: 0,
             retained_bytes: 0,
             retained_objects: 0,
@@ -876,6 +1043,7 @@ impl<'o> State<'o> {
         ParseError::Xml {
             position: self.pos,
             message: message.into(),
+            component: None,
         }
     }
 
@@ -925,10 +1093,10 @@ impl<'o> State<'o> {
 
     fn start(&mut self, e: &BytesStart<'_>) -> Result<(), ParseError> {
         if self.stack.len() >= self.opts.limits.max_depth {
-            return Err(ParseError::TooDeep);
+            return Err(ParseError::TooDeep { component: None });
         }
         if e.len() > self.opts.limits.max_tag {
-            return Err(ParseError::Limit("one tag"));
+            return Err(ParseError::limit("one tag"));
         }
         // Every attribute of every element is checked, read or not: a
         // malformed one or an entity beyond the predefined five fails the
@@ -939,7 +1107,7 @@ impl<'o> State<'o> {
         for a in attributes(e) {
             let a = a.map_err(|er| self.xml_err(er.to_string()))?;
             if keys.len() >= self.opts.limits.max_attrs {
-                return Err(ParseError::Limit("attributes on one element"));
+                return Err(ParseError::limit("attributes on one element"));
             }
             if keys.contains(&a.key.as_ref()) {
                 return Err(self.xml_err("duplicate attribute"));
@@ -1013,7 +1181,7 @@ impl<'o> State<'o> {
                         height: n(h),
                     },
                     0,
-                    2048,
+                    MAX_URL_CHARS,
                 ))
             }
             El::Releases if name == "release" => self.begin_release(e),
@@ -1038,7 +1206,7 @@ impl<'o> State<'o> {
                     Some("flathub::verification::login_is_organization") => Key::LoginIsOrg,
                     _ => return Ok(El::Skip),
                 };
-                Ok(self.leaf(Target::Custom(k), 0, 256))
+                Ok(self.leaf(Target::Custom(k), 0, MAX_CUSTOM_CHARS))
             }
             El::Branding if name == "color" => {
                 let [ty, pref] = self.attrs(e, ["type", "scheme_preference"])?;
@@ -1070,14 +1238,22 @@ impl<'o> State<'o> {
                 self.begin_inline(self.opts.limits.desc_para);
                 Ok(El::Item)
             }
-            El::Block | El::Item | El::Inline => {
-                let style = match name {
-                    "em" => Style::Emphasis,
-                    "code" => Style::Code,
-                    _ => Style::Plain,
-                };
+            El::Block | El::Item | El::Inline | El::InlineBlock => {
                 if let Some(d) = self.desc.as_mut() {
+                    // An unknown element keeps the style it is in. A block
+                    // element inside inline content ends the run of text, so
+                    // its text doesn't run into what is around it.
+                    let style = match name {
+                        "em" => Style::Emphasis,
+                        "code" => Style::Code,
+                        _ => d.inline.style(),
+                    };
+                    let block = matches!(name, "p" | "ul" | "ol" | "li");
+                    if block {
+                        d.inline.separate();
+                    }
                     d.inline.enter(style);
+                    return Ok(if block { El::InlineBlock } else { El::Inline });
                 }
                 Ok(El::Inline)
             }
@@ -1111,7 +1287,7 @@ impl<'o> State<'o> {
     fn begin_component(&mut self, e: &BytesStart<'_>) -> Result<El, ParseError> {
         self.n_components += 1;
         if self.n_components > self.opts.limits.max_components {
-            return Err(ParseError::Limit("components"));
+            return Err(ParseError::limit("components"));
         }
         let [ty] = self.attrs(e, ["type"])?;
         self.cur = Some(Cur::new(kind_of(ty.as_deref())));
@@ -1124,7 +1300,7 @@ impl<'o> State<'o> {
             return Ok(El::Skip);
         };
         match name {
-            "id" => Ok(self.leaf(Target::Id, 0, 300)),
+            "id" => Ok(self.leaf(Target::Id, 0, MAX_ID_CHARS)),
             "name" => self.leaf_ranked(e, Target::Name, c.name.rank, lim.name),
             "summary" => self.leaf_ranked(e, Target::Summary, c.summary.rank, lim.summary),
             "project_license" => Ok(self.leaf(Target::License, 0, lim.license)),
@@ -1138,15 +1314,17 @@ impl<'o> State<'o> {
             "screenshots" => Ok(El::Screenshots),
             "releases" => Ok(El::Releases),
             "content_rating" => {
+                // Only the first rating is read; a second one is skipped whole.
+                if c.rating.is_some() {
+                    return Ok(El::Skip);
+                }
                 let [ty] = self.attrs(e, ["type"])?;
                 let scheme = match ty.as_deref() {
                     Some("oars-1.0") => RatingScheme::Oars10,
                     Some("oars-1.1") => RatingScheme::Oars11,
                     _ => RatingScheme::Other,
                 };
-                if let Some(c) = self.cur.as_mut()
-                    && c.rating.is_none()
-                {
+                if let Some(c) = self.cur.as_mut() {
                     c.rating = Some(ContentRating {
                         scheme,
                         attrs: Vec::new(),
@@ -1156,13 +1334,13 @@ impl<'o> State<'o> {
             }
             "custom" => Ok(El::Custom),
             "branding" => Ok(El::Branding),
-            "extends" => Ok(self.leaf(Target::Extends, 0, 300)),
+            "extends" => Ok(self.leaf(Target::Extends, 0, MAX_ID_CHARS)),
             "launchable" => {
                 let [ty] = self.attrs(e, ["type"])?;
                 if ty.as_deref() != Some("desktop-id") {
                     return Ok(El::Skip);
                 }
-                Ok(self.leaf(Target::Launchable, 0, 300))
+                Ok(self.leaf(Target::Launchable, 0, MAX_ID_CHARS))
             }
             "bundle" => {
                 let [ty, rt, sdk] = self.attrs(e, ["type", "runtime", "sdk"])?;
@@ -1170,7 +1348,7 @@ impl<'o> State<'o> {
                     return Ok(El::Skip);
                 }
                 let ok = |v: Option<Cow<'_, str>>| {
-                    v.map(|v| text::clean(&v, 300))
+                    v.map(|v| text::clean(&v, MAX_ID_CHARS))
                         .filter(|v| text::valid_flatpak_target(v))
                 };
                 Ok(self.leaf(
@@ -1179,7 +1357,7 @@ impl<'o> State<'o> {
                         sdk: ok(sdk),
                     },
                     0,
-                    600,
+                    MAX_BUNDLE_CHARS,
                 ))
             }
             "icon" => {
@@ -1189,12 +1367,14 @@ impl<'o> State<'o> {
                     return Ok(El::Skip);
                 }
                 let width = w.and_then(|w| w.trim().parse().ok()).unwrap_or(0);
-                Ok(self.leaf(Target::Icon { width }, 0, 300))
+                Ok(self.leaf(Target::Icon { width }, 0, MAX_ID_CHARS))
             }
             "url" => {
                 let [ty] = self.attrs(e, ["type"])?;
                 match ty.as_deref().and_then(url_kind) {
-                    Some(k) if c.urls.len() < lim.urls => Ok(self.leaf(Target::Url(k), 0, 2048)),
+                    Some(k) if c.urls.len() < lim.urls => {
+                        Ok(self.leaf(Target::Url(k), 0, MAX_URL_CHARS))
+                    }
                     _ => Ok(El::Skip),
                 }
             }
@@ -1275,7 +1455,7 @@ impl<'o> State<'o> {
                     l.buf.push_str(t);
                 }
             }
-            Some(El::Block | El::Item | El::Inline) => {
+            Some(El::Block | El::Item | El::Inline | El::InlineBlock) => {
                 if let Some(d) = self.desc.as_mut() {
                     d.inline.push_str(t);
                 }
@@ -1301,7 +1481,10 @@ impl<'o> State<'o> {
             self.text(s);
             Ok(())
         } else {
-            Err(ParseError::Entity(text::clean(r, 64)))
+            Err(ParseError::Entity {
+                name: text::clean(r, 64),
+                component: None,
+            })
         }
     }
 
@@ -1318,9 +1501,12 @@ impl<'o> State<'o> {
             El::Block => self.end_block(),
             El::List => self.end_list(),
             El::Item => self.end_item(),
-            El::Inline => {
+            El::Inline | El::InlineBlock => {
                 if let Some(d) = self.desc.as_mut() {
                     d.inline.exit();
+                    if el == El::InlineBlock {
+                        d.inline.separate();
+                    }
                 }
             }
             _ => {}
@@ -1354,11 +1540,15 @@ impl<'o> State<'o> {
                 }
             }
             Target::Keyword => {
+                // An empty keyword never takes the slot from a better-ranked one.
+                if s.is_empty() {
+                    return;
+                }
                 if leaf.rank < c.keywords.rank {
                     c.keywords.rank = leaf.rank;
                     c.keywords.v.clear();
                 }
-                if !s.is_empty() && c.keywords.v.len() < lim.keywords {
+                if c.keywords.v.len() < lim.keywords {
                     c.keywords.v.push(s);
                 }
             }
@@ -1368,7 +1558,7 @@ impl<'o> State<'o> {
                 }
             }
             Target::Extends => {
-                if !truncated && text::valid_id(&s) && c.extends.len() < 16 {
+                if !truncated && text::valid_id(&s) && c.extends.len() < MAX_EXTENDS {
                     c.extends.push(s);
                 }
             }
@@ -1390,15 +1580,21 @@ impl<'o> State<'o> {
                 if truncated || !text::valid_icon_file(&s) {
                     return;
                 }
-                let icon = c.icon.get_or_insert_with(|| Icon {
-                    file: s.clone(),
-                    sizes: Vec::new(),
-                });
-                if icon.file == s
-                    && width > 0
-                    && !icon.sizes.contains(&width)
-                    && icon.sizes.len() < 16
-                {
+                // Keyed by file and width: a later size of another file is
+                // kept apart, and the best file is chosen at the end.
+                let at = match c.icons.iter().position(|i| i.file == s) {
+                    Some(i) => i,
+                    None if c.icons.len() < MAX_ICONS => {
+                        c.icons.push(Icon {
+                            file: s,
+                            sizes: Vec::new(),
+                        });
+                        c.icons.len() - 1
+                    }
+                    None => return,
+                };
+                let icon = &mut c.icons[at];
+                if width > 0 && !icon.sizes.contains(&width) && icon.sizes.len() < MAX_ICON_SIZES {
                     icon.sizes.push(width);
                     icon.sizes.sort_unstable();
                 }
@@ -1440,7 +1636,7 @@ impl<'o> State<'o> {
             }
             Target::Rating(id) => {
                 if let (Some(r), Some(i)) = (c.rating.as_mut(), intensity(&s))
-                    && r.attrs.len() < 64
+                    && r.attrs.len() < MAX_RATING_ATTRS
                 {
                     r.attrs.push((id, i));
                 }
@@ -1507,6 +1703,7 @@ impl<'o> State<'o> {
             Some(&mut c.desc)
         };
         if let Some(slot) = slot
+            && !d.blocks.is_empty()
             && slot.as_ref().is_none_or(|(r, _)| d.rank < *r)
         {
             *slot = Some((d.rank, d.blocks));
@@ -1518,13 +1715,21 @@ impl<'o> State<'o> {
         let Some(c) = self.cur.as_mut() else { return };
         if let Some(s) = c.shot.take()
             && !s.images.is_empty()
-            && c.shots.len() < max
         {
-            c.shots.push(Screenshot {
+            let shot = Screenshot {
                 default: s.default,
                 caption: s.caption.s,
                 images: s.images,
-            });
+            };
+            if c.shots.len() < max {
+                c.shots.push(shot);
+            } else if shot.default
+                && !c.shots.iter().any(|x| x.default)
+                && let Some(last) = c.shots.last_mut()
+            {
+                // The marked one past the cap takes the last place.
+                *last = shot;
+            }
         }
     }
 
@@ -1564,10 +1769,6 @@ impl<'o> State<'o> {
             self.skipped = self.skipped.saturating_add(1);
             return Ok(());
         }
-        if !self.seen.insert(c.id.clone()) {
-            self.skipped = self.skipped.saturating_add(1);
-            return Ok(());
-        }
         let mut releases = c.releases;
         releases.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         releases.truncate(RELEASES);
@@ -1599,9 +1800,9 @@ impl<'o> State<'o> {
             license: c.license,
             categories: c.categories,
             keywords: c.keywords.v,
-            icon: c.icon,
+            icon: best_icon(c.icons),
             urls: c.urls,
-            screenshots: c.shots,
+            screenshots: one_default(c.shots),
             releases,
             content_rating: c.rating,
             bundle: c.bundle,
@@ -1610,18 +1811,70 @@ impl<'o> State<'o> {
             verification,
             branding,
         };
+        // A second component of the same ID (the real catalogs have them: one
+        // per branch of a runtime or add-on) replaces the first only when it
+        // is the better one, see `better`. Either way it is counted.
+        let at = self.seen.get(&comp.id).copied();
+        if let Some(i) = at {
+            self.duplicates = self.duplicates.saturating_add(1);
+            if !better(&comp, &self.comps[i]) {
+                return Ok(());
+            }
+        }
         let (bytes, objects) = weigh(&comp);
-        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
-        self.retained_objects = self.retained_objects.saturating_add(objects);
+        let (file, charge) = index::cost(&comp);
+        // A replaced component leaves the totals, the new one enters them.
+        let (ob, oo, of, oc) = at.map_or((0, 0, 0, 0), |i| {
+            let (b, n) = weigh(&self.comps[i]);
+            let (f, g) = index::cost(&self.comps[i]);
+            (b, n, f, g)
+        });
+        let retained_bytes = self.retained_bytes.saturating_sub(ob).saturating_add(bytes);
+        let retained_objects = self
+            .retained_objects
+            .saturating_sub(oo)
+            .saturating_add(objects);
+        let index_file = self.index_file.saturating_sub(of).saturating_add(file);
+        let index_charge = self.index_charge.saturating_sub(oc).saturating_add(charge);
         let lim = &self.opts.limits;
-        if self.retained_bytes > lim.max_retained_bytes {
-            return Err(ParseError::Limit("text kept for the catalog"));
+        let id = Some(comp.id.clone());
+        let over = |what: &'static str| ParseError::Limit {
+            what,
+            component: id.clone(),
+        };
+        if retained_bytes > lim.max_retained_bytes {
+            return Err(over("text kept for the catalog"));
         }
-        if self.retained_objects > lim.max_retained_objects {
-            return Err(ParseError::Limit("objects kept for the catalog"));
+        if retained_objects > lim.max_retained_objects {
+            return Err(over("objects kept for the catalog"));
         }
-        self.comps.push(comp);
+        // What is kept must also fit the index: the same catalog is written
+        // to it and read back, and a file over its caps would be refused
+        // every time and the XML parsed again at each start.
+        if index_file > index::MAX_PAYLOAD || index_charge > index::MAX_CHARGE {
+            return Err(over("catalog too large for the index"));
+        }
+        self.retained_bytes = retained_bytes;
+        self.retained_objects = retained_objects;
+        self.index_file = index_file;
+        self.index_charge = index_charge;
+        match at {
+            Some(i) => self.comps[i] = comp,
+            None => {
+                self.seen.insert(comp.id.clone(), self.comps.len());
+                self.comps.push(comp);
+            }
+        }
         Ok(())
+    }
+
+    /// The ID of the component being read, once its `<id>` has been seen.
+    fn cur_id(&self) -> Option<String> {
+        self.cur
+            .as_ref()
+            .map(|c| &c.id)
+            .filter(|i| !i.is_empty())
+            .cloned()
     }
 
     fn finish(self) -> Result<Catalog, ParseError> {
@@ -1629,6 +1882,7 @@ impl<'o> State<'o> {
             return Err(ParseError::Xml {
                 position: self.pos,
                 message: "the file ends inside an element (truncated?)".into(),
+                component: self.cur_id(),
             });
         }
         if !self.saw_root {
@@ -1638,8 +1892,41 @@ impl<'o> State<'o> {
             origin: self.opts.origin.clone(),
             components: self.comps,
             skipped: self.skipped,
+            duplicates: self.duplicates,
         })
     }
+}
+
+/// Whether `a` is a better copy of a component than `b`, the same ID. One with
+/// a bundle beats one without; then the one with more of its fields filled;
+/// then the one with the newer release. Equal ones keep the first in the file.
+fn better(a: &Component, b: &Component) -> bool {
+    fn key(c: &Component) -> (bool, usize, i64) {
+        let filled = [
+            !c.summary.is_empty(),
+            !c.description.is_empty(),
+            !c.developer.is_empty(),
+            !c.license.is_empty(),
+            !c.categories.is_empty(),
+            !c.keywords.is_empty(),
+            c.icon.is_some(),
+            !c.urls.is_empty(),
+            !c.screenshots.is_empty(),
+            !c.releases.is_empty(),
+            c.content_rating.is_some(),
+            c.launchable.is_some(),
+            c.verification.is_some(),
+            c.branding.is_some(),
+            c.kind != Kind::Other,
+        ];
+        let newest = c.releases.iter().map(|r| r.timestamp).max().unwrap_or(0);
+        (
+            c.bundle.is_some(),
+            filled.into_iter().filter(|f| *f).count(),
+            newest,
+        )
+    }
+    key(a) > key(b)
 }
 
 /// Whether a component of this kind is only listed with a bundle.
@@ -1654,8 +1941,7 @@ pub(crate) fn needs_bundle(kind: Kind) -> bool {
 /// may belong to a different ID than the one installed; the install dialog
 /// shows the real ref.
 pub(crate) fn bundle_matches(component_id: &str, reference: &str) -> bool {
-    bundle_id(reference)
-        .is_some_and(|i| i == component_id || Some(i) == component_id.strip_suffix(".desktop"))
+    bundle_id(reference).is_some_and(|i| i == component_id || i == super::bare_id(component_id))
 }
 
 /// The ID of an `app/ID/arch/branch` or `runtime/ID/arch/branch` reference.
@@ -1720,11 +2006,38 @@ fn weigh(c: &Component) -> (usize, usize) {
     (bytes, objects)
 }
 
-/// How many releases a component keeps.
-const RELEASES: usize = 10;
+/// The icon with the most sizes, then the largest; the first of equals. A
+/// file with no sizes (an SVG) counts as having none.
+fn best_icon(icons: Vec<Icon>) -> Option<Icon> {
+    let key = |i: &Icon| (i.sizes.len(), i.sizes.last().copied().unwrap_or(0));
+    let mut best: Option<Icon> = None;
+    for i in icons {
+        if best.as_ref().is_none_or(|b| key(&i) > key(b)) {
+            best = Some(i);
+        }
+    }
+    best
+}
 
+/// Exactly one default screenshot, when there are any: the first marked one,
+/// moved to the front, or else the first.
+fn one_default(mut shots: Vec<Screenshot>) -> Vec<Screenshot> {
+    let at = shots.iter().position(|s| s.default).unwrap_or(0);
+    for s in &mut shots {
+        s.default = false;
+    }
+    if !shots.is_empty() {
+        let mut first = shots.remove(at);
+        first.default = true;
+        shots.insert(0, first);
+    }
+    shots
+}
+
+/// Takes `s` into `slot` if it ranks better. An empty string never does: a
+/// blank translation must not wipe the fallback.
 fn keep_loc(slot: &mut Loc, rank: usize, s: String) {
-    if rank < slot.rank {
+    if rank < slot.rank && !s.is_empty() {
         slot.rank = rank;
         slot.s = s;
     }

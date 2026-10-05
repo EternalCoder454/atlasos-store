@@ -18,21 +18,40 @@ fn add(out: &mut Vec<String>, lang: &str) {
     }
 }
 
-/// Turns one locale (`pt_BR.UTF-8@euro`) into its languages, most specific
-/// first (`pt_BR`, `pt`). `C`, `POSIX` and empty values give nothing.
-fn expand(locale: &str, out: &mut Vec<String>) {
+/// The language part of a locale (`pt_BR` of `pt_BR.UTF-8@euro`), or `None`
+/// for `C`, `POSIX` and an empty value.
+fn base_of(locale: &str) -> Option<&str> {
     let base = locale.split(['@', '.']).next().unwrap_or("").trim();
-    if base.is_empty() || base == "C" || base == "POSIX" {
-        return;
+    (!(base.is_empty() || base == "C" || base == "POSIX")).then_some(base)
+}
+
+/// Turns one locale (`sr_RS.UTF-8@latin`) into its languages, most specific
+/// first, as gettext does: `sr_RS@latin`, `sr_RS`, `sr@latin`, `sr`. The
+/// `@modifier` names a variant that differs in the data (`ca@valencia`), so it
+/// is tried before the plain language. `C`, `POSIX` and empty values give
+/// nothing.
+fn expand(locale: &str, out: &mut Vec<String>) {
+    let Some(base) = base_of(locale) else { return };
+    let modifier = locale
+        .split_once('@')
+        .map(|(_, m)| m.split('.').next().unwrap_or("").trim())
+        .filter(|m| !m.is_empty());
+    let lang = base.split_once('_').map(|(l, _)| l);
+    if let Some(m) = modifier {
+        add(out, &format!("{base}@{m}"));
     }
     add(out, base);
-    if let Some((lang, _)) = base.split_once('_') {
+    if let (Some(m), Some(lang)) = (modifier, lang) {
+        add(out, &format!("{lang}@{m}"));
+    }
+    if let Some(lang) = lang {
         add(out, lang);
     }
 }
 
 /// The preference list from the values of LANGUAGE (a colon list), LC_ALL,
-/// LC_MESSAGES and LANG. The first of the last three that is set decides.
+/// LC_MESSAGES and LANG. The first of the last three that is set decides. As
+/// in gettext, LANGUAGE is ignored when that locale is `C` or `POSIX`.
 pub fn langs_from_vars(
     language: Option<&str>,
     lc_all: Option<&str>,
@@ -40,13 +59,16 @@ pub fn langs_from_vars(
     lang: Option<&str>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for l in language.unwrap_or("").split(':') {
-        expand(l, &mut out);
-    }
     let locale = [lc_all, lc_messages, lang]
         .into_iter()
         .flatten()
         .find(|v| !v.is_empty());
+    if locale.is_some_and(|l| base_of(l).is_none()) {
+        return out;
+    }
+    for l in language.unwrap_or("").split(':') {
+        expand(l, &mut out);
+    }
     if let Some(l) = locale {
         expand(l, &mut out);
     }
@@ -95,10 +117,13 @@ impl LangPrefs {
 
     /// How good an element with this `xml:lang` is: lower is better, `None`
     /// means not wanted. The wanted languages rank first, then an element
-    /// without `xml:lang`, then `en`. `-` and `_` and letter case don't matter.
+    /// without `xml:lang`, then `en`. `-` and `_` and letter case don't matter,
+    /// and `xml:lang="C"` is the same as no `xml:lang`.
     pub fn rank(&self, xml_lang: Option<&str>) -> Option<usize> {
         let n = self.langs.len();
-        let Some(l) = xml_lang else { return Some(n) };
+        let Some(l) = xml_lang.filter(|l| *l != "C") else {
+            return Some(n);
+        };
         if let Some(i) = self.langs.iter().position(|w| same(w, l)) {
             return Some(i);
         }
@@ -118,8 +143,26 @@ mod tests {
     fn locales() {
         assert_eq!(
             langs_from_vars(None, None, None, Some("pt_BR.UTF-8@euro")),
-            v(&["pt_BR", "pt"])
+            v(&["pt_BR@euro", "pt_BR", "pt@euro", "pt"])
         );
+        assert_eq!(
+            langs_from_vars(None, None, None, Some("sr_RS@latin")),
+            v(&["sr_RS@latin", "sr_RS", "sr@latin", "sr"])
+        );
+        assert_eq!(
+            langs_from_vars(None, None, None, Some("ca@valencia")),
+            v(&["ca@valencia", "ca"])
+        );
+        // LANGUAGE is ignored under a C or POSIX locale, as in gettext.
+        assert_eq!(
+            langs_from_vars(Some("de:fr"), None, None, Some("C")),
+            v(&[])
+        );
+        assert_eq!(
+            langs_from_vars(Some("de"), Some("POSIX"), None, Some("fr")),
+            v(&[])
+        );
+        assert_eq!(langs_from_vars(Some("de"), None, None, None), v(&["de"]));
         assert_eq!(langs_from_vars(None, None, None, Some("C")), v(&[]));
         assert_eq!(
             langs_from_vars(None, Some("POSIX"), None, Some("de_DE")),
@@ -140,5 +183,9 @@ mod tests {
         assert_eq!(p.rank(None), Some(2));
         assert_eq!(p.rank(Some("en")), Some(3));
         assert_eq!(p.rank(Some("de")), None);
+        assert_eq!(p.rank(Some("C")), Some(2));
+        let m = LangPrefs::new(&v(&["ca@valencia", "ca"]));
+        assert_eq!(m.rank(Some("ca@valencia")), Some(0));
+        assert_eq!(m.rank(Some("ca")), Some(1));
     }
 }

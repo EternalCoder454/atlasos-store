@@ -15,11 +15,18 @@ pub use parse::{Limits, ParseError, ParseOptions, parse, parse_gz_file};
 pub struct Catalog {
     /// The remote this came from (`flathub`).
     pub origin: String,
-    /// The components kept, in file order, first of each ID.
+    /// The components kept, in file order of the first of each ID. When an ID
+    /// is listed more than once (one per branch of a runtime or add-on, in the
+    /// real Flathub catalog) the best copy is kept: one with a Flatpak bundle,
+    /// then the most complete, then the one with the newest release, then the
+    /// first.
     pub components: Vec<Component>,
-    /// How many components were dropped: invalid or duplicate ID, no name, or
-    /// no Flatpak bundle.
+    /// How many components were invalid and dropped: bad ID, no name, no
+    /// Flatpak bundle where one is needed, or a bundle of another ID.
     pub skipped: u32,
+    /// How many valid components repeated an ID already kept. Not counted in
+    /// `skipped`; the better copy of the two is the one in `components`.
+    pub duplicates: u32,
 }
 
 /// What a component is, from `<component type>`.
@@ -33,7 +40,9 @@ pub enum Kind {
     Addon,
     /// `runtime`.
     Runtime,
-    /// Anything else, or no type.
+    /// Anything else, or no type. Kept even without a Flatpak bundle, so
+    /// it is not necessarily installable: the UI lists only components with a
+    /// `bundle`, which every other kind has.
     #[default]
     Other,
 }
@@ -187,7 +196,8 @@ pub enum Block {
 /// One app, add-on or runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
-    /// Valid ID, possibly with a `.desktop` suffix.
+    /// Valid ID, possibly with a `.desktop` suffix. Use [`Component::id_bare`]
+    /// to compare it with another component's `extends`.
     pub id: String,
     pub kind: Kind,
     pub name: String,
@@ -213,12 +223,24 @@ pub struct Component {
     pub branding: Option<Branding>,
 }
 
+/// `id` without a trailing `.desktop`. Some components are listed as
+/// `org.example.App.desktop` while others name them `org.example.App` (in
+/// `extends`, in the bundle), and both have to match.
+pub(crate) fn bare_id(id: &str) -> &str {
+    id.strip_suffix(".desktop").unwrap_or(id)
+}
+
 impl Component {
+    /// [`Component::id`] without a trailing `.desktop`. Compare this, not
+    /// `id`, with the entries of [`Component::extends_ids`] when looking for
+    /// the components an add-on extends.
+    pub fn id_bare(&self) -> &str {
+        bare_id(&self.id)
+    }
+
     /// [`Component::extends`] without a trailing `.desktop`, to compare with
-    /// component IDs.
+    /// [`Component::id_bare`].
     pub fn extends_ids(&self) -> impl Iterator<Item = &str> {
-        self.extends
-            .iter()
-            .map(|e| e.strip_suffix(".desktop").unwrap_or(e))
+        self.extends.iter().map(|e| bare_id(e))
     }
 }

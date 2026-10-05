@@ -20,6 +20,22 @@ fn opts(langs: &[&str]) -> ParseOptions {
     }
 }
 
+/// A cap hit in no component, or one whose ID wasn't read yet.
+fn limit(what: &'static str) -> ParseError {
+    ParseError::Limit {
+        what,
+        component: None,
+    }
+}
+
+/// A cap hit while reading the component `id`.
+fn limit_in(what: &'static str, id: &str) -> ParseError {
+    ParseError::Limit {
+        what,
+        component: Some(id.into()),
+    }
+}
+
 fn p(xml: &str) -> Result<Catalog, ParseError> {
     parse(xml.as_bytes(), &opts(&[]))
 }
@@ -134,14 +150,15 @@ fn sample_jan() {
         other => panic!("not a list: {other:?}"),
     }
     assert_eq!(j.screenshots.len(), 6);
-    assert!(!j.screenshots[0].default && j.screenshots[1].default);
-    assert_eq!(j.screenshots[0].caption, "Blank Jan page with 0 threads");
-    assert_eq!(j.screenshots[0].images.len(), 4);
-    let img = &j.screenshots[0].images[0];
+    // The one marked default is moved to the front, and is the only default.
+    assert!(j.screenshots[0].default && j.screenshots[1..].iter().all(|s| !s.default));
+    assert_eq!(j.screenshots[1].caption, "Blank Jan page with 0 threads");
+    assert_eq!(j.screenshots[1].images.len(), 4);
+    let img = &j.screenshots[1].images[0];
     assert!(!img.thumbnail);
     assert_eq!((img.width, img.height), (960, 743));
     assert!(img.url.ends_with("/screenshots/image-1_orig.png"));
-    assert!(j.screenshots[0].images[1].thumbnail);
+    assert!(j.screenshots[1].images[1].thumbnail);
     let versions: Vec<_> = j
         .releases
         .iter()
@@ -305,7 +322,7 @@ fn sample_languages() {
         "Prywatny asystent SI działający bez dostępu do sieci"
     );
     assert_eq!(
-        j.screenshots[0].caption,
+        j.screenshots[1].caption,
         "Pusta strona Jan bez żadnych wątków"
     );
     assert_eq!(j.keywords, ["chatbot", "ai assistant", "offline ai"]);
@@ -351,7 +368,11 @@ fn doctype_and_entities_are_refused() {
     let refused = |r: Result<Catalog, ParseError>| {
         matches!(
             r,
-            Err(ParseError::DocType | ParseError::Limit("markup declaration"))
+            Err(ParseError::DocType
+                | ParseError::Limit {
+                    what: "markup declaration",
+                    ..
+                })
         )
     };
     assert!(refused(p(laughs)));
@@ -365,7 +386,10 @@ fn doctype_and_entities_are_refused() {
         wrap(&comp("a.b", "n", "<summary>&nbsp;</summary>")),
     ] {
         assert!(
-            matches!(p(&bad), Err(ParseError::Entity(_) | ParseError::Xml { .. })),
+            matches!(
+                p(&bad),
+                Err(ParseError::Entity { .. } | ParseError::Xml { .. })
+            ),
             "{bad}"
         );
     }
@@ -391,7 +415,12 @@ fn deep_nesting_fails_fast() {
         "<a>".repeat(10_000),
         "</a>".repeat(10_000)
     );
-    assert_eq!(p(&deep), Err(ParseError::TooDeep));
+    assert_eq!(
+        p(&deep),
+        Err(ParseError::TooDeep {
+            component: Some("a.b".into())
+        })
+    );
     // Unknown subtrees within the limit are skipped, with their text.
     let ok = wrap(&comp(
         "a.b",
@@ -412,7 +441,7 @@ fn deep_nesting_fails_fast() {
         "<a>".repeat(32),
         "</a>".repeat(32)
     );
-    assert_eq!(p(&over), Err(ParseError::TooDeep));
+    assert_eq!(p(&over), Err(ParseError::TooDeep { component: None }));
 }
 
 #[test]
@@ -436,7 +465,7 @@ fn huge_text_node() {
         "n",
         &format!("<summary>{}</summary>", "a".repeat(5 << 20)),
     ));
-    assert_eq!(p(&huge), Err(ParseError::Limit("one text node")));
+    assert_eq!(p(&huge), Err(limit_in("one text node", "a.b")));
 }
 
 #[test]
@@ -626,8 +655,10 @@ fn bad_and_duplicate_ids_and_skips() {
         ]
     );
     assert_eq!(c.components[2].kind, Kind::Other);
-    // 9 bad ids, 1 duplicate, 2 without a name, 2 without a bundle, 2 with a bad one, 1 too long.
-    assert_eq!(c.skipped, 17);
+    // 9 bad ids, 2 without a name, 2 without a bundle, 2 with a bad one, 1
+    // too long: invalid. The repeated ID is counted apart.
+    assert_eq!(c.skipped, 16);
+    assert_eq!(c.duplicates, 1);
 }
 
 #[test]
@@ -644,7 +675,10 @@ fn truncated_and_broken_xml_fail_the_whole_parse() {
     // Truncated mid-sample: whatever was complete is not returned.
     let r = p(&SAMPLE[..SAMPLE.len() / 2]);
     assert!(matches!(r, Err(ParseError::Xml { .. })), "{r:?}");
-    let ParseError::Xml { position, message } = r.unwrap_err() else {
+    let ParseError::Xml {
+        position, message, ..
+    } = r.unwrap_err()
+    else {
         unreachable!()
     };
     assert!(position > 0 && !message.is_empty());
@@ -902,10 +936,7 @@ fn gzip_file_roundtrip_and_bomb() {
     fs::write(&path, &bomb_gz).unwrap();
     let mut o = opts(&[]);
     o.limits.max_decompressed = 1 << 20;
-    assert_eq!(
-        parse_gz_file(&path, &o),
-        Err(ParseError::Limit("decompressed size"))
-    );
+    assert_eq!(parse_gz_file(&path, &o), Err(limit("decompressed size")));
     // With the default cap it is only a lot of blanks.
     assert!(
         parse_gz_file(&path, &opts(&[]))
@@ -919,10 +950,7 @@ fn gzip_file_roundtrip_and_bomb() {
     o.limits.max_compressed = 100;
     let path = tmp("big.xml.gz");
     fs::write(&path, gz(SAMPLE.as_bytes())).unwrap();
-    assert_eq!(
-        parse_gz_file(&path, &o),
-        Err(ParseError::Limit("compressed size"))
-    );
+    assert_eq!(parse_gz_file(&path, &o), Err(limit("compressed size")));
     assert_eq!(Limits::default().max_decompressed, 150_000_000);
     assert_eq!(Limits::default().max_compressed, 64 << 20);
 }
@@ -969,10 +997,7 @@ fn component_count_cap() {
     );
     let mut o = opts(&[]);
     o.limits.max_components = 10;
-    assert_eq!(
-        parse(x.as_bytes(), &o),
-        Err(ParseError::Limit("components"))
-    );
+    assert_eq!(parse(x.as_bytes(), &o), Err(limit("components")));
     o.limits.max_components = 20;
     assert_eq!(parse(x.as_bytes(), &o).unwrap().components.len(), 20);
 }
@@ -1051,7 +1076,7 @@ fn many_attributes_fail_fast() {
     let (r, t) = quick(&format!(
         "<components><component{attrs}></component></components>"
     ));
-    assert!(matches!(r, Err(ParseError::Limit(_))), "{r:?}");
+    assert!(matches!(r, Err(ParseError::Limit { .. })), "{r:?}");
     assert!(t.as_secs() < 2, "{t:?}");
     // Under the tag cap, over the attribute cap.
     let mut attrs = String::new();
@@ -1061,7 +1086,7 @@ fn many_attributes_fail_fast() {
     let (r, t) = quick(&format!(
         "<components><component{attrs}></component></components>"
     ));
-    assert_eq!(r, Err(ParseError::Limit("attributes on one element")));
+    assert_eq!(r, Err(limit("attributes on one element")));
     assert!(t.as_secs() < 2, "{t:?}");
     // Duplicates are still refused.
     assert!(matches!(
@@ -1072,7 +1097,7 @@ fn many_attributes_fail_fast() {
     let big = "x".repeat(70 << 10);
     assert!(matches!(
         p(&format!("<components a=\"{big}\"></components>")),
-        Err(ParseError::Limit(_))
+        Err(ParseError::Limit { .. })
     ));
 }
 
@@ -1089,7 +1114,7 @@ fn nodes_full_of_markers_hit_the_cap_early() {
     ] {
         let t = std::time::Instant::now();
         let r = parse(xml.as_bytes(), &o);
-        assert!(matches!(r, Err(ParseError::Limit(_))), "{r:?}");
+        assert!(matches!(r, Err(ParseError::Limit { .. })), "{r:?}");
         assert!(t.elapsed().as_secs() < 2);
     }
     // Ordinary comments, CDATA and quoted `>` are fine, however many.
@@ -1160,7 +1185,7 @@ fn scanner_cannot_be_desynced_from_the_reader() {
     ] {
         let t = std::time::Instant::now();
         let r = parse(xml.as_bytes(), &o);
-        assert!(matches!(r, Err(ParseError::Limit(_))), "{what}: {r:?}");
+        assert!(matches!(r, Err(ParseError::Limit { .. })), "{what}: {r:?}");
         assert!(t.elapsed().as_secs() < 2, "{what}");
     }
     // quick-xml ends a PI at `<?>` and rejects it; the scanner must agree on
@@ -1181,13 +1206,13 @@ fn retained_budget() {
     o.limits.max_retained_bytes = 100;
     assert_eq!(
         parse(wrap(&comp("a.b", &"n".repeat(150), "")).as_bytes(), &o),
-        Err(ParseError::Limit("text kept for the catalog"))
+        Err(limit_in("text kept for the catalog", "a.b"))
     );
     let mut o = opts(&[]);
     o.limits.max_retained_objects = 5;
     assert_eq!(
         parse(wrap(&comp("a.b", "n", "")).as_bytes(), &o),
-        Err(ParseError::Limit("objects kept for the catalog"))
+        Err(limit_in("objects kept for the catalog", "a.b"))
     );
     // Spans in one paragraph are capped.
     let spans = "<em>a</em>b".repeat(400);
@@ -1201,4 +1226,303 @@ fn retained_budget() {
         panic!("paragraph")
     };
     assert!(s.len() <= 256);
+}
+
+// ---- the reliable pass ----
+
+fn de(xml: &str) -> Component {
+    let o = opts(&["de"]);
+    let c = parse(wrap(xml).as_bytes(), &o).expect("parses");
+    c.components.into_iter().next().expect("kept")
+}
+
+fn spans(c: &Component) -> Vec<(String, Style)> {
+    match &c.description[0] {
+        Block::Paragraph(s) => s.iter().map(|s| (s.text.clone(), s.style)).collect(),
+        other => panic!("not a paragraph: {other:?}"),
+    }
+}
+
+fn desc(inner: &str) -> Component {
+    let c = parse(
+        wrap(&comp(
+            "a.b",
+            "n",
+            &format!("<description>{inner}</description>"),
+        ))
+        .as_bytes(),
+        &opts(&[]),
+    )
+    .expect("parses");
+    c.components.into_iter().next().expect("kept")
+}
+
+#[test]
+fn an_empty_translation_never_wipes_the_fallback() {
+    let c = de(&comp(
+        "a.b",
+        "Foo</name><name xml:lang=\"de\"> ",
+        "<summary>Sum</summary><summary xml:lang=\"de\"> </summary>\
+         <developer><name>Dev</name><name xml:lang=\"de\">\t</name></developer>\
+         <description><p>Text</p></description>\
+         <description xml:lang=\"de\"><p> </p></description>\
+         <keywords><keyword>one</keyword><keyword xml:lang=\"de\"> </keyword></keywords>\
+         <screenshots><screenshot type=\"default\"><caption>Cap</caption>\
+         <caption xml:lang=\"de\"> </caption>\
+         <image type=\"source\">https://example.org/a.png</image></screenshot></screenshots>\
+         <releases><release version=\"1\" timestamp=\"5\"><description><p>Rel</p></description>\
+         <description xml:lang=\"de\"><p></p></description></release></releases>",
+    ));
+    assert_eq!(c.name, "Foo");
+    assert_eq!(c.summary, "Sum");
+    assert_eq!(c.developer, "Dev");
+    assert_eq!(spans(&c), [("Text".to_string(), Style::Plain)]);
+    assert_eq!(c.keywords, ["one"]);
+    assert_eq!(c.screenshots[0].caption, "Cap");
+    assert!(matches!(&c.releases[0].description[0], Block::Paragraph(s) if s[0].text == "Rel"));
+    // A real translation still wins, with an empty one before or after it.
+    let c = de(&comp(
+        "a.b",
+        "Foo</name><name xml:lang=\"de\"> </name><name xml:lang=\"de\">Fu",
+        "",
+    ));
+    assert_eq!(c.name, "Fu");
+}
+
+#[test]
+fn icons_are_keyed_by_file_and_width() {
+    let icon = |f: &str, w: u32| format!("<icon type=\"cached\" width=\"{w}\">{f}</icon>");
+    let x = format!(
+        "{}{}{}{}",
+        icon("a.png", 64),
+        icon("b.png", 64),
+        icon("b.png", 128),
+        icon("a.png", 64)
+    );
+    let c = p(&wrap(&comp("a.b", "n", &x))).unwrap();
+    let i = c.components[0].icon.as_ref().unwrap();
+    assert_eq!(
+        (i.file.as_str(), i.sizes.as_slice()),
+        ("b.png", &[64, 128][..])
+    );
+    // Ties go to the first; an SVG without sizes loses to a PNG with some.
+    let x = format!(
+        "<icon type=\"cached\">x.svg</icon>{}{}",
+        icon("p.png", 64),
+        icon("q.png", 64)
+    );
+    let c = p(&wrap(&comp("a.b", "n", &x))).unwrap();
+    assert_eq!(c.components[0].icon.as_ref().unwrap().file, "p.png");
+}
+
+#[test]
+fn exactly_one_default_screenshot() {
+    let shot = |kind: &str, n: u32| {
+        format!(
+            "<screenshot{kind}><caption>s{n}</caption>\
+             <image type=\"source\">https://example.org/{n}.png</image></screenshot>"
+        )
+    };
+    let run = |shots: String| {
+        let c = p(&wrap(&comp(
+            "a.b",
+            "n",
+            &format!("<screenshots>{shots}</screenshots>"),
+        )))
+        .unwrap();
+        c.components[0].screenshots.clone()
+    };
+    let caps = |s: &[atlas_store_core::appstream::Screenshot]| {
+        s.iter().map(|s| s.caption.clone()).collect::<Vec<_>>()
+    };
+    // None marked: the first is the default.
+    let s = run(format!("{}{}", shot("", 1), shot("", 2)));
+    assert_eq!(caps(&s), ["s1", "s2"]);
+    assert_eq!(
+        s.iter().map(|s| s.default).collect::<Vec<_>>(),
+        [true, false]
+    );
+    // Marked in the middle: moved to the front.
+    let s = run(format!(
+        "{}{}{}",
+        shot("", 1),
+        shot(" type=\"default\"", 2),
+        shot("", 3)
+    ));
+    assert_eq!(caps(&s), ["s2", "s1", "s3"]);
+    assert_eq!(s.iter().filter(|s| s.default).count(), 1);
+    // Two marked: the first marked wins.
+    let s = run(format!(
+        "{}{}",
+        shot(" type=\"default\"", 1),
+        shot(" type=\"default\"", 2)
+    ));
+    assert_eq!(s.iter().filter(|s| s.default).count(), 1);
+    assert!(s[0].default && s[0].caption == "s1");
+    // Marked past the cap of 16: kept, in front.
+    let mut all: String = (0..16).map(|n| shot("", n)).collect();
+    all += &shot(" type=\"default\"", 99);
+    let s = run(all);
+    assert_eq!(s.len(), 16);
+    assert!(s[0].default && s[0].caption == "s99");
+    assert_eq!(s.iter().filter(|s| s.default).count(), 1);
+    assert!(run(String::new()).is_empty());
+}
+
+#[test]
+fn duplicate_ids_keep_the_best_copy_and_are_counted_apart() {
+    let bundle =
+        |id: &str, br: &str| format!("<bundle type=\"flatpak\">app/{id}/x86_64/{br}</bundle>");
+    let a = format!(
+        "<component type=\"addon\"><id>x.y</id><name>bare</name></component>\
+         <component type=\"addon\"><id>x.y</id><name>thin</name>{}</component>\
+         <component type=\"addon\"><id>x.y</id><name>full</name><summary>S</summary>\
+         <project_license>MIT</project_license>{}</component>\
+         <component type=\"addon\"><id>x.y</id><name>full too</name><summary>S</summary>\
+         <project_license>MIT</project_license>{}</component>\
+         <component><id>z.w</id><name>other</name></component>",
+        bundle("x.y", "a"),
+        bundle("x.y", "b"),
+        bundle("x.y", "c"),
+    );
+    let c = p(&wrap(&a)).unwrap();
+    let names: Vec<&str> = c.components.iter().map(|c| c.name.as_str()).collect();
+    // The copy without a bundle is invalid. Of the rest, the most complete
+    // one is kept (the first of two equal ones), in the first one's place.
+    assert_eq!(names, ["full", "other"]);
+    assert_eq!(
+        c.components[0].bundle.as_ref().unwrap().reference,
+        "app/x.y/x86_64/b"
+    );
+    assert_eq!((c.skipped, c.duplicates), (1, 2));
+    // An invalid copy is not a duplicate.
+    let c = p(&wrap(&format!(
+        "{}<component type=\"addon\"><id>q.r</id><name>n</name></component>",
+        comp("q.r", "ok", "")
+    )))
+    .unwrap();
+    assert_eq!((c.components.len(), c.skipped, c.duplicates), (1, 1, 0));
+}
+
+#[test]
+fn errors_name_the_component() {
+    let inside = |extra: &str| {
+        format!(
+            "<components><component type=\"desktop-application\"><id>my.app</id><name>n</name>{extra}</component></components>"
+        )
+    };
+    let e = p(&inside("<summary>&bogus;</summary>")).unwrap_err();
+    assert!(
+        matches!(&e, ParseError::Entity { name, .. } if name == "bogus"),
+        "{e:?}"
+    );
+    assert_eq!(e.component(), Some("my.app"));
+    assert!(e.to_string().contains("my.app"), "{e}");
+    let e = p(&inside(&format!(
+        "{}{}",
+        "<a>".repeat(40),
+        "</a>".repeat(40)
+    )))
+    .unwrap_err();
+    assert!(matches!(e, ParseError::TooDeep { .. }));
+    assert_eq!(e.component(), Some("my.app"));
+    let e = p(&inside("<summary>x</wrong>")).unwrap_err();
+    assert!(matches!(e, ParseError::Xml { .. }));
+    assert_eq!(e.component(), Some("my.app"));
+    let mut o = opts(&[]);
+    o.limits.max_attrs = 1;
+    let e = parse(
+        inside("<url type=\"homepage\" a=\"1\" b=\"2\"/>").as_bytes(),
+        &o,
+    )
+    .unwrap_err();
+    assert_eq!(e.component(), Some("my.app"));
+    // Before an ID is read, or outside a component, there is none.
+    let e = p("<components><component type=\"x\"><name>&bogus;</name></component></components>")
+        .unwrap_err();
+    assert_eq!(e.component(), None);
+    assert_eq!(
+        p("<components><a>&bogus;</a></components>")
+            .unwrap_err()
+            .component(),
+        None
+    );
+}
+
+#[test]
+fn block_elements_in_inline_content_are_separated() {
+    let c = desc("<ul><li>Foo<ul><li>a</li></ul>bar</li></ul>");
+    match &c.description[0] {
+        Block::List { items, .. } => {
+            assert_eq!(items[0], [plain("Foo a bar")]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let c = desc("<p>a<p>b</p>c</p>");
+    assert_eq!(spans(&c), [("a b c".to_string(), Style::Plain)]);
+}
+
+#[test]
+fn unknown_inline_elements_keep_the_style_and_spaces_stay_plain() {
+    let c = desc("<p><em>a<span>b</span>c</em></p>");
+    assert!(spans(&c).iter().all(|s| s.1 == Style::Emphasis));
+    assert_eq!(
+        spans(&c).iter().map(|s| s.0.as_str()).collect::<String>(),
+        "abc"
+    );
+    // A space between two styled spans is a plain span.
+    let c = desc("<p><em>a</em> <code>b</code> <em>c</em></p>");
+    assert_eq!(
+        spans(&c),
+        [
+            ("a".to_string(), Style::Emphasis),
+            (" ".to_string(), Style::Plain),
+            ("b".to_string(), Style::Code),
+            (" ".to_string(), Style::Plain),
+            ("c".to_string(), Style::Emphasis),
+        ]
+    );
+    // Next to plain text it joins that.
+    let c = desc("<p>x <em>a</em> y</p>");
+    assert_eq!(
+        spans(&c),
+        [
+            ("x ".to_string(), Style::Plain),
+            ("a".to_string(), Style::Emphasis),
+            (" y".to_string(), Style::Plain),
+        ]
+    );
+}
+
+#[test]
+fn lang_c_is_untagged_and_a_second_rating_is_skipped() {
+    let c = de(&comp("a.b", "Foo</name><name xml:lang=\"C\">Bar", ""));
+    // `C` is no language: it ties with the untagged name, which came first.
+    assert_eq!(c.name, "Foo");
+    let c = p(&wrap(&comp(
+        "a.b",
+        "n",
+        "<content_rating type=\"oars-1.1\"><content_attribute id=\"violence-fantasy\">mild</content_attribute></content_rating>\
+         <content_rating type=\"oars-1.0\"><content_attribute id=\"drugs-alcohol\">intense</content_attribute></content_rating>",
+    )))
+    .unwrap();
+    let r = c.components[0].content_rating.as_ref().unwrap();
+    assert_eq!(r.scheme, RatingScheme::Oars11);
+    assert_eq!(r.attrs, [("violence-fantasy".to_string(), Intensity::Mild)]);
+}
+
+#[test]
+fn bare_ids() {
+    let c = p(&wrap(&comp(
+        "org.x.App.desktop",
+        "n",
+        "<extends>org.x.Other.desktop</extends><extends>org.x.Third</extends>",
+    )))
+    .unwrap();
+    let k = &c.components[0];
+    assert_eq!(k.id_bare(), "org.x.App");
+    assert_eq!(
+        k.extends_ids().collect::<Vec<_>>(),
+        ["org.x.Other", "org.x.Third"]
+    );
 }

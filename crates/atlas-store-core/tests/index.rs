@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use atlas_store_core::appstream::index::{self, FORMAT, IndexError, IndexKey};
-use atlas_store_core::appstream::{Catalog, ParseOptions, parse};
+use atlas_store_core::appstream::{Catalog, Limits, ParseOptions, parse};
 
 const SAMPLE: &str = include_str!("fixtures/flathub-sample.xml");
 
@@ -218,7 +218,7 @@ fn damaged_files_are_errors() {
     assert!(index::read(&f, &k).is_ok());
     assert!(matches!(
         index::read(&d.join("missing.bin"), &k),
-        Err(IndexError::Io(_))
+        Err(IndexError::Missing)
     ));
     fs::remove_dir_all(&d).unwrap();
 }
@@ -342,7 +342,11 @@ fn a_failed_write_leaves_no_temp_file_and_the_old_index() {
     kb.commit = "cd".repeat(32);
     let blocked = index::cache_file(&d, &kb).unwrap();
     fs::create_dir_all(blocked.join("inside")).unwrap();
-    assert!(index::write(&d, &kb, &cat).is_err());
+    let err = index::write(&d, &kb, &cat).unwrap_err().to_string();
+    assert!(
+        err.contains("move the index into place") && err.contains(&*blocked.to_string_lossy()),
+        "the error names the operation and the path: {err}"
+    );
     let stray: Vec<String> = names(&d)
         .into_iter()
         .filter(|n| n.contains(".tmp."))
@@ -382,31 +386,204 @@ fn write_refuses_a_foreign_catalog_or_format() {
 }
 
 #[test]
-fn a_cache_directory_others_can_write_is_repaired_for_the_owner() {
+fn a_cache_directory_others_can_write_is_refused_by_read_and_repaired_by_write() {
     let d = dir("unsafe");
     let k = key();
     let cat = catalog();
     let f = index::write(&d, &k, &cat).unwrap();
     for mode in [0o770, 0o707, 0o777, 0o775] {
+        // A read refuses and changes nothing; the caller rebuilds.
         fs::set_permissions(&d, fs::Permissions::from_mode(mode)).unwrap();
-        assert_eq!(index::read(&f, &k).unwrap(), cat, "read {mode:o}");
-        assert_eq!(
-            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
-            0o700,
+        assert!(
+            matches!(index::read(&f, &k), Err(IndexError::Io(_))),
             "read {mode:o}"
         );
-        fs::set_permissions(&d, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            mode,
+            "read must not chmod {mode:o}"
+        );
+        // A write repairs the folder, and then the read works.
         index::write(&d, &k, &cat).unwrap();
         assert_eq!(
             fs::metadata(&d).unwrap().permissions().mode() & 0o777,
             0o700,
             "write {mode:o}"
         );
+        assert_eq!(index::read(&f, &k).unwrap(), cat, "read after {mode:o}");
     }
     // A directory that is really a file is refused.
     let file = d.join("plain");
     fs::write(&file, "x").unwrap();
     assert!(index::write(&file, &k, &cat).is_err());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn no_index_file_is_missing_not_a_fault() {
+    let d = dir("missing");
+    let k = key();
+    let f = index::cache_file(&d, &k).unwrap();
+    // Neither the folder nor the file exists yet.
+    assert_eq!(index::read(&f, &k), Err(IndexError::Missing));
+    fs::create_dir_all(&d).unwrap();
+    fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(index::read(&f, &k), Err(IndexError::Missing));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn an_index_written_meanwhile_is_not_removed() {
+    let d = dir("newer");
+    let k1 = key();
+    let mut k2 = key();
+    k2.commit = "cd".repeat(32);
+    let mut k3 = key();
+    k3.commit = "ef".repeat(32);
+    let f1 = index::write(&d, &k1, &empty("flathub")).unwrap();
+    // k2 stands for an index another writer finished after this write began:
+    // a modification time ahead of now.
+    let f2 = index::write(&d, &k2, &empty("flathub")).unwrap();
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&f2)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let f3 = index::write(&d, &k3, &empty("flathub")).unwrap();
+    assert!(f3.exists());
+    assert!(f2.exists(), "a newer index stays");
+    assert!(!f1.exists(), "an older one goes");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// `n` copies of `s` joined by nothing.
+fn rep(s: &str, n: usize) -> String {
+    s.repeat(n)
+}
+
+/// One component with every list and string at the parser's cap, and a few
+/// past it.
+fn every_cap_xml(lim: &Limits) -> String {
+    let more = 3;
+    let mut x = String::from("<components>");
+    x += "<component type=\"desktop-application\"><id>org.example.Caps</id>";
+    x += &format!("<name>{}</name>", rep("n", lim.name + more));
+    x += &format!("<summary>{}</summary>", rep("s", lim.summary + more));
+    x += &format!(
+        "<developer><name>{}</name></developer>",
+        rep("d", lim.developer + more)
+    );
+    x += &format!(
+        "<project_license>{}</project_license>",
+        rep("l", lim.license + more)
+    );
+    x += "<categories>";
+    for i in 0..lim.categories + more {
+        x += &format!("<category>c{i}{}</category>", rep("c", lim.category));
+    }
+    x += "</categories><keywords>";
+    for i in 0..lim.keywords + more {
+        x += &format!("<keyword>k{i}{}</keyword>", rep("k", lim.keyword));
+    }
+    x += "</keywords><description>";
+    // A paragraph with the most spans, one with the most characters, a list
+    // with the most items, and paragraphs up to the block cap.
+    x += &format!("<p>{}</p>", rep("<em>a</em><code>b</code>", 128 + more));
+    x += &format!("<p>{}</p>", rep("p", lim.desc_para + more));
+    x += &format!("<ul>{}</ul>", rep("<li>i</li>", lim.desc_items + more));
+    for i in 0..lim.desc_blocks + more {
+        x += &format!("<p>block {i}</p>");
+    }
+    x += "</description><icon type=\"cached\" width=\"64\">small.png</icon>";
+    for w in 1..=20 {
+        x += &format!("<icon type=\"cached\" width=\"{w}\">big.png</icon>");
+    }
+    for i in 0..lim.urls + more {
+        x += &format!("<url type=\"homepage\">https://example.org/{i}</url>");
+    }
+    x += "<screenshots>";
+    for s in 0..lim.screenshots + more {
+        let kind = if s == lim.screenshots + 1 {
+            " type=\"default\""
+        } else {
+            ""
+        };
+        x += &format!("<screenshot{kind}><caption>shot {s}</caption>");
+        for i in 0..lim.images + more {
+            x += &format!(
+                "<image type=\"source\" width=\"{i}\" height=\"{i}\">https://example.org/{s}/{i}.png</image>"
+            );
+        }
+        x += "</screenshot>";
+    }
+    x += "</screenshots><releases>";
+    for r in 0..70 {
+        x += &format!(
+            "<release version=\"1.{r}\" timestamp=\"{}\"><description><p>r{r}</p></description></release>",
+            1_000 + r
+        );
+    }
+    x += "</releases><content_rating type=\"oars-1.1\">";
+    for i in 0..64 + more {
+        x += &format!("<content_attribute id=\"attr-{i}\">mild</content_attribute>");
+    }
+    x += "</content_rating>";
+    for i in 0..16 + more {
+        x += &format!("<extends>org.example.Base{i}</extends>");
+    }
+    x += "<launchable type=\"desktop-id\">org.example.Caps.desktop</launchable>";
+    x += "<bundle type=\"flatpak\" runtime=\"org.example.Platform/x86_64/1\" \
+          sdk=\"org.example.Sdk/x86_64/1\">app/org.example.Caps/x86_64/stable</bundle>";
+    x += "<custom><value key=\"flathub::verification::verified\">true</value></custom>";
+    x += "<branding><color type=\"primary\" scheme_preference=\"light\">#112233</color></branding>";
+    x += "</component></components>";
+    x
+}
+
+#[test]
+fn a_catalog_at_every_parser_cap_round_trips() {
+    let lim = Limits::default();
+    let o = ParseOptions {
+        origin: "flathub".into(),
+        langs: vec!["de".into()],
+        ..ParseOptions::default()
+    };
+    let cat = parse(every_cap_xml(&lim).as_bytes(), &o).expect("parses");
+    assert_eq!(cat.components.len(), 1, "{cat:?}");
+    let c = &cat.components[0];
+    // Each one is at its cap, not under it.
+    assert_eq!(c.name.chars().count(), lim.name);
+    assert_eq!(c.summary.chars().count(), lim.summary);
+    assert_eq!(c.developer.chars().count(), lim.developer);
+    assert_eq!(c.license.chars().count(), lim.license);
+    assert_eq!(c.categories.len(), lim.categories);
+    assert_eq!(c.keywords.len(), lim.keywords);
+    assert_eq!(c.description.len(), lim.desc_blocks);
+    assert_eq!(c.urls.len(), lim.urls);
+    assert_eq!(c.screenshots.len(), lim.screenshots);
+    assert!(c.screenshots.iter().all(|s| s.images.len() == lim.images));
+    assert_eq!(c.releases.len(), 10);
+    assert_eq!(c.content_rating.as_ref().unwrap().attrs.len(), 64);
+    assert_eq!(c.extends.len(), 16);
+    let icon = c.icon.as_ref().unwrap();
+    assert_eq!((icon.file.as_str(), icon.sizes.len()), ("big.png", 16));
+    // The default one past the cap was kept, and is the only default, first.
+    assert!(c.screenshots[0].default);
+    assert_eq!(c.screenshots.iter().filter(|s| s.default).count(), 1);
+    assert_eq!(
+        c.screenshots[0].caption,
+        format!("shot {}", lim.screenshots + 1)
+    );
+    assert!(
+        matches!(&c.description[0], atlas_store_core::appstream::Block::Paragraph(s) if s.len() == 256)
+    );
+
+    let d = dir("caps");
+    let k = key();
+    let f = index::write(&d, &k, &cat).expect("the index is written");
+    assert_eq!(index::read(&f, &k).expect("and read back"), cat);
     fs::remove_dir_all(&d).unwrap();
 }
 
