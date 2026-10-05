@@ -51,6 +51,9 @@ arguments are parsed in Rust (`atlas_store_core::launch`), never in C++ or
 QML:
 
 - `--app <id>`, `--search <text>`, `--page home|installed|updates|sources`
+- `--remove <id>`: the app's page with its Remove confirmation open (the
+  launcher's Uninstall; it starts `atlas-store --remove <id>` with
+  `XDG_ACTIVATION_TOKEN` set). The user still confirms there.
 - `appstream://<id>`, `appstream:<id>`, `flatpak+https://...`
 - `.flatpakref`, `.flatpakrepo`, `.flatpak` and `.rpm` paths or `file:` URLs
 
@@ -72,8 +75,8 @@ its user name, query or fragment, and an option without its value.
 
 Once requests open dialogs: one launch opens at most one confirmation (the
 last request that needs one), a new launch never replaces a dialog the user
-is answering, the dialog's default button is never Install or Add, and it
-ignores input for its first half second.
+is answering, the dialog's default button is never Install, Add or Remove,
+and it ignores input for its first half second.
 
 ## Trust
 

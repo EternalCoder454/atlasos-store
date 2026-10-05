@@ -69,6 +69,9 @@ pub enum Request {
     Page(Page),
     /// An app's page, by Flatpak or AppStream ID.
     App(String),
+    /// An app's page with its Remove confirmation open (the launcher's
+    /// Uninstall). Nothing is removed until the user confirms there.
+    Remove(String),
     Search(String),
     File(FileKind, PathBuf),
     /// A `.flatpakref` to download (from a `flatpak+https:` link).
@@ -130,9 +133,9 @@ pub fn parse(args: &[String], cwd: &Path) -> Launch {
     launch
 }
 
-/// `--app`, `--search` or `--page`, with its value inline (`--app=ID`) or
-/// next. Anything else starting with `-` is refused, so a link or file name
-/// can never become an option.
+/// `--app`, `--search`, `--page` or `--remove`, with its value inline
+/// (`--app=ID`) or next. Anything else starting with `-` is refused, so a
+/// link or file name can never become an option.
 fn option<'a>(
     arg: &str,
     rest: &mut impl Iterator<Item = &'a String>,
@@ -141,7 +144,7 @@ fn option<'a>(
         Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
         _ => (arg, None),
     };
-    if !matches!(flag, "--app" | "--search" | "--page") {
+    if !matches!(flag, "--app" | "--remove" | "--search" | "--page") {
         return Err("unknown option");
     }
     let value = inline
@@ -152,6 +155,7 @@ fn option<'a>(
     }
     match flag {
         "--app" => app_id(&value).map(Request::App).ok_or("not an app ID"),
+        "--remove" => app_id(&value).map(Request::Remove).ok_or("not an app ID"),
         "--search" => search_text(&value)
             .map(Request::Search)
             .ok_or("empty search"),
@@ -532,6 +536,17 @@ mod tests {
             p(&["--app", "org.gimp.GIMP"]).0,
             vec![Request::App("org.gimp.GIMP".into())]
         );
+        assert_eq!(
+            p(&["--remove", "org.gimp.GIMP"]).0,
+            vec![Request::Remove("org.gimp.GIMP".into())]
+        );
+        assert_eq!(
+            p(&["--remove=org.gimp.GIMP"]).0,
+            vec![Request::Remove("org.gimp.GIMP".into())]
+        );
+        assert!(p(&["--remove", "../evil"]).0.is_empty());
+        assert!(p(&["--remove"]).0.is_empty());
+        assert_eq!(p(&["--", "--remove", "org.gimp.GIMP"]).0.len(), 0);
         assert_eq!(
             p(&["--app=org.kde.kate"]).0,
             vec![Request::App("org.kde.kate".into())]

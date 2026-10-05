@@ -21,9 +21,9 @@ pub mod qobject {
         #[qinvokable]
         fn activate(self: Pin<&mut Backend>, args: &QStringList, cwd: &QString);
 
-        /// One request: `kind` is `page`, `app`, `search`, `ref`, `repo`,
-        /// `bundle`, `rpm` or `refUrl`; `value` the page name, ID, text,
-        /// path or URL.
+        /// One request: `kind` is `page`, `app`, `search`, `remove`, `ref`,
+        /// `repo`, `bundle`, `rpm` or `refUrl`; `value` the page name, ID,
+        /// text, path or URL.
         #[qsignal]
         fn requested(self: Pin<&mut Backend>, kind: QString, value: QString);
 
@@ -91,6 +91,7 @@ fn describe(request: &Request) -> (&'static str, String) {
     match request {
         Request::Page(p) => ("page", p.name().to_string()),
         Request::App(id) => ("app", id.clone()),
+        Request::Remove(id) => ("remove", id.clone()),
         Request::Search(q) => ("search", q.clone()),
         Request::RefUrl(url) => ("refUrl", url.clone()),
         Request::File(kind, path) => (

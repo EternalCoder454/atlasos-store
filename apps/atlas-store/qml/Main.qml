@@ -41,6 +41,7 @@ AtlasWindow {
     // top of the place the window is on.
     readonly property var requestHeadings: ({
             app: qsTr("App Page"),
+            remove: qsTr("Remove App"),
             search: qsTr("Search"),
             ref: qsTr("App from a File"),
             repo: qsTr("Source from a File"),
