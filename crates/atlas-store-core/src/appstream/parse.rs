@@ -131,7 +131,8 @@ const MAX_COMPONENTS: usize = 100_000;
 /// style, `xml:lang="C"` is untagged, one content rating.
 ///
 /// 3: the duplicate that wins is the one with a bundle, then the newest
-/// release, then the newest branch, then the most fields.
+/// release, then the newest branch (numbers compared as numbers, one too
+/// long for 64 bits as the largest), then the most fields.
 pub const PARSER_REV: u32 = 3;
 
 /// Most spans in one paragraph or list item; text past it is cut.
@@ -1954,7 +1955,8 @@ fn branch_key(c: &Component) -> BranchKey {
         .split('.')
         .map(|p| {
             if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
-                p.parse().ok()
+                // Too long for a u64: still a number, and the largest.
+                Some(p.parse().unwrap_or(u64::MAX))
             } else {
                 None
             }

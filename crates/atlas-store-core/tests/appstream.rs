@@ -1424,6 +1424,10 @@ fn the_newest_branch_wins_among_duplicates_without_releases() {
     // Numbers compare as numbers, not text.
     assert_eq!(win(&[copy("9.10", ""), copy("10.2", "")]), "10.2");
     assert_eq!(win(&[copy("24.08.1", ""), copy("24.08", "")]), "24.08.1");
+    // A number too long for 64 bits is still the largest number, not a name.
+    let huge = "99999999999999999999999.1";
+    assert_eq!(win(&[copy(huge, ""), copy("24.08", "")]), huge);
+    assert_eq!(win(&[copy("24.08", ""), copy(huge, "")]), huge);
     // A numeric branch beats a name; names compare as strings.
     assert_eq!(win(&[copy("stable", ""), copy("1.0", "")]), "1.0");
     assert_eq!(win(&[copy("stable", ""), copy("beta", "")]), "stable");

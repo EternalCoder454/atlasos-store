@@ -831,17 +831,23 @@ const CLOCK_SLACK: Duration = Duration::from_secs(5);
 
 /// The later of a file's modification and status-change times. The first is
 /// set when the data is written, the second also by the rename that puts the
-/// file in place, so a slow sync can't make a fresh file look old.
-fn changed_at(m: &fs::Metadata) -> SystemTime {
-    let at = |secs: i64, nanos: i64| {
-        let n = Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64);
-        if secs >= 0 {
-            SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64) + n
-        } else {
-            SystemTime::UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs()) + n
-        }
-    };
-    at(m.mtime(), m.mtime_nsec()).max(at(m.ctime(), m.ctime_nsec()))
+/// file in place, so a slow sync can't make a fresh file look old. `None`
+/// when either time is out of `SystemTime`'s range: such a file stays.
+fn changed_at(m: &fs::Metadata) -> Option<SystemTime> {
+    let mtime = unix_time(m.mtime(), m.mtime_nsec())?;
+    Some(mtime.max(unix_time(m.ctime(), m.ctime_nsec())?))
+}
+
+/// A file time as stat gives it, or `None` when it doesn't fit `SystemTime`.
+fn unix_time(secs: i64, nanos: i64) -> Option<SystemTime> {
+    let n = Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64);
+    let s = Duration::from_secs(secs.unsigned_abs());
+    if secs >= 0 {
+        SystemTime::UNIX_EPOCH.checked_add(s)
+    } else {
+        SystemTime::UNIX_EPOCH.checked_sub(s)
+    }
+    .and_then(|t| t.checked_add(n))
 }
 
 /// Whether a file last changed at `t` stays: an index when `started <= t` and
@@ -892,7 +898,7 @@ fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr, started: Syste
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        let fresh = keep_file(changed_at(&meta), started, now, temp);
+        let fresh = changed_at(&meta).is_none_or(|t| keep_file(t, started, now, temp));
         if fresh {
             continue;
         }
@@ -1915,6 +1921,21 @@ mod tests {
         assert!(!keep_file(at(-3600), started, now, true));
         assert!(keep_file(at(5), started, now, true));
         assert!(!keep_file(at(3600), started, now, true));
+    }
+
+    #[test]
+    fn file_times_out_of_range_are_not_a_panic() {
+        assert_eq!(unix_time(0, 0), Some(SystemTime::UNIX_EPOCH));
+        assert_eq!(
+            unix_time(-2, 500),
+            Some(SystemTime::UNIX_EPOCH - Duration::from_secs(2) + Duration::from_nanos(500))
+        );
+        // Linux's SystemTime holds every i64 second; the extremes convert
+        // (no panic) and keep their order.
+        let max = unix_time(i64::MAX, 999_999_999);
+        let min = unix_time(i64::MIN, 0);
+        assert!(min.is_some() && max.is_some() && min < max);
+        assert!(unix_time(1_800_000_000, -1).is_some());
     }
 
     /// Where the payload starts: after the header of the same key.
