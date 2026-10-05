@@ -1,0 +1,25 @@
+[Application]
+name=org.mozilla.firefox
+runtime=org.freedesktop.Platform/x86_64/24.08
+sdk=org.freedesktop.Sdk/x86_64/24.08
+base=app/org.mozilla.firefox.BaseApp/x86_64/24.08
+command=firefox
+
+[Context]
+shared=ipc;network;
+sockets=pcsc;cups;pulseaudio;wayland;fallback-x11;
+devices=all;
+filesystems=xdg-download;/run/.heim_org.h5l.kcm-socket;
+
+[Session Bus Policy]
+org.freedesktop.ScreenSaver=talk
+org.gnome.SessionManager=talk
+org.freedesktop.Notifications=talk
+org.mpris.MediaPlayer2.firefox.*=own
+org.a11y.Bus=talk
+
+[Environment]
+GTK_PATH=/app/lib/gtk-3.0
+
+[Extension org.mozilla.firefox.systemconfig]
+directory=share/runtime/systemconfig

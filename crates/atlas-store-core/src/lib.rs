@@ -6,4 +6,5 @@ pub mod appstream;
 pub mod flatpakref;
 pub mod keyfile;
 pub mod launch;
+pub mod permissions;
 pub mod text;

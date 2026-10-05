@@ -1,0 +1,23 @@
+[Application]
+name=com.valvesoftware.Steam
+runtime=org.freedesktop.Platform/x86_64/24.08
+sdk=org.freedesktop.Sdk/x86_64/24.08
+command=/app/bin/steam-wrapper
+
+[Context]
+shared=network;ipc;
+sockets=x11;pulseaudio;wayland;
+devices=all;
+features=bluetooth;devel;multiarch;
+filesystems=xdg-pictures:ro;xdg-music:ro;/run/udev:ro;xdg-run/app/com.discordapp.Discord:create;
+
+[Session Bus Policy]
+org.freedesktop.Notifications=talk
+org.kde.StatusNotifierWatcher=talk
+org.freedesktop.PowerManagement=talk
+
+[System Bus Policy]
+org.freedesktop.UDisks2=talk
+
+[Environment]
+LD_LIBRARY_PATH=/app/lib
