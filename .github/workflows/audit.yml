@@ -1,0 +1,39 @@
+name: Audit
+
+# Known vulnerabilities, unmaintained and yanked crates in the locked
+# dependencies (RustSec), and crates only from crates.io and atlas-framework
+# (settings in deny.toml). Weekly too, so a new
+# advisory against an unchanged lock is still seen.
+on:
+  push:
+    branches: [main, beta]
+    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'deny.toml', '.github/workflows/audit.yml']
+  pull_request:
+    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'deny.toml', '.github/workflows/audit.yml']
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Tools
+        run: dnf -y install git-core cargo cargo-deny
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # A fresh container has no advisory database: if it can't be fetched,
+      # the check fails rather than passing.
+      - name: cargo deny
+        run: cargo deny --locked check advisories sources

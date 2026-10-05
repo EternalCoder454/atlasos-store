@@ -3,15 +3,19 @@ name: CI
 on:
   push:
     branches: [main, beta]
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # One group per commit on main, so no run there is dropped while pending.
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Every run on main finishes, so each commit there has a result.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Actions and atlas-framework are pinned by commit (the tag in the comment):
@@ -27,30 +31,55 @@ jobs:
   # Atlas.Ui (atlas-ui), which the app builds against, is in no repository:
   # build atlas-framework's RPMs, at the release the crates are pinned to,
   # for the jobs below.
+  # The RPMs are cached per pinned commit and month (a Fedora Qt update
+  # gets fresh ones within a month), outside the checkout, which
+  # actions/checkout would empty. Only runs on main write a cache other
+  # refs read; the checksums catch a damaged entry.
   framework:
     name: atlas-framework RPMs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container: registry.fedoraproject.org/fedora:44
     steps:
-      - name: Tools for checkout
-        run: dnf -y install git-core tar
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Tools for checkout and cache
+        run: dnf -y install git-core tar zstd
+      - id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /atlas-framework-rpms
+          key: atlas-framework-rpms-f44-7a114a112bd1fff4fe3d6facc81b0a81e5d2db30-${{ steps.month.outputs.month }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
           repository: EternalCoder454/atlas-framework
           ref: 7a114a112bd1fff4fe3d6facc81b0a81e5d2db30 # v1.4.0
       - name: Build the RPMs
-        run: packaging/build-rpm.sh "$GITHUB_WORKSPACE/out"
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          packaging/build-rpm.sh /atlas-framework-rpms
+          cd /atlas-framework-rpms && sha256sum -- *.rpm > SHA256SUMS
+      - name: Check the cached RPMs
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          cd /atlas-framework-rpms
+          sha256sum --strict -c SHA256SUMS
+          # Nothing unlisted is uploaded either.
+          diff <(ls -1 -- *.rpm) <(awk '{print $2}' SHA256SUMS | sort)
+        shell: bash
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-framework-rpms
-          path: out/*.rpm
+          path: /atlas-framework-rpms/*.rpm
           if-no-files-found: error
 
   check:
     name: fmt, clippy, tests
     needs: framework
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Tools for checkout and cache
@@ -89,6 +118,7 @@ jobs:
     name: RPM
     needs: framework
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Tools for checkout

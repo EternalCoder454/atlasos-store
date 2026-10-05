@@ -1,0 +1,14 @@
+# cargo deny check advisories sources (CI: .github/workflows/audit.yml).
+# Each entry in `ignore` needs a reason and a date to look at it again.
+[advisories]
+# Unmaintained crates count only for this workspace's direct dependencies;
+# yanked versions in the lock always fail.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+# Crates come from crates.io and atlas-framework's repository only.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/EternalCoder454/atlas-framework"]
