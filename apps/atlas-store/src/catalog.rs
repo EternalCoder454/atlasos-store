@@ -156,12 +156,12 @@ const ROLES: [&str; 7] = [
     "sourceTitle",
 ];
 /// The icon size the grids ask the catalog for.
-const ICON_SIZE: u16 = 64;
+pub(crate) const ICON_SIZE: u16 = 64;
 
 /// The library queries run on: replaced as a whole, on the GUI thread.
 static LIBRARY: RwLock<Option<Arc<Library>>> = RwLock::new(None);
 
-fn library() -> Option<Arc<Library>> {
+pub(crate) fn library() -> Option<Arc<Library>> {
     LIBRARY
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -246,8 +246,7 @@ fn read_all(cancel: &CancelToken, langs: &[String]) -> (Built, Vec<(Scope, Strin
 }
 
 /// The worker: load, hand over, refresh what is stale, load again, hand over.
-fn work(thread: CxxQtThread<qobject::Catalog>) {
-    let cancel = CancelToken::new();
+fn work(thread: CxxQtThread<qobject::Catalog>, cancel: CancelToken) {
     let langs = langs_from_env();
     let (built, stale) = read_all(&cancel, &langs);
     let sent = thread.queue(move |catalog| catalog.apply(built));
@@ -287,25 +286,43 @@ pub struct CatalogRust {
     missing_count: i32,
     revision: i32,
     counts: Vec<i32>,
+    /// A worker thread is alive (it keeps refreshing after `loading` ends).
+    /// Cleared only by the closure the worker queues as it ends.
+    worker_running: bool,
+    /// The running worker's token: cancelled when the Catalog is dropped, so
+    /// quitting mid-refresh never holds the Updater's lock.
+    cancel: CancelToken,
+}
+
+impl Drop for CatalogRust {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl qobject::Catalog {
     /// Starts the worker; the first result sets `ready`.
     pub fn start(mut self: Pin<&mut Self>) {
-        if *self.loading() {
+        if self.rust().worker_running {
             return;
         }
         let thread = self.qt_thread();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().cancel = cancel.clone();
         let spawned = std::thread::Builder::new()
             .name("atlas-store-catalog".into())
             .spawn(move || {
-                if catch_unwind(AssertUnwindSafe(|| work(thread.clone()))).is_err() {
+                if catch_unwind(AssertUnwindSafe(|| work(thread.clone(), cancel))).is_err() {
                     log::error!("the catalog worker panicked");
                     let _ = thread.queue(|c| c.failed("The catalogs could not be read."));
                 }
+                let _ = thread.queue(|mut c| c.as_mut().rust_mut().worker_running = false);
             });
         match spawned {
-            Ok(_) => self.as_mut().set_loading(true),
+            Ok(_) => {
+                self.as_mut().rust_mut().worker_running = true;
+                self.as_mut().set_loading(true);
+            }
             Err(e) => {
                 log::error!("could not start the catalog worker: {e}");
                 self.failed("The catalogs could not be read.");
@@ -414,7 +431,7 @@ fn file_url(path: &std::path::Path) -> String {
 /// The icon's `file:` URL, only when the icon is a real file in real folders:
 /// a hostile remote's checkout may make `icons/` or the size folder or the
 /// file a link (to `/dev/zero`, to the user's pictures). Any doubt: no icon.
-fn safe_icon(path: &Path) -> Option<String> {
+pub(crate) fn safe_icon(path: &Path) -> Option<String> {
     const MAX_ICON: u64 = 1024 * 1024;
     if !path.is_absolute() {
         return None;

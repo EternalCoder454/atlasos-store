@@ -25,7 +25,12 @@ Item {
         model.browse(page.categoryKey, sortControl.currentIndex === 1 ? "updated" : "name", verified.checked, free.checked);
     }
 
-    Component.onCompleted: run()
+    // The model is shared: empty it first so the previous category's apps
+    // never show while this one is being listed.
+    Component.onCompleted: {
+        model.clear();
+        run();
+    }
 
     Connections {
         target: page.catalog

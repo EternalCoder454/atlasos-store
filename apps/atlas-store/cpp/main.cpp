@@ -23,6 +23,7 @@ struct AtlasObjects {
     void *catalog;
     void *search;
     void *browse;
+    void *jobs;
 };
 extern "C" AtlasObjects atlas_objects_new();
 
@@ -95,6 +96,7 @@ int main(int argc, char *argv[])
     std::unique_ptr<QObject> catalog(static_cast<QObject *>(made.catalog));
     std::unique_ptr<QObject> searchModel(static_cast<QObject *>(made.search));
     std::unique_ptr<QObject> browseModel(static_cast<QObject *>(made.browse));
+    std::unique_ptr<QObject> jobs(static_cast<QObject *>(made.jobs));
     auto engine = std::make_unique<QQmlApplicationEngine>();
     QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine->setInitialProperties({
@@ -102,6 +104,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("catalog"), QVariant::fromValue(catalog.get())},
         {QStringLiteral("searchModel"), QVariant::fromValue(searchModel.get())},
         {QStringLiteral("browseModel"), QVariant::fromValue(browseModel.get())},
+        {QStringLiteral("jobs"), QVariant::fromValue(jobs.get())},
     });
     engine->loadFromModule("net.eterneon.atlas.store", "Main");
     if (engine->rootObjects().isEmpty()) {

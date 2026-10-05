@@ -40,14 +40,18 @@ Item {
 
     AtlasSpinner {
         anchors.centerIn: parent
-        visible: root.kind === 0
+        visible: root.kind === 0 || root.catalog.loading
         running: visible
+        z: 1
     }
 
     AtlasEmptyState {
         id: state
         anchors.fill: parent
         visible: root.kind !== 0
+        // A reload in progress shows the spinner; Try Again can't start another.
+        enabled: !root.catalog.loading
+        opacity: root.catalog.loading ? 0.4 : 1
         symbol: root.kind === 1 ? Symbols.Dns : root.kind === 2 ? Symbols.Download : root.kind === 3 ? Symbols.Error : Symbols.Storefront
         title: root.kind === 1 ? qsTr("No Sources") : root.kind === 2 ? qsTr("Catalog Not Downloaded") : root.kind === 3 ? qsTr("Could Not Read the Catalogs") : qsTr("No Apps")
         text: root.kind === 1 ? qsTr("Add or enable a source to find apps. Sources are managed in the Sources place.") : root.kind === 2 ? qsTr("The app catalog has not been downloaded yet. It is refreshed while the Store is open, and needs a network connection.") : root.kind === 3 ? root.catalog.errorText : qsTr("The enabled sources list no apps.")

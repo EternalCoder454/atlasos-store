@@ -15,6 +15,8 @@ AtlasWindow {
     required property var catalog
     required property var searchModel
     required property var browseModel
+    // The Flatpak jobs and the installed list (src/jobs.rs).
+    required property var jobs
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -75,13 +77,44 @@ AtlasWindow {
         stack.push(categoryPage, { categoryKey: key, title: root.categories[index].text });
     }
 
-    // The app's own page is a later item: until then the request is shown.
+    // An app's page; not opened again when it already is the page shown.
     function openApp(id) {
-        root.showMessage({
-            title: qsTr("Not Yet Available"),
-            heading: root.requestHeadings.app,
-            text: id
-        });
+        if (stack.currentItem && stack.currentItem.isApp === true && stack.currentItem.appId === id) {
+            return;
+        }
+        if (stack.currentItem && stack.currentItem.message === true) {
+            stack.pop();
+        }
+        stack.push(appPage, { appId: id });
+    }
+
+    // The Remove confirmation for an installed app.
+    function askRemove(id, name, scope, ref) {
+        // Every installation of the ID shares one data folder.
+        const shared = (JSON.parse(root.jobs.appInfo(id)).installs ?? []).length > 1;
+        removeDialog.show(id, name, scope, ref, shared);
+    }
+
+    // `--remove <id>`: the app's page with the confirmation open, once the
+    // installed list is known (the user still confirms).
+    property string pendingRemove: ""
+
+    function openRemove(id) {
+        root.openApp(id);
+        if (root.jobs.installedReady) {
+            root.askRemoveInstalled(id);
+        } else {
+            root.pendingRemove = id;
+        }
+    }
+
+    function askRemoveInstalled(id) {
+        // With several installations the user picks one on the page.
+        const info = JSON.parse(root.jobs.appInfo(id));
+        if ((info.installs ?? []).length !== 1) {
+            return;
+        }
+        root.askRemove(id, info.name, info.installs[0].scope, info.installs[0].ref);
     }
 
     // What a launch asked for. Pages for apps, searches, files and links
@@ -153,6 +186,10 @@ AtlasWindow {
                 root.openApp(value);
                 return;
             }
+            if (kind === "remove") {
+                root.openRemove(value);
+                return;
+            }
             root.showMessage({
                 title: qsTr("Not Yet Available"),
                 heading: root.requestHeadings[kind] ?? kind,
@@ -168,6 +205,47 @@ AtlasWindow {
                 text: text
             });
         }
+    }
+
+    Connections {
+        target: root.jobs
+        function onPlanReady(appId) {
+            installDialog.show();
+        }
+        function onUnusedReady(count) {
+            if (count > 0) {
+                unusedDialog.show();
+            }
+        }
+        function onInstalledReadyChanged() {
+            if (root.jobs.installedReady && root.pendingRemove.length > 0) {
+                const id = root.pendingRemove;
+                root.pendingRemove = "";
+                root.askRemoveInstalled(id);
+            }
+        }
+    }
+
+    // Icons of installed apps come from the catalog: read the list again
+    // when a new library arrives.
+    Connections {
+        target: root.catalog
+        function onRevisionChanged() {
+            root.jobs.refresh();
+        }
+    }
+
+    InstallDialog {
+        id: installDialog
+        jobs: root.jobs
+    }
+    RemoveDialog {
+        id: removeDialog
+        jobs: root.jobs
+    }
+    UnusedDialog {
+        id: unusedDialog
+        jobs: root.jobs
     }
 
     RowLayout {
@@ -253,6 +331,8 @@ AtlasWindow {
                         switch (root.place) {
                         case "home":
                             return homePage;
+                        case "installed":
+                            return installedPage;
                         case "about":
                             return aboutPage;
                         default:
@@ -291,6 +371,22 @@ AtlasWindow {
             model: root.browseModel
             onAppRequested: id => root.openApp(id)
             onOpenSources: root.openPlace("sources")
+        }
+    }
+    Component {
+        id: appPage
+        AppPage {
+            catalog: root.catalog
+            jobs: root.jobs
+            onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
+        }
+    }
+    Component {
+        id: installedPage
+        InstalledPage {
+            jobs: root.jobs
+            onAppRequested: id => root.openApp(id)
+            onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
         }
     }
     Component {

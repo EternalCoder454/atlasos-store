@@ -4,6 +4,7 @@
 
 mod backend;
 mod catalog;
+mod jobs;
 
 atlas_framework_ui::app! {
     name: "Atlas Store",
@@ -21,6 +22,7 @@ pub struct AtlasObjects {
     pub catalog: *mut c_void,
     pub search: *mut c_void,
     pub browse: *mut c_void,
+    pub jobs: *mut c_void,
 }
 
 /// Called once from `main.cpp`, after `QApplication` exists. Makes every
@@ -33,11 +35,14 @@ pub extern "C" fn atlas_objects_new() -> AtlasObjects {
     let mut catalog = catalog::qobject::catalog_make_unique();
     let search = catalog::qobject::app_list_model_make_unique();
     let browse = catalog::qobject::app_list_model_make_unique();
+    let mut jobs = jobs::qobject::jobs_make_unique();
     catalog.pin_mut().start();
+    jobs.pin_mut().start();
     AtlasObjects {
         backend: backend.into_raw().cast(),
         catalog: catalog.into_raw().cast(),
         search: search.into_raw().cast(),
         browse: browse.into_raw().cast(),
+        jobs: jobs.into_raw().cast(),
     }
 }

@@ -75,6 +75,12 @@ qt_add_qml_module(atlas-store-app
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/AppPage.qml
+        qml/InstallDialog.qml
+        qml/InstalledPage.qml
+        qml/JobStatus.qml
+        qml/RemoveDialog.qml
+        qml/UnusedDialog.qml
         qml/AppGrid.qml
         qml/AppTile.qml
         qml/CatalogState.qml
