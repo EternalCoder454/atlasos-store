@@ -16,6 +16,10 @@ qt_policy(SET QTP0004 NEW)
 find_package(KF6DBusAddons REQUIRED)
 find_package(KF6WindowSystem REQUIRED)
 find_package(Corrosion REQUIRED)
+# atlas-store-core calls libflatpak and GIO; the Rust static library leaves
+# them to the final link.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FLATPAK REQUIRED IMPORTED_TARGET flatpak glib-2.0 gio-2.0 gobject-2.0)
 
 set(WORKSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
@@ -78,7 +82,7 @@ qt_add_qml_module(atlas-store-app
 target_link_libraries(atlas-store-app PRIVATE
     atlas_store
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets
-    KF6::DBusAddons KF6::WindowSystem)
+    KF6::DBusAddons KF6::WindowSystem PkgConfig::FLATPAK)
 
 install(TARGETS atlas-store-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/net.eterneon.atlas.store.desktop
