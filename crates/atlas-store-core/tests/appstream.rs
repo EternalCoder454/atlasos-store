@@ -1383,7 +1383,7 @@ fn duplicate_ids_keep_the_best_copy_and_are_counted_apart() {
          <component><id>z.w</id><name>other</name></component>",
         bundle("x.y", "a"),
         bundle("x.y", "b"),
-        bundle("x.y", "c"),
+        bundle("x.y", "b"),
     );
     let c = p(&wrap(&a)).unwrap();
     let names: Vec<&str> = c.components.iter().map(|c| c.name.as_str()).collect();
@@ -1402,6 +1402,35 @@ fn duplicate_ids_keep_the_best_copy_and_are_counted_apart() {
     )))
     .unwrap();
     assert_eq!((c.components.len(), c.skipped, c.duplicates), (1, 1, 0));
+}
+
+#[test]
+fn the_newest_branch_wins_among_duplicates_without_releases() {
+    let copy = |br: &str, extra: &str| {
+        format!(
+            "<component type=\"runtime\"><id>x.y</id><name>{br}</name>{extra}\
+             <bundle type=\"flatpak\">runtime/x.y/x86_64/{br}</bundle></component>"
+        )
+    };
+    let win = |copies: &[String]| {
+        let c = p(&wrap(&copies.concat())).unwrap();
+        assert_eq!(c.components.len(), 1);
+        c.components[0].name.clone()
+    };
+    // More fields on the older branch don't beat the newer one, either order.
+    let url = "<url type=\"homepage\">https://example.org/</url>";
+    assert_eq!(win(&[copy("23.08", url), copy("24.08", "")]), "24.08");
+    assert_eq!(win(&[copy("24.08", ""), copy("23.08", url)]), "24.08");
+    // Numbers compare as numbers, not text.
+    assert_eq!(win(&[copy("9.10", ""), copy("10.2", "")]), "10.2");
+    assert_eq!(win(&[copy("24.08.1", ""), copy("24.08", "")]), "24.08.1");
+    // A numeric branch beats a name; names compare as strings.
+    assert_eq!(win(&[copy("stable", ""), copy("1.0", "")]), "1.0");
+    assert_eq!(win(&[copy("stable", ""), copy("beta", "")]), "stable");
+    assert_eq!(win(&[copy("beta", ""), copy("stable", "")]), "stable");
+    // A newer release still comes first.
+    let rel = "<releases><release version=\"1\" timestamp=\"1700000000\"/></releases>";
+    assert_eq!(win(&[copy("23.08", rel), copy("24.08", "")]), "23.08");
 }
 
 #[test]
@@ -1439,6 +1468,10 @@ fn errors_name_the_component() {
     assert_eq!(e.component(), Some("my.app"));
     // Before an ID is read, or outside a component, there is none.
     let e = p("<components><component type=\"x\"><name>&bogus;</name></component></components>")
+        .unwrap_err();
+    assert_eq!(e.component(), None);
+    // An ID that isn't valid is not repeated in the message.
+    let e = p("<components><component type=\"x\"><id>not an id!</id><name>&bogus;</name></component></components>")
         .unwrap_err();
     assert_eq!(e.component(), None);
     assert_eq!(

@@ -302,71 +302,109 @@ impl Enc {
     }
 
     fn component(&mut self, c: &Component) {
-        self.str(&c.id);
-        self.u8(match c.kind {
+        let Component {
+            id,
+            kind,
+            name,
+            summary,
+            description,
+            developer,
+            license,
+            categories,
+            keywords,
+            icon,
+            urls,
+            screenshots,
+            releases,
+            content_rating,
+            bundle,
+            extends,
+            launchable,
+            verification,
+            branding,
+        } = c;
+        self.str(id);
+        self.u8(match kind {
             Kind::DesktopApp => 0,
             Kind::ConsoleApp => 1,
             Kind::Addon => 2,
             Kind::Runtime => 3,
             Kind::Other => 4,
         });
-        self.str(&c.name);
-        self.str(&c.summary);
-        self.blocks(&c.description);
-        self.str(&c.developer);
-        self.str(&c.license);
-        self.strs(&c.categories);
-        self.strs(&c.keywords);
-        match &c.icon {
-            Some(i) => {
+        self.str(name);
+        self.str(summary);
+        self.blocks(description);
+        self.str(developer);
+        self.str(license);
+        self.strs(categories);
+        self.strs(keywords);
+        match icon {
+            Some(Icon { file, sizes }) => {
                 self.u8(1);
-                self.str(&i.file);
-                self.len(i.sizes.len());
-                for s in &i.sizes {
+                self.str(file);
+                self.len(sizes.len());
+                for s in sizes {
                     self.u16(*s);
                 }
             }
             None => self.u8(0),
         }
-        self.len(c.urls.len());
-        for (k, u) in &c.urls {
+        self.len(urls.len());
+        for (k, u) in urls {
             self.u8(url_kind_code(*k));
             self.str(u);
         }
-        self.len(c.screenshots.len());
-        for s in &c.screenshots {
-            self.u8(u8::from(s.default));
-            self.str(&s.caption);
-            self.len(s.images.len());
-            for i in &s.images {
-                self.u8(u8::from(i.thumbnail));
-                self.u32(i.width);
-                self.u32(i.height);
-                self.str(&i.url);
+        self.len(screenshots.len());
+        for Screenshot {
+            default,
+            caption,
+            images,
+        } in screenshots
+        {
+            self.u8(u8::from(*default));
+            self.str(caption);
+            self.len(images.len());
+            for Image {
+                thumbnail,
+                width,
+                height,
+                url,
+            } in images
+            {
+                self.u8(u8::from(*thumbnail));
+                self.u32(*width);
+                self.u32(*height);
+                self.str(url);
             }
         }
-        self.len(c.releases.len());
-        for r in &c.releases {
-            self.str(&r.version);
-            self.i64(r.timestamp);
-            self.u8(match r.kind {
+        self.len(releases.len());
+        for Release {
+            version,
+            timestamp,
+            kind,
+            description,
+        } in releases
+        {
+            self.str(version);
+            self.i64(*timestamp);
+            self.u8(match kind {
                 ReleaseKind::Stable => 0,
                 ReleaseKind::Development => 1,
                 ReleaseKind::Snapshot => 2,
                 ReleaseKind::Other => 3,
             });
-            self.blocks(&r.description);
+            self.blocks(description);
         }
-        match &c.content_rating {
-            Some(r) => {
+        match content_rating {
+            Some(ContentRating { scheme, attrs }) => {
                 self.u8(1);
-                self.u8(match r.scheme {
+                self.u8(match scheme {
                     RatingScheme::Oars10 => 0,
                     RatingScheme::Oars11 => 1,
                     RatingScheme::Other => 2,
                 });
-                self.len(r.attrs.len());
-                for (id, i) in &r.attrs {
+                self.len(attrs.len());
+                for (id, i) in attrs {
                     self.str(id);
                     self.u8(match i {
                         Intensity::None => 0,
@@ -378,33 +416,44 @@ impl Enc {
             }
             None => self.u8(0),
         }
-        match &c.bundle {
-            Some(b) => {
+        match bundle {
+            Some(Bundle {
+                reference,
+                runtime,
+                sdk,
+            }) => {
                 self.u8(1);
-                self.str(&b.reference);
-                self.opt_str(&b.runtime);
-                self.opt_str(&b.sdk);
+                self.str(reference);
+                self.opt_str(runtime);
+                self.opt_str(sdk);
             }
             None => self.u8(0),
         }
-        self.strs(&c.extends);
-        self.opt_str(&c.launchable);
-        match &c.verification {
-            Some(v) => {
+        self.strs(extends);
+        self.opt_str(launchable);
+        match verification {
+            Some(Verification {
+                method,
+                website,
+                login_name,
+                login_provider,
+                organization,
+                timestamp,
+            }) => {
                 self.u8(1);
-                self.str(&v.method);
-                self.str(&v.website);
-                self.str(&v.login_name);
-                self.str(&v.login_provider);
-                self.u8(u8::from(v.organization));
-                self.i64(v.timestamp);
+                self.str(method);
+                self.str(website);
+                self.str(login_name);
+                self.str(login_provider);
+                self.u8(u8::from(*organization));
+                self.i64(*timestamp);
             }
             None => self.u8(0),
         }
-        match &c.branding {
-            Some(b) => {
+        match branding {
+            Some(Branding { light, dark }) => {
                 self.u8(1);
-                for col in [b.light, b.dark] {
+                for col in [*light, *dark] {
                     match col {
                         Some(rgb) => {
                             self.u8(1);
@@ -472,30 +521,85 @@ pub(crate) fn cost(c: &Component) -> (usize, usize) {
                 })
                 .sum::<usize>()
     };
-    let mut g = 16 + 512 + s(&c.id) + s(&c.name) + s(&c.summary) + blocks(&c.description);
-    g += s(&c.developer) + s(&c.license) + strs(&c.categories) + strs(&c.keywords);
-    if let Some(i) = &c.icon {
-        g += s(&i.file) + 16 * i.sizes.len();
+    let Component {
+        id,
+        kind: _,
+        name,
+        summary,
+        description,
+        developer,
+        license,
+        categories,
+        keywords,
+        icon,
+        urls,
+        screenshots,
+        releases,
+        content_rating,
+        bundle,
+        extends,
+        launchable,
+        verification,
+        branding: _,
+    } = c;
+    let mut g = 16 + 512 + s(id) + s(name) + s(summary) + blocks(description);
+    g += s(developer) + s(license) + strs(categories) + strs(keywords);
+    if let Some(Icon { file, sizes }) = icon {
+        g += s(file) + 16 * sizes.len();
     }
-    g += 16 * c.urls.len() + c.urls.iter().map(|(_, u)| s(u)).sum::<usize>();
-    g += 16 * c.screenshots.len();
-    for sh in &c.screenshots {
-        g += s(&sh.caption) + 16 * sh.images.len();
-        g += sh.images.iter().map(|i| s(&i.url)).sum::<usize>();
+    g += 16 * urls.len() + urls.iter().map(|(_, u)| s(u)).sum::<usize>();
+    g += 16 * screenshots.len();
+    for Screenshot {
+        default: _,
+        caption,
+        images,
+    } in screenshots
+    {
+        g += s(caption) + 16 * images.len();
+        g += images
+            .iter()
+            .map(
+                |Image {
+                     thumbnail: _,
+                     width: _,
+                     height: _,
+                     url,
+                 }| s(url),
+            )
+            .sum::<usize>();
     }
-    g += 16 * c.releases.len();
-    for r in &c.releases {
-        g += s(&r.version) + blocks(&r.description);
+    g += 16 * releases.len();
+    for Release {
+        version,
+        timestamp: _,
+        kind: _,
+        description,
+    } in releases
+    {
+        g += s(version) + blocks(description);
     }
-    if let Some(r) = &c.content_rating {
-        g += 16 * r.attrs.len() + r.attrs.iter().map(|(t, _)| s(t)).sum::<usize>();
+    if let Some(ContentRating { scheme: _, attrs }) = content_rating {
+        g += 16 * attrs.len() + attrs.iter().map(|(t, _)| s(t)).sum::<usize>();
     }
-    if let Some(b) = &c.bundle {
-        g += s(&b.reference) + opt(&b.runtime) + opt(&b.sdk);
+    if let Some(Bundle {
+        reference,
+        runtime,
+        sdk,
+    }) = bundle
+    {
+        g += s(reference) + opt(runtime) + opt(sdk);
     }
-    g += strs(&c.extends) + opt(&c.launchable);
-    if let Some(v) = &c.verification {
-        g += s(&v.method) + s(&v.website) + s(&v.login_name) + s(&v.login_provider);
+    g += strs(extends) + opt(launchable);
+    if let Some(Verification {
+        method,
+        website,
+        login_name,
+        login_provider,
+        organization: _,
+        timestamp: _,
+    }) = verification
+    {
+        g += s(method) + s(website) + s(login_name) + s(login_provider);
     }
     (file, g)
 }
@@ -721,12 +825,46 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
     Ok(path)
 }
 
+/// How far ahead of the clock a file's time may be before it is bogus (the
+/// clock was stepped back, as a dual boot with Windows can do).
+const CLOCK_SLACK: Duration = Duration::from_secs(5);
+
+/// The later of a file's modification and status-change times. The first is
+/// set when the data is written, the second also by the rename that puts the
+/// file in place, so a slow sync can't make a fresh file look old.
+fn changed_at(m: &fs::Metadata) -> SystemTime {
+    let at = |secs: i64, nanos: i64| {
+        let n = Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64);
+        if secs >= 0 {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64) + n
+        } else {
+            SystemTime::UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs()) + n
+        }
+    };
+    at(m.mtime(), m.mtime_nsec()).max(at(m.ctime(), m.ctime_nsec()))
+}
+
+/// Whether a file last changed at `t` stays: an index when `started <= t` and
+/// a temp file when it is under [`STALE_TEMP`] old, and neither when `t` is
+/// more than [`CLOCK_SLACK`] after `now`.
+fn keep_file(t: SystemTime, started: SystemTime, now: SystemTime, temp: bool) -> bool {
+    let from = if temp {
+        now.checked_sub(STALE_TEMP)
+            .map(|f| f + Duration::from_nanos(1))
+    } else {
+        Some(started)
+    };
+    from.is_some_and(|f| f <= t) && t <= now + CLOCK_SLACK
+}
+
 /// Best-effort removal of the other index files of `origin` that were last
-/// written before `started` (when the write that is cleaning up began), and of
+/// changed before `started` (when the write that is cleaning up began), and of
 /// its temp files older than ten minutes (a running write's is newer). A file
-/// written since then belongs to a writer that finished while this one ran, so
-/// it may be the newer index and stays; so does one whose time can't be read.
-/// Symlinks are removed as links, never followed.
+/// changed since then belongs to a writer that finished while this one ran, so
+/// it may be the newer index and stays. A time more than a few seconds in the
+/// future is bogus (the clock was stepped back): that file goes, index or
+/// temp, as it would otherwise stay forever. A file whose time can't be read
+/// stays. Symlinks are removed as links, never followed.
 fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr, started: SystemTime) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -751,15 +889,11 @@ fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr, started: Syste
             continue;
         }
         // Not followed: the time of the entry itself.
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+        let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if temp {
-            let age = now.duration_since(modified).ok();
-            if !age.is_some_and(|a| a >= STALE_TEMP) {
-                continue;
-            }
-        } else if modified >= started {
+        let fresh = keep_file(changed_at(&meta), started, now, temp);
+        if fresh {
             continue;
         }
         if let Err(e) = fs::remove_file(entry.path()) {
@@ -1146,7 +1280,7 @@ impl<'a> Dec<'a> {
 /// refused, never changed: [`write`] repairs it); the file is opened without
 /// following a symlink, must be a regular file of at most 32 MiB and must pass
 /// every check in the module description. [`IndexError::Missing`] when there
-/// is no file.
+/// is no file or no cache directory yet.
 pub fn read(path: &Path, key: &IndexKey) -> Result<Catalog, IndexError> {
     key.check()?;
     let dir = path
@@ -1646,6 +1780,141 @@ mod tests {
         let budget = cat.origin.len() + 24 + charge;
         assert!(decode_with(&bytes, &key(), budget).is_ok());
         assert!(decode_with(&bytes, &key(), budget - 1).is_err());
+    }
+
+    /// A component with every Option Some and every list at its cap.
+    fn maximal() -> Component {
+        let lim = Limits::default();
+        let spans = |t: &str| {
+            vec![
+                Span {
+                    text: t.into(),
+                    style: Style::Plain,
+                },
+                Span {
+                    text: t.into(),
+                    style: Style::Code,
+                },
+            ]
+        };
+        let blocks = || {
+            (0..lim.desc_blocks)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        Block::Paragraph(spans("text"))
+                    } else {
+                        Block::List {
+                            ordered: i % 4 == 1,
+                            items: (0..lim.desc_items).map(|_| spans("item")).collect(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        Component {
+            id: "org.example.Max".into(),
+            kind: Kind::DesktopApp,
+            name: "Max".into(),
+            summary: "Summary".into(),
+            description: blocks(),
+            developer: "Dev".into(),
+            license: "MIT".into(),
+            categories: vec!["Utility".into(); lim.categories],
+            keywords: vec!["key".into(); lim.keywords],
+            icon: Some(Icon {
+                file: "org.example.Max.png".into(),
+                sizes: (1..=MAX_ICON_SIZES as u16).map(|i| i * 16).collect(),
+            }),
+            urls: vec![(UrlKind::Homepage, "https://example.org/".into()); lim.urls],
+            screenshots: (0..lim.screenshots)
+                .map(|_| Screenshot {
+                    default: true,
+                    caption: "Shot".into(),
+                    images: (0..lim.images)
+                        .map(|_| Image {
+                            thumbnail: true,
+                            width: 640,
+                            height: 480,
+                            url: "https://example.org/a.png".into(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            releases: (0..RELEASES)
+                .map(|i| Release {
+                    version: format!("1.{i}"),
+                    timestamp: 1_700_000_000 + i as i64,
+                    kind: ReleaseKind::Stable,
+                    description: blocks(),
+                })
+                .collect(),
+            content_rating: Some(ContentRating {
+                scheme: RatingScheme::Oars11,
+                attrs: (0..MAX_RATING_ATTRS)
+                    .map(|i| (format!("violence-{i}"), Intensity::Mild))
+                    .collect(),
+            }),
+            bundle: Some(Bundle {
+                reference: "app/org.example.Max/x86_64/stable".into(),
+                runtime: Some("org.freedesktop.Platform/x86_64/24.08".into()),
+                sdk: Some("org.freedesktop.Sdk/x86_64/24.08".into()),
+            }),
+            extends: vec!["org.example.Base".to_string(); MAX_EXTENDS],
+            launchable: Some("org.example.Max.desktop".into()),
+            verification: Some(Verification {
+                method: "website".into(),
+                website: "example.org".into(),
+                login_name: "max".into(),
+                login_provider: "github".into(),
+                organization: true,
+                timestamp: 1_700_000_000,
+            }),
+            branding: Some(Branding {
+                light: Some([1, 2, 3]),
+                dark: Some([4, 5, 6]),
+            }),
+        }
+    }
+
+    /// The same check on a component with every field set and at its cap.
+    #[test]
+    fn cost_matches_the_encoder_and_the_decoder_for_a_full_component() {
+        let mut cat = empty();
+        cat.components = vec![maximal()];
+        let (file, charge) = cost(&cat.components[0]);
+        let bytes = encode(&key(), &cat);
+        let fixed = 4 + cat.origin.len() + 4 + 4 + 4;
+        assert_eq!(bytes.len() - payload_start(&bytes, &key()), fixed + file);
+        let budget = cat.origin.len() + 24 + charge;
+        let back = decode_with(&bytes, &key(), budget).expect("decodes within the charge");
+        assert_eq!(back, cat);
+        assert!(decode_with(&bytes, &key(), budget - 1).is_err());
+    }
+
+    #[test]
+    fn files_are_kept_by_their_time() {
+        let now = SystemTime::now();
+        let started = now - Duration::from_secs(10);
+        let at = |d: i64| {
+            if d >= 0 {
+                now + Duration::from_secs(d as u64)
+            } else {
+                now - Duration::from_secs(d.unsigned_abs())
+            }
+        };
+        // An index: kept from `started` to a few seconds ahead of the clock.
+        assert!(!keep_file(at(-11), started, now, false));
+        assert!(keep_file(at(-10), started, now, false));
+        assert!(keep_file(at(0), started, now, false));
+        assert!(keep_file(at(5), started, now, false));
+        assert!(!keep_file(at(6), started, now, false));
+        assert!(!keep_file(at(3600), started, now, false));
+        // A temp file: kept while under ten minutes old and not from the future.
+        assert!(keep_file(at(-599), started, now, true));
+        assert!(!keep_file(at(-600), started, now, true));
+        assert!(!keep_file(at(-3600), started, now, true));
+        assert!(keep_file(at(5), started, now, true));
+        assert!(!keep_file(at(3600), started, now, true));
     }
 
     /// Where the payload starts: after the header of the same key.

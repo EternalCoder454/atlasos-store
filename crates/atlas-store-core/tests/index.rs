@@ -442,9 +442,9 @@ fn an_index_written_meanwhile_is_not_removed() {
     k3.commit = "ef".repeat(32);
     let f1 = index::write(&d, &k1, &empty("flathub")).unwrap();
     // k2 stands for an index another writer finished after this write began:
-    // a modification time ahead of now.
+    // a time just ahead of now, inside the clock slack.
     let f2 = index::write(&d, &k2, &empty("flathub")).unwrap();
-    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3);
     fs::File::options()
         .write(true)
         .open(&f2)
@@ -455,6 +455,54 @@ fn an_index_written_meanwhile_is_not_removed() {
     assert!(f3.exists());
     assert!(f2.exists(), "a newer index stays");
     assert!(!f1.exists(), "an older one goes");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_file_from_the_future_is_removed() {
+    let d = dir("future");
+    let k1 = key();
+    let mut k2 = key();
+    k2.commit = "cd".repeat(32);
+    let mut k3 = key();
+    k3.commit = "ef".repeat(32);
+    index::write(&d, &k1, &empty("flathub")).unwrap();
+    let f2 = index::write(&d, &k2, &empty("flathub")).unwrap();
+    // The clock stepped back after this one was written: it would otherwise
+    // look newer than every later write, forever.
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&f2)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let f3 = index::write(&d, &k3, &empty("flathub")).unwrap();
+    assert!(f3.exists());
+    assert!(!f2.exists(), "an index from the future goes");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn an_index_of_the_old_format_is_removed() {
+    let d = dir("oldformat");
+    let k = key();
+    index::write(&d, &k, &empty("flathub")).unwrap();
+    // FORMAT 1 named its files `index-<origin>-<16 hex>-<8 hex>.bin`.
+    let old = d.join("index-flathub-0123456789abcdef-89abcdef.bin");
+    fs::write(&old, "old").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut k2 = key();
+    k2.commit = "cd".repeat(32);
+    let f2 = index::write(&d, &k2, &empty("flathub")).unwrap();
+    assert!(!old.exists(), "{:?}", names(&d));
+    assert!(f2.exists());
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -497,7 +545,7 @@ fn every_cap_xml(lim: &Limits) -> String {
         x += &format!("<p>block {i}</p>");
     }
     x += "</description><icon type=\"cached\" width=\"64\">small.png</icon>";
-    for w in 1..=20 {
+    for w in 101..=120 {
         x += &format!("<icon type=\"cached\" width=\"{w}\">big.png</icon>");
     }
     for i in 0..lim.urls + more {
@@ -634,13 +682,15 @@ fn stale_temp_files_are_removed_and_a_reused_name_is_survived() {
         .unwrap()
         .to_string();
 
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let old = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
     let make = |n: &str, aged: bool| {
         let file = fs::File::create(d.join(n)).unwrap();
         if aged {
             file.set_modified(old).unwrap();
         }
     };
+    // A temp file's age is its later of modification and status change, and
+    // the second can't be set back; one from the future goes the same way.
     let stale = format!(".{name}.tmp.4242.7");
     let fresh = format!(".{name}.tmp.4242.8");
     let others = format!(".{beta_name}.tmp.4242.7");

@@ -129,7 +129,10 @@ const MAX_COMPONENTS: usize = 100_000;
 /// one default screenshot, best duplicate kept and counted apart, block
 /// elements inside inline content separated, unknown inline elements keep the
 /// style, `xml:lang="C"` is untagged, one content rating.
-pub const PARSER_REV: u32 = 2;
+///
+/// 3: the duplicate that wins is the one with a bundle, then the newest
+/// release, then the newest branch, then the most fields.
+pub const PARSER_REV: u32 = 3;
 
 /// Most spans in one paragraph or list item; text past it is cut.
 pub(crate) const MAX_SPANS: usize = 256;
@@ -800,29 +803,30 @@ impl Inline {
     }
 
     fn flush(&mut self) {
-        if self.spans.len() >= MAX_SPANS {
-            // Past the span cap the rest of the paragraph is dropped.
-            if !self.cur.is_empty() {
-                self.cur.clear();
-                self.over = true;
-            }
+        if self.cur.is_empty() {
             return;
         }
-        if !self.cur.is_empty() {
-            let style = self.style();
-            // A plain run split by an element that adds no style (or by a
-            // separator) is one span.
-            match self.spans.last_mut() {
-                Some(last) if style == Style::Plain && last.style == Style::Plain => {
-                    last.text.push_str(&self.cur);
-                    self.cur.clear();
-                }
-                _ => self.spans.push(Span {
-                    text: std::mem::take(&mut self.cur),
-                    style,
-                }),
-            }
+        let style = self.style();
+        // A plain run split by an element that adds no style (or by a
+        // separator) is one span, even at the cap.
+        if let Some(last) = self.spans.last_mut()
+            && style == Style::Plain
+            && last.style == Style::Plain
+        {
+            last.text.push_str(&self.cur);
+            self.cur.clear();
+            return;
         }
+        if self.spans.len() >= MAX_SPANS {
+            // Past the span cap the rest of the paragraph is dropped.
+            self.cur.clear();
+            self.over = true;
+            return;
+        }
+        self.spans.push(Span {
+            text: std::mem::take(&mut self.cur),
+            style,
+        });
     }
 
     /// Ends a run of text: what follows starts after a space.
@@ -1873,7 +1877,7 @@ impl<'o> State<'o> {
         self.cur
             .as_ref()
             .map(|c| &c.id)
-            .filter(|i| !i.is_empty())
+            .filter(|i| text::valid_id(i))
             .cloned()
     }
 
@@ -1898,10 +1902,11 @@ impl<'o> State<'o> {
 }
 
 /// Whether `a` is a better copy of a component than `b`, the same ID. One with
-/// a bundle beats one without; then the one with more of its fields filled;
-/// then the one with the newer release. Equal ones keep the first in the file.
+/// a bundle beats one without; then the one with the newer release; then the
+/// newer branch; then the one with more of its fields filled. Equal ones keep
+/// the first in the file.
 fn better(a: &Component, b: &Component) -> bool {
-    fn key(c: &Component) -> (bool, usize, i64) {
+    fn key(c: &Component) -> (bool, i64, BranchKey, usize) {
         let filled = [
             !c.summary.is_empty(),
             !c.description.is_empty(),
@@ -1922,11 +1927,44 @@ fn better(a: &Component, b: &Component) -> bool {
         let newest = c.releases.iter().map(|r| r.timestamp).max().unwrap_or(0);
         (
             c.bundle.is_some(),
-            filled.into_iter().filter(|f| *f).count(),
             newest,
+            branch_key(c),
+            filled.into_iter().filter(|f| *f).count(),
         )
     }
     key(a) > key(b)
+}
+
+/// A branch for ordering: a dotted numeric version (compared number by
+/// number) beats any other name, and other names compare as strings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum BranchKey {
+    None,
+    Name(String),
+    Version(Vec<u64>),
+}
+
+/// The ordering key of the last `/` segment of the bundle reference.
+fn branch_key(c: &Component) -> BranchKey {
+    let Some(b) = c.bundle.as_ref() else {
+        return BranchKey::None;
+    };
+    let branch = b.reference.rsplit('/').next().unwrap_or("");
+    let nums: Option<Vec<u64>> = branch
+        .split('.')
+        .map(|p| {
+            if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
+                p.parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    match nums {
+        Some(n) if !n.is_empty() => BranchKey::Version(n),
+        _ if branch.is_empty() => BranchKey::None,
+        _ => BranchKey::Name(branch.to_string()),
+    }
 }
 
 /// Whether a component of this kind is only listed with a bundle.
@@ -2006,10 +2044,10 @@ fn weigh(c: &Component) -> (usize, usize) {
     (bytes, objects)
 }
 
-/// The icon with the most sizes, then the largest; the first of equals. A
+/// The icon with the largest size, then the most sizes; the first of equals. A
 /// file with no sizes (an SVG) counts as having none.
 fn best_icon(icons: Vec<Icon>) -> Option<Icon> {
-    let key = |i: &Icon| (i.sizes.len(), i.sizes.last().copied().unwrap_or(0));
+    let key = |i: &Icon| (i.sizes.last().copied().unwrap_or(0), i.sizes.len());
     let mut best: Option<Icon> = None;
     for i in icons {
         if best.as_ref().is_none_or(|b| key(&i) > key(b)) {
