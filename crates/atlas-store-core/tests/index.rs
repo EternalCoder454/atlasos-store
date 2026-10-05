@@ -429,7 +429,9 @@ fn a_symlinked_cache_directory_is_refused() {
 fn an_empty_or_missing_directory_is_refused() {
     let k = key();
     let cat = catalog();
+    // Never the working directory, for writing as for reading.
     assert!(index::write(Path::new(""), &k, &cat).is_err());
+    assert!(index::write(Path::new("."), &k, &cat).is_err());
     for p in ["index.bin", "./index.bin", ""] {
         assert!(
             matches!(index::read(Path::new(p), &k), Err(IndexError::Io(_))),

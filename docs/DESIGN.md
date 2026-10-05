@@ -93,7 +93,8 @@ enters, in `atlas-store-core`:
 - flatpakref and flatpakrepo: size cap, known keys only, https only, the GPG
   key checked, `RuntimeRepo=` never followed without its own confirmation.
 - Cache files live under `~/.cache/atlas-store` (0700), written atomically,
-  symlinks refused (the folder itself included). A cache folder that is not
+  files that are symlinks refused, and the cache folder itself must not be
+  one (folders above it may be, for a moved `~/.cache`). A cache folder that is not
   the user's own is not used; one that group or others can write to (Fedora's
   umask 002) is set back to 0700 with a warning.
   The index's checksum catches corruption, not tampering: a process running

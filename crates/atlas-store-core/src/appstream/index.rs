@@ -493,11 +493,29 @@ fn is_temp_of(origin: &str, name: &str) -> bool {
 /// does that to a directory something else created) is the user's to fix: it
 /// is set to 0700 with a warning. A directory that doesn't exist yet is fine.
 fn check_dir(dir: &Path) -> io::Result<()> {
-    let meta = match fs::symlink_metadata(dir) {
-        Ok(m) => m,
+    // Checked and repaired through one descriptor opened without following
+    // a link, so the folder can't be swapped between the check and the chmod.
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir);
+    let folder = match opened {
+        Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        // ELOOP: the folder is a link; ENOTDIR: it is something else.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+            log::warn!(
+                "not using the cache directory {}: it must be a real directory of the current user, not a link",
+                dir.display()
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not a private directory of the user", dir.display()),
+            ));
+        }
         Err(e) => return Err(e),
     };
+    let meta = folder.metadata()?;
     // SAFETY: geteuid has no preconditions and can't fail.
     let me = unsafe { libc::geteuid() };
     if !meta.is_dir() || meta.uid() != me {
@@ -515,7 +533,7 @@ fn check_dir(dir: &Path) -> io::Result<()> {
             "the cache directory {} is writable by group or others; setting it to 0700",
             dir.display()
         );
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        folder.set_permissions(fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -537,7 +555,8 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
     if catalog.origin != key.origin {
         return Err(invalid("the catalog is of another origin than the key"));
     }
-    if cache_dir.as_os_str().is_empty() {
+    // As `read`: a cache folder is named, never the working directory.
+    if cache_dir.as_os_str().is_empty() || cache_dir == Path::new(".") {
         return Err(invalid("the cache directory is empty"));
     }
     let path = cache_file(cache_dir, key).map_err(|e| invalid(e.to_string()))?;
