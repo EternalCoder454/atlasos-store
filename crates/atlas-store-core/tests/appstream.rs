@@ -347,9 +347,16 @@ fn doctype_and_entities_are_refused() {
         <!ENTITY lol2 \"&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;\">\
         <!ENTITY lol3 \"&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;\">]>\
         <components><component type=\"desktop-application\"><id>a.b</id><name>&lol3;</name></component></components>";
-    assert_eq!(p(laughs), Err(ParseError::DocType));
+    // The scanner refuses every markup declaration before the reader sees it.
+    let refused = |r: Result<Catalog, ParseError>| {
+        matches!(
+            r,
+            Err(ParseError::DocType | ParseError::Limit("markup declaration"))
+        )
+    };
+    assert!(refused(p(laughs)));
     let xxe = "<!DOCTYPE x SYSTEM \"file:///etc/passwd\"><components/>";
-    assert_eq!(p(xxe), Err(ParseError::DocType));
+    assert!(refused(p(xxe)));
     // An entity with no DOCTYPE: in text, in an unknown element, in an attribute.
     for bad in [
         wrap(&comp("a.b", "&xxe;", "")),
@@ -1104,7 +1111,8 @@ fn bundle_must_match_the_component() {
     let c = p(&evil).unwrap();
     assert!(c.components.is_empty());
     assert_eq!(c.skipped, 1);
-    // `.desktop` on either side is allowed.
+    // `.desktop` on either side is allowed. Known gap: `X.desktop` with bundle
+    // `X` passes too (real apps need it); the install dialog shows the real ref.
     let desk = wrap(
         "<component type=\"desktop-application\"><id>a.b.desktop</id><name>n</name>\
          <bundle type=\"flatpak\">app/a.b/x86_64/stable</bundle></component>\
@@ -1112,6 +1120,59 @@ fn bundle_must_match_the_component() {
          <bundle type=\"flatpak\">app/c.d.desktop/x86_64/stable</bundle></component>",
     );
     assert_eq!(p(&desk).unwrap().components.len(), 2);
+    // Every kind is tied to its bundle, runtimes and others included.
+    for ty in ["runtime", "addon", "console-application", "generic"] {
+        let bad = wrap(&format!(
+            "<component type=\"{ty}\"><id>a.b</id><name>n</name>\
+             <bundle type=\"flatpak\">runtime/x.evil/x86_64/stable</bundle></component>"
+        ));
+        let c = p(&bad).unwrap();
+        assert!(c.components.is_empty(), "{ty}");
+        assert_eq!(c.skipped, 1, "{ty}");
+        let good = wrap(&format!(
+            "<component type=\"{ty}\"><id>a.b</id><name>n</name>\
+             <bundle type=\"flatpak\">runtime/a.b/x86_64/stable</bundle></component>"
+        ));
+        assert_eq!(p(&good).unwrap().components.len(), 1, "{ty}");
+    }
+}
+
+#[test]
+fn scanner_cannot_be_desynced_from_the_reader() {
+    let mut o = opts(&[]);
+    o.limits.max_token = 1 << 20;
+    let pairs = "<>".repeat(4 << 20);
+    for (what, xml) in [
+        // quick-xml reads any `<!d` as a DOCTYPE and skips `<>` inside `[..]`.
+        (
+            "doctype",
+            format!("<!DOCTYPE a [{pairs}]><components></components>"),
+        ),
+        (
+            "doctype lower case",
+            format!("<components><!doctype a [{pairs}]></components>"),
+        ),
+        // ... and any `<![` as CDATA, up to `]]>`.
+        (
+            "cdata look-alike",
+            format!("<components><![x[{pairs}]]></components>"),
+        ),
+    ] {
+        let t = std::time::Instant::now();
+        let r = parse(xml.as_bytes(), &o);
+        assert!(matches!(r, Err(ParseError::Limit(_))), "{what}: {r:?}");
+        assert!(t.elapsed().as_secs() < 2, "{what}");
+    }
+    // quick-xml ends a PI at `<?>` and rejects it; the scanner must agree on
+    // where it ends, and the input fails at once.
+    let t = std::time::Instant::now();
+    let xml = format!("<components><?>{pairs}?></components>");
+    assert!(parse(xml.as_bytes(), &o).is_err());
+    assert!(t.elapsed().as_secs() < 2);
+    // The ordinary forms still work.
+    assert!(
+        p("<?xml version=\"1.0\"?><components><?p ?><!-- c --><![CDATA[x]]></components>").is_ok()
+    );
 }
 
 #[test]

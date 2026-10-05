@@ -382,27 +382,60 @@ fn write_refuses_a_foreign_catalog_or_format() {
 }
 
 #[test]
-fn a_cache_directory_others_can_write_is_not_used() {
+fn a_cache_directory_others_can_write_is_repaired_for_the_owner() {
     let d = dir("unsafe");
     let k = key();
     let cat = catalog();
     let f = index::write(&d, &k, &cat).unwrap();
-    for mode in [0o770, 0o707, 0o777] {
+    for mode in [0o770, 0o707, 0o777, 0o775] {
         fs::set_permissions(&d, fs::Permissions::from_mode(mode)).unwrap();
-        assert!(index::write(&d, &k, &cat).is_err(), "write {mode:o}");
-        assert!(
-            matches!(index::read(&f, &k), Err(IndexError::Io(_))),
+        assert_eq!(index::read(&f, &k).unwrap(), cat, "read {mode:o}");
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700,
             "read {mode:o}"
         );
+        fs::set_permissions(&d, fs::Permissions::from_mode(mode)).unwrap();
+        index::write(&d, &k, &cat).unwrap();
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "write {mode:o}"
+        );
     }
-    // A new directory is private, and a private one works again.
-    fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(index::read(&f, &k).unwrap(), cat);
-    // A directory that is really a file is refused too.
+    // A directory that is really a file is refused.
     let file = d.join("plain");
     fs::write(&file, "x").unwrap();
     assert!(index::write(&file, &k, &cat).is_err());
     fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_symlinked_cache_directory_is_refused() {
+    let d = dir("linked");
+    let k = key();
+    let cat = catalog();
+    let real = d.join("real");
+    let f = index::write(&real, &k, &cat).unwrap();
+    let link = d.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(index::write(&link, &k, &cat).is_err());
+    let through = link.join(f.file_name().unwrap());
+    assert!(matches!(index::read(&through, &k), Err(IndexError::Io(_))));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn an_empty_or_missing_directory_is_refused() {
+    let k = key();
+    let cat = catalog();
+    assert!(index::write(Path::new(""), &k, &cat).is_err());
+    for p in ["index.bin", "./index.bin", ""] {
+        assert!(
+            matches!(index::read(Path::new(p), &k), Err(IndexError::Io(_))),
+            "{p:?}"
+        );
+    }
 }
 
 #[test]

@@ -9,8 +9,10 @@
 //! The checksum only detects accidental damage: anyone who can write the file
 //! can write a matching checksum. So the decoder never trusts the payload: it
 //! applies the parser's own checks to every string (no control or bidi
-//! characters), ID, URL, icon file and bundle reference, requires the
-//! catalog's origin to be the key's, and stops at a total budget of decoded
+//! characters, one line, within the parser's lengths), ID, URL, icon file,
+//! bundle reference, runtime and SDK, requires the bundle to match the
+//! component and to exist where the parser requires it, refuses duplicate
+//! IDs, requires the catalog's origin to be the key's, and stops at a total budget of decoded
 //! data, so a small hostile file can't expand without limit. The cache
 //! directory must be the user's own and not writable by group or others, or
 //! the index is neither read nor written.
@@ -19,14 +21,16 @@
 //! (origin, commit, languages), the payload length, a checksum of everything
 //! before it and of the payload, then the payload.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use super::parse::{Limits, bundle_matches, needs_bundle};
 use super::{
     Block, Branding, Bundle, Catalog, Component, ContentRating, Icon, Image, Intensity, Kind,
     RatingScheme, Release, ReleaseKind, Screenshot, Span, Style, UrlKind, Verification,
@@ -484,26 +488,34 @@ fn is_temp_of(origin: &str, name: &str) -> bool {
             .is_some_and(|(a, b)| digits(a) && digits(b))
 }
 
-/// Refuses a cache directory that is not the user's own or that group or
-/// others can write to: somebody else could swap the index. A directory that
-/// doesn't exist yet is fine.
+/// Refuses a cache directory that is a symlink, not a directory or not the
+/// user's own. One that only group or others can write to (Fedora's umask 002
+/// does that to a directory something else created) is the user's to fix: it
+/// is set to 0700 with a warning. A directory that doesn't exist yet is fine.
 fn check_dir(dir: &Path) -> io::Result<()> {
-    let meta = match fs::metadata(dir) {
+    let meta = match fs::symlink_metadata(dir) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
     // SAFETY: geteuid has no preconditions and can't fail.
     let me = unsafe { libc::geteuid() };
-    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+    if !meta.is_dir() || meta.uid() != me {
         log::warn!(
-            "not using the cache directory {}: it must be a directory of the current user that group and others can't write to",
+            "not using the cache directory {}: it must be a real directory of the current user, not a link",
             dir.display()
         );
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("{} is not a private directory of the user", dir.display()),
         ));
+    }
+    if meta.mode() & 0o022 != 0 {
+        log::warn!(
+            "the cache directory {} is writable by group or others; setting it to 0700",
+            dir.display()
+        );
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -512,7 +524,8 @@ fn check_dir(dir: &Path) -> io::Result<()> {
 /// (see [`cache_file`]): a temp file in the same directory (created
 /// exclusively, without following links, mode 0600), fsynced, renamed into
 /// place, then the directory fsynced (best effort). The directory is created
-/// with mode 0700, and refused when it exists but isn't private to the user.
+/// with mode 0700; an existing one is refused when it is a link or not the
+/// user's, and set to 0700 when group or others can write to it.
 /// The catalog must be of the key's origin and the key of this layout version.
 /// Afterwards older index files and stale temp files of the same origin are
 /// removed. A failure leaves no temp file and the previous index as it was.
@@ -523,6 +536,9 @@ pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<
     }
     if catalog.origin != key.origin {
         return Err(invalid("the catalog is of another origin than the key"));
+    }
+    if cache_dir.as_os_str().is_empty() {
+        return Err(invalid("the cache directory is empty"));
     }
     let path = cache_file(cache_dir, key).map_err(|e| invalid(e.to_string()))?;
     let name = path
@@ -728,6 +744,15 @@ impl<'a> Dec<'a> {
         }
         Ok(s)
     }
+    /// A string the parser would have produced for a text field: one line,
+    /// cleaned, of at most `max` characters.
+    fn line(&mut self, max: usize) -> Result<String, IndexError> {
+        let s = self.str()?;
+        if s.len() > max.saturating_mul(4) || text::clean(&s, max) != s {
+            return Err(IndexError::Corrupt("text the parser would not keep"));
+        }
+        Ok(s)
+    }
     fn opt_str(&mut self) -> Result<Option<String>, IndexError> {
         Ok(if self.flag()? {
             Some(self.str()?)
@@ -790,13 +815,20 @@ impl<'a> Dec<'a> {
             4 => Kind::Other,
             _ => return Err(IndexError::Corrupt("kind")),
         };
-        let name = self.str()?;
-        let summary = self.str()?;
+        let lim = Limits::default();
+        let name = self.line(lim.name)?;
+        if name.is_empty() {
+            return Err(IndexError::Corrupt("empty name"));
+        }
+        let summary = self.line(lim.summary)?;
         let description = self.blocks()?;
-        let developer = self.str()?;
+        let developer = self.line(lim.developer)?;
         let license = self.str()?;
         let categories = self.strs(MAX_LIST)?;
-        let keywords = self.strs(MAX_LIST)?;
+        let n = self.count(lim.keywords)?;
+        let keywords = (0..n)
+            .map(|_| self.line(lim.keyword))
+            .collect::<Result<Vec<_>, _>>()?;
         let icon = if self.flag()? {
             let file = self.str()?;
             if !text::valid_icon_file(&file) {
@@ -894,14 +926,27 @@ impl<'a> Dec<'a> {
             if !text::valid_bundle_ref(&reference) {
                 return Err(IndexError::Corrupt("bundle reference"));
             }
+            let runtime = self.opt_str()?;
+            let sdk = self.opt_str()?;
+            for t in [&runtime, &sdk].into_iter().flatten() {
+                if !text::valid_flatpak_target(t) {
+                    return Err(IndexError::Corrupt("runtime or sdk"));
+                }
+            }
+            if !bundle_matches(&id, &reference) {
+                return Err(IndexError::Corrupt("bundle of another component"));
+            }
             Some(Bundle {
                 reference,
-                runtime: self.opt_str()?,
-                sdk: self.opt_str()?,
+                runtime,
+                sdk,
             })
         } else {
             None
         };
+        if bundle.is_none() && needs_bundle(kind) {
+            return Err(IndexError::Corrupt("missing bundle"));
+        }
         let extends = self.strs(MAX_LIST)?;
         if !extends.iter().all(|e| text::valid_id(e)) {
             return Err(IndexError::Corrupt("extends id"));
@@ -962,14 +1007,16 @@ impl<'a> Dec<'a> {
 }
 
 /// Reads the index at `path` if it was built for `key`. The directory must be
-/// private to the user; the file is opened without following a symlink, must
+/// the user's own and not a link; the file is opened without following a symlink, must
 /// be a regular file of at most 32 MiB and must pass every check in the
 /// module description.
 pub fn read(path: &Path, key: &IndexKey) -> Result<Catalog, IndexError> {
     key.check()?;
-    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        check_dir(dir).map_err(|e| IndexError::Io(e.to_string()))?;
-    }
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && *p != Path::new("."))
+        .ok_or_else(|| IndexError::Io(format!("{} has no cache directory", path.display())))?;
+    check_dir(dir).map_err(|e| IndexError::Io(e.to_string()))?;
     let io_err = |e: io::Error| IndexError::Io(format!("{}: {e}", path.display()));
     let file = File::options()
         .read(true)
@@ -1046,8 +1093,13 @@ fn decode_with(bytes: &[u8], key: &IndexKey, budget: usize) -> Result<Catalog, I
     let skipped = d.u32()?;
     let n = d.count(MAX_COMPONENTS)?;
     let mut components = Vec::with_capacity(n);
+    let mut seen = HashSet::with_capacity(n);
     for _ in 0..n {
-        components.push(d.component()?);
+        let c = d.component()?;
+        if !seen.insert(c.id.clone()) {
+            return Err(IndexError::Corrupt("duplicate component id"));
+        }
+        components.push(c);
     }
     if !d.b.is_empty() {
         return Err(IndexError::Damaged("trailing bytes"));
@@ -1108,6 +1160,65 @@ mod tests {
     fn payload_of(b: &[u8]) -> &[u8] {
         // For the empty catalog: the origin string (4 + 7), skipped (4), count (4).
         &b[b.len() - 19..]
+    }
+
+    /// Decodes the sample catalog after `edit`, which must break one rule.
+    fn bad(edit: impl FnOnce(&mut Catalog)) -> IndexError {
+        let mut cat = catalog();
+        edit(&mut cat);
+        decode(&encode(&key(), &cat), &key()).expect_err("the edit must be refused")
+    }
+
+    fn first_with_bundle(cat: &mut Catalog) -> &mut Component {
+        cat.components
+            .iter_mut()
+            .find(|c| c.bundle.is_some() && c.kind == Kind::DesktopApp)
+            .expect("the sample has an app")
+    }
+
+    #[test]
+    fn decoder_repeats_the_parsers_component_checks() {
+        let c = |e: IndexError| matches!(e, IndexError::Corrupt(_));
+        assert!(c(bad(|k| {
+            first_with_bundle(k).bundle.as_mut().unwrap().runtime = Some("not a target".into());
+        })));
+        assert!(c(bad(|k| {
+            first_with_bundle(k).bundle.as_mut().unwrap().sdk = Some("a.b/x86_64".into());
+        })));
+        assert!(c(bad(|k| {
+            first_with_bundle(k).bundle.as_mut().unwrap().reference =
+                "app/x.evil/x86_64/stable".into();
+        })));
+        assert!(c(bad(|k| {
+            let m = k
+                .components
+                .iter_mut()
+                .find(|c| c.kind == Kind::Runtime && c.bundle.is_some());
+            m.expect("the sample has a runtime")
+                .bundle
+                .as_mut()
+                .unwrap()
+                .reference = "runtime/x.evil/x86_64/stable".into();
+        })));
+        assert!(c(bad(|k| first_with_bundle(k).bundle = None)));
+        assert!(c(bad(|k| {
+            let d = k.components[0].clone();
+            k.components.push(d);
+        })));
+        assert!(c(bad(|k| k.components[0].name.clear())));
+    }
+
+    #[test]
+    fn decoder_repeats_the_parsers_text_rules() {
+        let c = |e: IndexError| matches!(e, IndexError::Corrupt(_));
+        let long = "a".repeat(Limits::default().name + 1);
+        assert!(c(bad(|k| k.components[0].name = long.clone())));
+        assert!(c(bad(|k| k.components[0].summary = "a".repeat(401))));
+        assert!(c(bad(|k| k.components[0].developer = "a".repeat(201))));
+        assert!(c(bad(|k| k.components[0].keywords = vec!["a".repeat(65)])));
+        assert!(c(bad(|k| k.components[0].name = "two  spaces".into())));
+        assert!(c(bad(|k| k.components[0].summary = "line\nbreak".into())));
+        assert!(c(bad(|k| k.components[0].developer = " padded ".into())));
     }
 
     #[test]
@@ -1349,7 +1460,16 @@ mod tests {
         let mut c = catalog().components.swap_remove(0);
         c.keywords = vec![String::new(); MAX_LIST];
         c.categories = vec![String::new(); MAX_LIST];
-        cat.components = vec![c; 200];
+        cat.components = (0..200)
+            .map(|i| {
+                let mut c = c.clone();
+                c.id = format!("org.example.App{i}");
+                if let Some(b) = c.bundle.as_mut() {
+                    b.reference = format!("app/{}/x86_64/stable", c.id);
+                }
+                c
+            })
+            .collect();
         let bytes = encode(&key(), &cat);
         // Each component costs at least 5120: 128 strings at 24 and 128 list items at 16.
         assert!(decode_with(&bytes, &key(), MAX_DECODED).is_ok());

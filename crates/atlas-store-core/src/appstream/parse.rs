@@ -264,7 +264,9 @@ impl<R> Guard<R> {
             }
             Scan::Open { mut buf, n } => {
                 if n == 0 && b == b'?' {
-                    Scan::Pi { question: false }
+                    // quick-xml ends a PI at the first `>` after the `?` of
+                    // `<?`, so `<?>` is complete (it then fails as malformed).
+                    Scan::Pi { question: true }
                 } else {
                     let i = usize::from(n);
                     buf[i] = b;
@@ -275,6 +277,12 @@ impl<R> Guard<R> {
                         Scan::CData { brackets: 0 }
                     } else if b"!--".starts_with(seen) || b"![CDATA[".starts_with(seen) {
                         Scan::Open { buf, n: n + 1 }
+                    } else if seen[0] == b'!' {
+                        // quick-xml reads any `<!d` as a DOCTYPE (skipping
+                        // `<>` pairs inside `[..]`) and any `<![` as CDATA, so
+                        // this scanner cannot follow them. Real catalogs have
+                        // no markup declarations and DOCTYPE is refused anyway.
+                        return Err(LimitHit("markup declaration"));
                     } else {
                         // Not a comment or CDATA: an ordinary tag. The bytes
                         // matched so far hold no quote or `>`.
@@ -655,8 +663,10 @@ impl Inline {
     fn flush(&mut self) {
         if self.spans.len() >= MAX_SPANS {
             // Past the span cap the rest of the paragraph is dropped.
-            self.cur.clear();
-            self.over = true;
+            if !self.cur.is_empty() {
+                self.cur.clear();
+                self.over = true;
+            }
             return;
         }
         if !self.cur.is_empty() {
@@ -1542,18 +1552,14 @@ impl<'o> State<'o> {
         self.desc = None;
         self.leaf = None;
         let valid_id = text::valid_id(&c.id);
-        let needs_bundle = c.kind != Kind::Other;
+        let needs_bundle = needs_bundle(c.kind);
         if !valid_id || c.name.s.is_empty() || (needs_bundle && c.bundle.is_none()) {
             self.skipped = self.skipped.saturating_add(1);
             return Ok(());
         }
-        // The bundle is what gets installed, so it must be the app shown: its
-        // ID has to be the component's own, or that with `.desktop` stripped (a few
-        // real apps, such as org.telegram.desktop, have it in the bundle too).
-        if matches!(c.kind, Kind::DesktopApp | Kind::ConsoleApp | Kind::Addon)
-            && let Some(b) = c.bundle.as_ref()
-            && bundle_id(&b.reference)
-                .is_none_or(|i| i != c.id && Some(i) != c.id.strip_suffix(".desktop"))
+        // The bundle is what gets installed, so it must be the app shown.
+        if let Some(b) = c.bundle.as_ref()
+            && !bundle_matches(&c.id, &b.reference)
         {
             self.skipped = self.skipped.saturating_add(1);
             return Ok(());
@@ -1634,6 +1640,22 @@ impl<'o> State<'o> {
             skipped: self.skipped,
         })
     }
+}
+
+/// Whether a component of this kind is only listed with a bundle.
+pub(crate) fn needs_bundle(kind: Kind) -> bool {
+    kind != Kind::Other
+}
+
+/// Whether a bundle reference installs the component it is listed under: its
+/// ID has to be the component's own, or that with `.desktop` stripped (a few
+/// real apps, such as org.telegram.desktop, have it in the bundle too).
+/// Known gap: component `X.desktop` with bundle `X` passes, so the shown name
+/// may belong to a different ID than the one installed; the install dialog
+/// shows the real ref.
+pub(crate) fn bundle_matches(component_id: &str, reference: &str) -> bool {
+    bundle_id(reference)
+        .is_some_and(|i| i == component_id || Some(i) == component_id.strip_suffix(".desktop"))
 }
 
 /// The ID of an `app/ID/arch/branch` or `runtime/ID/arch/branch` reference.
