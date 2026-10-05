@@ -9,3 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 log.workspace = true
+quick-xml.workspace = true
+flate2.workspace = true
+libc.workspace = true

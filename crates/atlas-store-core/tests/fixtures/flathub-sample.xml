@@ -1,0 +1,641 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="flatpak">
+  <component type="desktop-application">
+    <id>ai.jan.Jan</id>
+    <name>Jan</name>
+    <summary>Private offline AI assistant</summary>
+    <summary xml:lang="pl">Prywatny asystent SI działający bez dostępu do sieci</summary>
+    <project_license>Apache-2.0</project_license>
+    <description>
+      <p>
+      Jan is an open source alternative to ChatGPT that runs 100% offline on your computer.
+    </p>
+      <p>Features</p>
+      <ul>
+        <li>Local AI models: Run LLMs such as Llama, Gemma, Qwen and others on your device</li>
+        <li>Optional cloud access: Connect to services like OpenAI, Anthropic, Gemini and Groq when internet-based models are required</li>
+        <li>Custom assistants: Create tailored assistants for writing, coding, summarizing and more</li>
+        <li>OpenAI-compatible API: Includes a local API server at localhost:1337 for tools expecting the OpenAI format</li>
+        <li>MCP support: Integrates the Model Context Protocol for enhanced workflows and tooling</li>
+        <li>Privacy-aware design: Jan works offline by default. Cloud access is optional and user-controlled</li>
+      </ul>
+      <p>
+      Jan is actively maintained by Menlo Research.  
+      Feedback, bug reports and feature requests are welcomed through GitHub.
+    </p>
+    </description>
+    <description xml:lang="pl">
+      <p>
+      Jan to otwartoźródłowa alternatywa dla ChatGPT, która działa w 100% bez dostępu do sieci na Twoim komputerze.
+    </p>
+      <ul>
+        <li>Lokalne modele SI: Uruchamiaj duże modele językowe, takie jak Llama, Gemma i Qwen, na swoim urządzeniu.</li>
+        <li>Opcjonalny dostęp do chmury: Łącz się z usługami, takimi jak OpenAI, Anthropic, Gemini i Groq, gdy wymagane są modele dostępne przez Internet.</li>
+        <li>Własne asystenty: Twórz asystenty wyspecjalizowane do pisania, kodowania, podsumowywania itd.</li>
+        <li>Interfejs API kompatybilny z OpenAI: Jan posiada lokalny serwer API, dostępny pod adresem localhost:1337, dla narzędzi zgodnych z formatem OpenAI.</li>
+        <li>Obsługa MCP: Jan obsługuje Model Context Protocol dla lepszego przepływu pracy i obsługi narzędzi.</li>
+        <li>Projekt uwzględniający prywatność: Jan domyślnie działa w trybie bez dostępu do sieci. Dostęp do chmury jest opcjonalny i pozostaje pod kontrolą użytkownika.</li>
+      </ul>
+      <p>
+      Aplikacja Jan jest aktywnie utrzymywana przez Menlo Research.
+      Informacje zwrotne, zgłoszenia błędów i prośby o nowe funkcje są mile widziane za pośrednictwem platformy GitHub.
+    </p>
+    </description>
+    <developer>
+      <name>Menlo Research Pte. Ltd.</name>
+    </developer>
+    <developer_name>Menlo Research Pte. Ltd.</developer_name>
+    <launchable type="desktop-id">ai.jan.Jan.desktop</launchable>
+    <icon height="48" type="cached" width="48">ai.jan.Jan.png</icon>
+    <icon height="64" type="cached" width="64">ai.jan.Jan.png</icon>
+    <icon height="64" scale="2" type="cached" width="64">ai.jan.Jan.png</icon>
+    <icon height="128" type="cached" width="128">ai.jan.Jan.png</icon>
+    <icon height="128" scale="2" type="cached" width="128">ai.jan.Jan.png</icon>
+    <icon type="stock">ai.jan.Jan</icon>
+    <icon height="128" type="remote" width="128">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/icons/128x128/ai.jan.Jan.png</icon>
+    <icon height="128" scale="2" type="remote" width="128">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/icons/128x128@2/ai.jan.Jan.png</icon>
+    <url type="homepage">https://jan.ai/</url>
+    <url type="bugtracker">https://github.com/janhq/jan/issues</url>
+    <url type="vcs-browser">https://github.com/janhq/jan</url>
+    <categories>
+      <category>Utility</category>
+      <category>Education</category>
+      <category>Chat</category>
+      <category>Dictionary</category>
+    </categories>
+    <screenshots>
+      <screenshot>
+        <caption>Blank Jan page with 0 threads</caption>
+        <caption xml:lang="pl">Pusta strona Jan bez żadnych wątków</caption>
+        <image height="743" type="source" width="960">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-1_orig.png</image>
+        <image height="582" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-1_752x582@1.png</image>
+        <image height="482" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-1_624x482@1.png</image>
+        <image height="173" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-1_224x173@1.png</image>
+      </screenshot>
+      <screenshot type="default">
+        <caption>Jan using a search MCP to gather information</caption>
+        <caption xml:lang="pl">Aplikacja Jan używająca wyszukiwania MCP celem zgromadzenia informacji</caption>
+        <image height="737" type="source" width="960">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-2_orig.png</image>
+        <image height="577" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-2_752x577@1.png</image>
+        <image height="479" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-2_624x479@1.png</image>
+        <image height="171" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-2_224x171@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>Assistant creation screen</caption>
+        <caption xml:lang="pl">Ekran tworzenia asystenta</caption>
+        <image height="739" type="source" width="958">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-3_orig.png</image>
+        <image height="580" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-3_752x580@1.png</image>
+        <image height="481" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-3_624x481@1.png</image>
+        <image height="172" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-3_224x172@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>Jan Hub</caption>
+        <caption xml:lang="pl">Centrum modeli Jan</caption>
+        <image height="744" type="source" width="953">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-4_orig.png</image>
+        <image height="587" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-4_752x587@1.png</image>
+        <image height="487" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-4_624x487@1.png</image>
+        <image height="174" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-4_224x174@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>Llama.cpp screen showcasing the models</caption>
+        <caption xml:lang="pl">Ekran Llama.cpp z listą modeli</caption>
+        <image height="768" type="source" width="1028">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-5_orig.png</image>
+        <image height="561" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-5_752x561@1.png</image>
+        <image height="466" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-5_624x466@1.png</image>
+        <image height="167" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-5_224x167@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>MCP Settings</caption>
+        <caption xml:lang="pl">Ustawienia MCP</caption>
+        <image height="746" type="source" width="951">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-6_orig.png</image>
+        <image height="589" type="thumbnail" width="752">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-6_752x589@1.png</image>
+        <image height="489" type="thumbnail" width="624">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-6_624x489@1.png</image>
+        <image height="175" type="thumbnail" width="224">https://dl.flathub.org/media/ai/jan/Jan/d143900b8550a00ba239b0d3ea3a5b8f/screenshots/image-6_224x175@1.png</image>
+      </screenshot>
+    </screenshots>
+    <keywords>
+      <keyword>chatbot</keyword>
+      <keyword>ai assistant</keyword>
+      <keyword>offline ai</keyword>
+    </keywords>
+    <releases>
+      <release timestamp="1784764800" type="stable" version="0.8.4">
+        <description>
+          <p>Backend-managed settings and credentials with OS keyring support, native web_search/web_fetch via tauri-plugin-websearch, built-in extension bundling, per-model chat template kwargs, OpenAI-compatible translating gateway with Responses API, chain-of-thought duration persistence, MCP duplicate serve guard, multi-provider API key rotation, and a large batch of chat, RAG, and desktop fixes</p>
+        </description>
+      </release>
+      <release timestamp="1782259200" type="stable" version="0.8.3">
+        <description>
+          <p>A visible assistant switcher with a Cmd/Ctrl+J cycle shortcut, a unified reasoning and tool-call trace timeline, per-model sampling defaults for the local API server, a larger 100MB attachment limit, plus a batch of chat, citation, markdown/LaTeX rendering, factory-reset, and Linux fixes</p>
+        </description>
+      </release>
+      <release timestamp="1780272000" type="stable" version="0.8.2">
+        <description>
+          <p>Experimental AMD ROCm/HIP backend on Linux, a branded phased-startup loader with faster first paint, pause/resume model downloads, a safer default context size, and a batch of chat, provider, and toast fixes</p>
+        </description>
+      </release>
+      <release timestamp="1780012800" type="stable" version="0.8.1">
+        <description>
+          <p>Anthropic-compatible custom providers, provider-aware sampling controls, media-only messages, an overhauled llama.cpp settings UX, and many stability and error-handling fixes</p>
+        </description>
+      </release>
+    </releases>
+    <content_rating type="oars-1.1"/>
+  <custom><value key="flathub::verification::verified">true</value>
+  <value key="flathub::verification::timestamp">1764081595</value>
+  <value key="flathub::verification::method">website</value>
+  <value key="flathub::verification::website">jan.ai</value>
+  <value key="flathub::verification::login_is_organization">false</value>
+  <value key="flathub::build::build_log_url">https://builds.flathub.org/api/pipelines/56ef37cc-1174-4321-8222-c7e6706b1c70/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.gnome.Platform/x86_64/50" sdk="org.gnome.Sdk/x86_64/50">app/ai.jan.Jan/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>app.ywallet.Ywallet</id>
+    <name>Ywallet</name>
+    <summary>Light Wallet for Ycash and Zcash</summary>
+    <project_license>MIT</project_license>
+    <description>
+      <p>Fastest synchronization of all the wallets on the market</p>
+      <p>Supports every feature of shielded y/zcash</p>
+      <p>Track your wallet performance and expenditures</p>
+      <p>Watch-only and Cold Wallet</p>
+    </description>
+    <developer>
+      <name>Hanh Huynh Huu</name>
+    </developer>
+    <developer_name>Hanh Huynh Huu</developer_name>
+    <launchable type="desktop-id">app.ywallet.Ywallet.desktop</launchable>
+    <icon height="64" type="cached" width="64">app.ywallet.Ywallet.png</icon>
+    <icon height="128" type="remote" width="128">https://dl.flathub.org/media/app/ywallet/Ywallet/ca4ae84dc8ae1f81eecd9d300c8c4515/icons/128x128/app.ywallet.Ywallet.png</icon>
+    <icon height="128" type="cached" width="128">app.ywallet.Ywallet.png</icon>
+    <icon type="stock">app.ywallet.Ywallet</icon>
+    <url type="homepage">https://hhanh00.github.io/zwallet/</url>
+    <categories>
+      <category>Office</category>
+      <category>Finance</category>
+    </categories>
+    <screenshots>
+      <screenshot type="default">
+        <caption>YWallet main screen</caption>
+        <image height="720" type="source" width="405">https://dl.flathub.org/media/app/ywallet/Ywallet/ca4ae84dc8ae1f81eecd9d300c8c4515/screenshots/image-1_orig.png</image>
+        <image height="398" type="thumbnail" width="224">https://dl.flathub.org/media/app/ywallet/Ywallet/ca4ae84dc8ae1f81eecd9d300c8c4515/screenshots/image-1_224x398@1.png</image>
+      </screenshot>
+    </screenshots>
+    <releases>
+      <release timestamp="1709164800" type="stable" version="1.5.4"/>
+    </releases>
+    <content_rating type="oars-1.1"/>
+  <custom><value key="flathub::build::build_log_url">https://flathub-vorarbeiter.apps.openshift.gnome.org/api/pipelines/51c90d2f-d010-4980-8648-3c311c584d3f/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.freedesktop.Platform/x86_64/24.08" sdk="org.freedesktop.Sdk/x86_64/24.08">app/app.ywallet.Ywallet/x86_64/stable</bundle>
+  </component>
+  <component type="console-application">
+    <id>chat.iamb.iamb</id>
+    <name>iamb</name>
+    <summary>TUI Matrix client for Vim addicts</summary>
+    <project_license>Apache-2.0</project_license>
+    <description>
+      <p>
+        iamb is a client for the Matrix communication protocol. It provides a
+        terminal user interface with familiar Vim keybindings, and includes
+        support for multiple profiles, threads, spaces, notifications,
+        reactions, custom keybindings, and more.
+    </p>
+    </description>
+    <developer id="dev.ulyssa">
+      <name>Ulyssa</name>
+    </developer>
+    <developer_name>Ulyssa</developer_name>
+    <launchable type="desktop-id">chat.iamb.iamb.desktop</launchable>
+    <url type="homepage">https://iamb.chat</url>
+    <categories>
+      <category>Network</category>
+      <category>Chat</category>
+    </categories>
+    <provides>
+      <binary>iamb</binary>
+    </provides>
+    <screenshots>
+      <screenshot type="default">
+        <caption>Example screenshot of room and lists of rooms, spaces and members within iamb</caption>
+        <image height="1027" type="source" width="1850">https://dl.flathub.org/media/chat/iamb/iamb/b5a3af6d9845fe3457b8e506130536a6/screenshots/image-1_orig.png</image>
+        <image height="692" type="thumbnail" width="1248">https://dl.flathub.org/media/chat/iamb/iamb/b5a3af6d9845fe3457b8e506130536a6/screenshots/image-1_1248x692@1.png</image>
+        <image height="417" type="thumbnail" width="752">https://dl.flathub.org/media/chat/iamb/iamb/b5a3af6d9845fe3457b8e506130536a6/screenshots/image-1_752x417@1.png</image>
+        <image height="346" type="thumbnail" width="624">https://dl.flathub.org/media/chat/iamb/iamb/b5a3af6d9845fe3457b8e506130536a6/screenshots/image-1_624x346@1.png</image>
+        <image height="124" type="thumbnail" width="224">https://dl.flathub.org/media/chat/iamb/iamb/b5a3af6d9845fe3457b8e506130536a6/screenshots/image-1_224x124@1.png</image>
+      </screenshot>
+    </screenshots>
+    <branding>
+      <color scheme_preference="light" type="primary">#fafafa</color>
+      <color scheme_preference="dark" type="primary">#282d3f</color>
+    </branding>
+    <releases>
+      <release timestamp="1789776000" type="stable" version="0.0.12"/>
+      <release timestamp="1768780800" type="stable" version="0.0.11"/>
+      <release timestamp="1724112000" type="stable" version="0.0.10"/>
+      <release timestamp="1711584000" type="stable" version="0.0.9"/>
+    </releases>
+    <content_rating type="oars-1.1">
+      <content_attribute id="social-chat">intense</content_attribute>
+    </content_rating>
+  <custom><value key="flathub::verification::verified">true</value>
+  <value key="flathub::verification::timestamp">1724684993</value>
+  <value key="flathub::verification::method">website</value>
+  <value key="flathub::verification::website">iamb.chat</value>
+  <value key="flathub::verification::login_is_organization">false</value>
+  <value key="flathub::build::build_log_url">https://builds.flathub.org/api/pipelines/2f9e852a-808e-4cab-befc-06df92c5537c/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.freedesktop.Platform/x86_64/26.08" sdk="org.freedesktop.Sdk/x86_64/26.08">app/chat.iamb.iamb/x86_64/stable</bundle>
+  </component>
+  <component type="console-application">
+    <id>com.github.nihui.waifu2x-ncnn-vulkan</id>
+    <name>waifu2x-ncnn-vulkan</name>
+    <summary>waifu2x converter ncnn version</summary>
+    <project_license>MIT</project_license>
+    <description>
+      <p>
+      Image Super-Resolution for Anime-Style Art
+    </p>
+    </description>
+    <developer>
+      <name>nihui</name>
+    </developer>
+    <developer_name>nihui</developer_name>
+    <url type="homepage">https://github.com/nihui/waifu2x-ncnn-vulkan</url>
+    <url type="bugtracker">https://github.com/nihui/waifu2x-ncnn-vulkan/issues</url>
+    <url type="vcs-browser">https://github.com/nihui/waifu2x-ncnn-vulkan</url>
+    <provides>
+      <binary>waifu2x-ncnn-vulkan</binary>
+    </provides>
+    <releases>
+      <release timestamp="1757894400" type="stable" version="20250915"/>
+      <release timestamp="1650326400" type="stable" version="20220419"/>
+      <release timestamp="1621555200" type="stable" version="20210521"/>
+      <release timestamp="1612915200" type="stable" version="20210210"/>
+    </releases>
+    <content_rating type="oars-1.0"/>
+  <custom><value key="flathub::build::build_log_url">https://flathub-vorarbeiter.apps.openshift.gnome.org/api/pipelines/d20003bf-ea69-4258-9e9b-9a35559fc71e/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.freedesktop.Platform/x86_64/25.08" sdk="org.freedesktop.Sdk/x86_64/25.08">app/com.github.nihui.waifu2x-ncnn-vulkan/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>net.nymtech.NymVPN</id>
+    <name>NymVPN</name>
+    <summary>Decentralized, mixnet, and zero-knowledge VPN</summary>
+    <project_license>GPL-3.0-only</project_license>
+    <description>
+      <p>Desktop application for NymVPN.</p>
+      <p>
+            NymVPN is a decentralized, mixnet and zero-knowledge VPN.
+            Features:
+        </p>
+      <ul>
+        <li>5-hop <em>Anonymous</em> mode (using the Nym Mixnet)</li>
+        <li>2-hop <em>Fast</em> mode (using WireGuard)</li>
+        <li>No centralized logs</li>
+        <li>Hide your public IP</li>
+        <li>Entry and exit hop location</li>
+      </ul>
+      <p>
+            NOTE: This package only provides the <em>client</em> application.
+            For the VPN to work, the daemon aka <code>nym-vpnd</code>,
+            must be installed and running.
+            You can install it from these separate packages:
+        </p>
+      <ul>
+        <li>deb package (requires to setup the Nym deb repository): <code>nym-vpnd</code></li>
+        <li>AUR packages: <code>nym-vpnd</code> and <code>nym-vpnd-bin</code></li>
+      </ul>
+      <p>For more details, please check https://nym.com/en/download/linux</p>
+      <p>
+            Alternatively you can get the binary directly from the GitHub releases:
+        </p>
+      <ol>
+        <li>Go to https://github.com/nymtech/nym-vpn-client/releases</li>
+        <li>Find the latest release with tag <code>nym-vpn-core-v1.2.3</code></li>
+        <li>Download the linux archive <code>nym-vpn-core-v1.2.3_linux_x86_64.tar.gz</code>
+                and extract the binary (make it executable)</li>
+        <li>From a terminal, run <code>sudo nym-vpnd</code></li>
+      </ol>
+      <p>
+            NOTE: The daemon requires root privileges to work.
+        </p>
+    </description>
+    <developer id="net.nymtech">
+      <name>Nym Technologies SA</name>
+    </developer>
+    <developer_name>Nym Technologies SA</developer_name>
+    <launchable type="desktop-id">net.nymtech.NymVPN.desktop</launchable>
+    <icon height="48" type="cached" width="48">net.nymtech.NymVPN.png</icon>
+    <icon height="64" type="cached" width="64">net.nymtech.NymVPN.png</icon>
+    <icon height="64" scale="2" type="cached" width="64">net.nymtech.NymVPN.png</icon>
+    <icon height="128" type="cached" width="128">net.nymtech.NymVPN.png</icon>
+    <icon height="128" scale="2" type="cached" width="128">net.nymtech.NymVPN.png</icon>
+    <icon type="stock">net.nymtech.NymVPN</icon>
+    <icon height="128" type="remote" width="128">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/icons/128x128/net.nymtech.NymVPN.png</icon>
+    <icon height="128" scale="2" type="remote" width="128">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/icons/128x128@2/net.nymtech.NymVPN.png</icon>
+    <url type="homepage">https://nymtech.net/</url>
+    <categories>
+      <category>Network</category>
+    </categories>
+    <screenshots>
+      <screenshot type="default">
+        <caption>NymVPN app screenshot, home screen</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-1_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-1_224x484@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>NymVPN app screenshot, home screen connected</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-2_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-2_224x484@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>NymVPN app screenshot, countries selection screen</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-3_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-3_224x484@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>NymVPN app screenshot, home screen (Dark mode)</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-4_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-4_224x484@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>NymVPN app screenshot, home screen connected (Dark mode)</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-5_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-5_224x484@1.png</image>
+      </screenshot>
+      <screenshot>
+        <caption>NymVPN app screenshot, countries selection screen (Dark mode)</caption>
+        <image height="844" type="source" width="390">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-6_orig.png</image>
+        <image height="484" type="thumbnail" width="224">https://dl.flathub.org/media/net/nymtech/NymVPN/394970e46f5efa774845d20e726b5ce9/screenshots/image-6_224x484@1.png</image>
+      </screenshot>
+    </screenshots>
+    <releases>
+      <release timestamp="1789516800" type="stable" version="2026.12.4">
+        <url>https://github.com/nymtech/nym-vpn-client/releases/tag/nym-vpn-v2026.12.4</url>
+      </release>
+      <release timestamp="1787616000" type="stable" version="2026.12.2">
+        <url>https://github.com/nymtech/nym-vpn-client/releases/tag/nym-vpn-v2026.12.2</url>
+      </release>
+      <release timestamp="1787356800" type="stable" version="2026.12.1">
+        <url>https://github.com/nymtech/nym-vpn-client/releases/tag/nym-vpn-v2026.12.1</url>
+      </release>
+      <release timestamp="1783641600" type="stable" version="2026.11.0">
+        <url>https://github.com/nymtech/nym-vpn-client/releases/tag/nym-vpn-v2026.11.0</url>
+      </release>
+    </releases>
+    <content_rating type="oars-1.1"/>
+  <custom><value key="flathub::verification::verified">true</value>
+  <value key="flathub::verification::timestamp">1729763066</value>
+  <value key="flathub::verification::method">website</value>
+  <value key="flathub::verification::website">nymtech.net</value>
+  <value key="flathub::verification::login_is_organization">false</value>
+  <value key="flathub::build::build_log_url">https://builds.flathub.org/api/pipelines/88fc7f5c-8248-4d67-815a-da1c75a697c5/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.gnome.Platform/x86_64/49" sdk="org.gnome.Sdk/x86_64/49">app/net.nymtech.NymVPN/x86_64/stable</bundle>
+  </component>
+  <component type="addon">
+    <id>org.gnome.NautilusPreviewer</id>
+    <name>Sushi</name>
+    <name xml:lang="de">Sushi</name>
+    <name xml:lang="pl">Sushi</name>
+    <summary>Provide a facility for quickly viewing different kinds of files</summary>
+    <summary xml:lang="de">Verschiedene Arten von Dateien schnell ansehen</summary>
+    <summary xml:lang="pl">Dodaje funkcję szybkiego podglądu różnych rodzajów plików</summary>
+    <project_license>GPL-2.0+</project_license>
+    <description>
+      <p>
+      Sushi is a file previewer for the GNOME desktop environment. It is an independent component that
+      integrates with GNOME Files (Nautilus).
+    </p>
+    </description>
+    <description xml:lang="de">
+      <p>Sushi ist eine Dateivorschau für die GNOME-Arbeitsumgebung. Sie ist eine unabhängige Komponente, die sich nahtlos in GNOME Dateien (Nautilus) integriert.</p>
+    </description>
+    <description xml:lang="pl">
+      <p>Sushi to aplikacja do podglądu plików dla środowiska GNOME. Jest niezależnym składnikiem integrującym się z Menedżerem plików GNOME (Nautilus).</p>
+    </description>
+    <extends>org.gnome.Nautilus.desktop</extends>
+    <url type="homepage">https://gitlab.gnome.org/GNOME/sushi</url>
+    <url type="bugtracker">https://github.com/flathub/org.gnome.NautilusPreviewer/issues</url>
+    <url type="translate">https://l10n.gnome.org/module/sushi/</url>
+    <url type="vcs-browser">https://gitlab.gnome.org/GNOME/sushi</url>
+    <languages>
+      <lang percentage="62">ab</lang>
+      <lang percentage="41">af</lang>
+      <lang percentage="50">an</lang>
+      <lang percentage="62">ar</lang>
+      <lang percentage="50">as</lang>
+      <lang percentage="41">ast</lang>
+      <lang percentage="62">az</lang>
+      <lang percentage="100">be</lang>
+      <lang percentage="100">bg</lang>
+      <lang percentage="41">bn</lang>
+      <lang percentage="50">bn_IN</lang>
+      <lang percentage="50">bs</lang>
+      <lang percentage="100">ca</lang>
+      <lang percentage="41">ca@valencia</lang>
+      <lang percentage="54">ckb</lang>
+      <lang percentage="100">cs</lang>
+      <lang percentage="100">da</lang>
+      <lang percentage="83">de</lang>
+      <lang percentage="62">el</lang>
+      <lang percentage="100">en_GB</lang>
+      <lang percentage="100">en_US</lang>
+      <lang percentage="100">eo</lang>
+      <lang percentage="100">es</lang>
+      <lang percentage="50">et</lang>
+      <lang percentage="100">eu</lang>
+      <lang percentage="100">fa</lang>
+      <lang percentage="100">fi</lang>
+      <lang percentage="62">fil</lang>
+      <lang percentage="100">fr</lang>
+      <lang percentage="62">fur</lang>
+      <lang percentage="41">gd</lang>
+      <lang percentage="100">gl</lang>
+      <lang percentage="50">gu</lang>
+      <lang percentage="100">he</lang>
+      <lang percentage="62">hi</lang>
+      <lang percentage="62">hr</lang>
+      <lang percentage="100">hu</lang>
+      <lang percentage="62">ia</lang>
+      <lang percentage="62">id</lang>
+      <lang percentage="62">ie</lang>
+      <lang percentage="50">is</lang>
+      <lang percentage="62">it</lang>
+      <lang percentage="62">ja</lang>
+      <lang percentage="100">ka</lang>
+      <lang percentage="62">kab</lang>
+      <lang percentage="100">kk</lang>
+      <lang percentage="50">kn</lang>
+      <lang percentage="100">ko</lang>
+      <lang percentage="62">kw</lang>
+      <lang percentage="62">lo</lang>
+      <lang percentage="100">lt</lang>
+      <lang percentage="62">lv</lang>
+      <lang percentage="25">mjw</lang>
+      <lang percentage="50">ml</lang>
+      <lang percentage="50">mr</lang>
+      <lang percentage="58">ms</lang>
+      <lang percentage="100">nb</lang>
+      <lang percentage="62">ne</lang>
+      <lang percentage="100">nl</lang>
+      <lang percentage="100">nn</lang>
+      <lang percentage="100">oc</lang>
+      <lang percentage="50">or</lang>
+      <lang percentage="50">pa</lang>
+      <lang percentage="100">pl</lang>
+      <lang percentage="83">pt</lang>
+      <lang percentage="100">pt_BR</lang>
+      <lang percentage="100">ro</lang>
+      <lang percentage="100">ru</lang>
+      <lang percentage="62">sk</lang>
+      <lang percentage="100">sl</lang>
+      <lang percentage="100">sr</lang>
+      <lang percentage="62">sr@latin</lang>
+      <lang percentage="100">sv</lang>
+      <lang percentage="62">ta</lang>
+      <lang percentage="50">te</lang>
+      <lang percentage="50">tg</lang>
+      <lang percentage="62">th</lang>
+      <lang percentage="100">tr</lang>
+      <lang percentage="100">ug</lang>
+      <lang percentage="100">uk</lang>
+      <lang percentage="62">uz</lang>
+      <lang percentage="50">uz@cyrillic</lang>
+      <lang percentage="62">vi</lang>
+      <lang percentage="100">zh_CN</lang>
+      <lang percentage="50">zh_HK</lang>
+      <lang percentage="62">zh_TW</lang>
+    </languages>
+    <keywords>
+      <keyword>nautilus</keyword>
+      <keyword>sushi</keyword>
+      <keyword>view</keyword>
+      <keyword>previewer</keyword>
+      <keyword>preview</keyword>
+    </keywords>
+    <keywords xml:lang="de">
+      <keyword>nautilus</keyword>
+      <keyword>sushi</keyword>
+      <keyword>Ansicht</keyword>
+      <keyword>Vorschau</keyword>
+      <keyword>Vorschau</keyword>
+    </keywords>
+    <keywords xml:lang="pl">
+      <keyword>nautilus</keyword>
+      <keyword>sushi</keyword>
+      <keyword>widok</keyword>
+      <keyword>aplikacja do podglądu</keyword>
+      <keyword>podgląd</keyword>
+    </keywords>
+    <releases>
+      <release timestamp="1789862400" type="stable" version="51.1"/>
+      <release timestamp="1789084800" type="stable" version="51.0">
+        <description>
+          <ul>
+            <li>Complete graphical overhaul, including a modernized graphical backend (Ported to GTK4, libadwaita and glycin), dark mode support, a simplified headerbar layout, and adjusted layout for several previewers</li>
+            <li>Revamped plugin API for better plugin support</li>
+            <li>Smoother transitions between files, especially images</li>
+            <li>Protected HTML previews with optional web content loading</li>
+            <li>Reduced memory usage with fixed memory leaks</li>
+            <li>Supported F2 and Del shortcuts</li>
+            <li>Many additional bug fixes and added little niceties</li>
+          </ul>
+        </description>
+      </release>
+      <release timestamp="1788048000" type="development" version="51~rc"/>
+      <release timestamp="1785542400" type="development" version="51~beta"/>
+    </releases>
+  <custom><value key="flathub::build::build_log_url">https://builds.flathub.org/api/pipelines/1db51120-3b8b-42c3-8be4-41bb15d320c4/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.gnome.Platform/x86_64/51" sdk="org.gnome.Sdk/x86_64/51">app/org.gnome.NautilusPreviewer/x86_64/stable</bundle>
+  </component>
+  <component type="desktop-application">
+    <id>ua.org.brezblock.q4wine</id>
+    <name>q4wine</name>
+    <summary>Utility for Wine applications and prefixes management</summary>
+    <summary xml:lang="de">Werkzeug zur Verwaltung von Wine-Anwendungen und Präfixen</summary>
+    <summary xml:lang="ja.ts">Wine 上のアプリケーションと実行環境を管理するユーティリティです。</summary>
+    <summary xml:lang="pl">Zarządzanie programami Wine i prefiksami</summary>
+    <project_license>GPL-3.0-or-later</project_license>
+    <description>
+      <p>
+      Q4Wine is a Qt GUI for Wine. It will help you manage Wine prefixes and installed applications.
+    </p>
+    </description>
+    <developer>
+      <name>Oleksii S. Malakhov</name>
+    </developer>
+    <developer_name>Oleksii S. Malakhov</developer_name>
+    <launchable type="desktop-id">ua.org.brezblock.q4wine.desktop</launchable>
+    <icon height="48" type="cached" width="48">ua.org.brezblock.q4wine.png</icon>
+    <icon height="64" type="cached" width="64">ua.org.brezblock.q4wine.png</icon>
+    <icon height="64" scale="2" type="cached" width="64">ua.org.brezblock.q4wine.png</icon>
+    <icon height="128" type="remote" width="128">https://dl.flathub.org/media/ua/org/brezblock.q4wine/5527deceb7784e79fd7c4ab5d35ab65e/icons/128x128/ua.org.brezblock.q4wine.png</icon>
+    <icon height="128" type="cached" width="128">ua.org.brezblock.q4wine.png</icon>
+    <icon height="128" scale="2" type="remote" width="128">https://dl.flathub.org/media/ua/org/brezblock.q4wine/5527deceb7784e79fd7c4ab5d35ab65e/icons/128x128@2/ua.org.brezblock.q4wine.png</icon>
+    <icon height="128" scale="2" type="cached" width="128">ua.org.brezblock.q4wine.png</icon>
+    <icon type="stock">ua.org.brezblock.q4wine</icon>
+    <url type="homepage">https://q4wine.brezblock.org.ua</url>
+    <url type="bugtracker">https://github.com/brezerk/q4wine/issues</url>
+    <url type="donation">https://www.comebackalive.in.ua/donate</url>
+    <url type="translate">https://github.com/brezerk/q4wine/tree/master/src/l10n</url>
+    <categories>
+      <category>System</category>
+    </categories>
+    <provides>
+      <mediatype>application/x-ms-dos-executable</mediatype>
+      <mediatype>application/x-msi</mediatype>
+    </provides>
+    <languages>
+      <lang percentage="96">af</lang>
+      <lang percentage="89">cs</lang>
+      <lang percentage="88">de</lang>
+      <lang percentage="31">en</lang>
+      <lang percentage="100">en_US</lang>
+      <lang percentage="90">es</lang>
+      <lang percentage="84">fa</lang>
+      <lang percentage="30">fr</lang>
+      <lang percentage="88">he</lang>
+      <lang percentage="93">it</lang>
+      <lang percentage="97">ja</lang>
+      <lang percentage="100">nl</lang>
+      <lang percentage="70">pl</lang>
+      <lang percentage="88">pt_BR</lang>
+      <lang percentage="97">uk</lang>
+      <lang percentage="97">zh_CN</lang>
+      <lang percentage="97">zh_TW</lang>
+    </languages>
+    <screenshots>
+      <screenshot type="default">
+        <image height="659" type="source" width="730">https://dl.flathub.org/media/ua/org/brezblock.q4wine/5527deceb7784e79fd7c4ab5d35ab65e/screenshots/image-1_orig.png</image>
+        <image height="563" type="thumbnail" width="624">https://dl.flathub.org/media/ua/org/brezblock.q4wine/5527deceb7784e79fd7c4ab5d35ab65e/screenshots/image-1_624x563@1.png</image>
+        <image height="202" type="thumbnail" width="224">https://dl.flathub.org/media/ua/org/brezblock.q4wine/5527deceb7784e79fd7c4ab5d35ab65e/screenshots/image-1_224x202@1.png</image>
+      </screenshot>
+    </screenshots>
+    <keywords>
+      <keyword>Wine</keyword>
+      <keyword>Windows</keyword>
+      <keyword>Emulator</keyword>
+    </keywords>
+    <releases>
+      <release timestamp="1745020800" type="stable" version="1.4.1"/>
+      <release timestamp="1744502400" type="stable" version="1.4.0"/>
+      <release timestamp="1599696000" type="stable" version="1.3.13"/>
+      <release timestamp="1581120000" type="stable" version="1.3.12"/>
+    </releases>
+    <content_rating type="oars-1.1"/>
+  <custom><value key="flathub::build::build_log_url">https://builds.flathub.org/api/pipelines/ba7db191-4a7d-4144-980b-1664b48e792b/log_url</value>
+  </custom>
+    <bundle type="flatpak" runtime="org.kde.Platform/x86_64/6.10" sdk="org.kde.Sdk/x86_64/6.10">app/ua.org.brezblock.q4wine/x86_64/stable</bundle>
+  </component>
+  <component type="runtime">
+    <id>org.freedesktop.Sdk.Extension.golang</id>
+    <name>Go programming language Sdk extension</name>
+    <summary>Go compiler and tools</summary>
+    <url type="homepage">https://golang.org/</url>
+    <bundle type="flatpak" runtime="org.freedesktop.Sdk/x86_64/18.08" sdk="org.freedesktop.Sdk/x86_64/18.08">runtime/org.freedesktop.Sdk.Extension.golang/x86_64/18.08</bundle>
+  </component>
+</components>
