@@ -17,7 +17,7 @@
 //! limit. Every cap the decoder applies is the parser's own ([`Limits`] and
 //! the constants beside it), so what the parser keeps is always accepted.
 //! The cache directory must be the user's own: [`read`] refuses one that
-//! group or others can write to (the caller rebuilds, and [`write`] sets it
+//! group or others can write to (the caller rebuilds, and [`write()`] sets it
 //! to 0700 first), and neither reads nor writes through a link.
 //!
 //! Layout, little-endian: the magic `ATLASIDX`, the format version, the
@@ -1283,7 +1283,7 @@ impl<'a> Dec<'a> {
 
 /// Reads the index at `path` if it was built for `key`. The directory must be
 /// the user's own, not a link and not writable by group or others (it is
-/// refused, never changed: [`write`] repairs it); the file is opened without
+/// refused, never changed: [`write()`] repairs it); the file is opened without
 /// following a symlink, must be a regular file of at most 32 MiB and must pass
 /// every check in the module description. [`IndexError::Missing`] when there
 /// is no file or no cache directory yet.
