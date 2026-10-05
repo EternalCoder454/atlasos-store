@@ -96,8 +96,16 @@ enters, in `atlas-store-core`:
 - flatpakref and flatpakrepo: read as GLib key files with limits (256 KiB,
   4096 lines, 64 KiB per value), known keys only, translated and unknown keys
   refused, https only, the GPG key parsed and its fingerprint shown,
-  `RuntimeRepo=` never followed without its own confirmation. libflatpak
-  only ever gets the Store's own `to_bytes()` rewrite, never the file.
+  `RuntimeRepo=` never followed without its own confirmation
+  (`Error::NeedsRuntimeRepo` names it). libflatpak never gets a
+  `.flatpakref` at all: it adds the file's remote while planning, even if the
+  install is then abandoned. The Store resolves the source itself
+  (`resolve_ref_source`): an enabled remote with the same normalized URL is
+  used as it is and the file's key is ignored; otherwise a `RemoteProposal`
+  (name, URL, key fingerprint, flatpak's origin-remote settings) goes to an
+  "Add Source" confirmation, and `add_ref_remote` builds the remote from the
+  proposal's own fields. A `.flatpakrepo` goes to libflatpak only as the
+  Store's own `to_bytes()` rewrite.
 - Cache files live under `~/.cache/atlas-store` (0700), written atomically,
   files that are symlinks refused, and the cache folder itself must not be
   one (folders above it may be, for a moved `~/.cache`). A cache folder that is not
@@ -127,6 +135,16 @@ the Store's own dialog, showing the app, the remote, sizes and permissions.
 Fedora's polkit gives wheel members Flatpak installs without a password, so
 polkit is not the confirmation. System-wide changes go through flatpak's own
 polkit helper; the Store has no helper and no polkit actions of its own.
+A file's source is its own step: "Add Source" (remote, URL, key fingerprint or
+a warning that it is unsigned) comes before the install confirmation, and a
+declined install can take the source back (`remove_remote`: exact name and
+URL, nothing installed from it). An install runs only what its confirmed plan
+lists: the source is re-checked (same URL and signing, still enabled) and a
+fresh transaction is compared with the plan before anything downloads, else
+`PlanChanged` says what differs and the user is asked again. Uninstalling an
+app deletes its data only on request, for the current user, never while it
+runs and never while another branch of it is installed; a runtime an
+installed app uses is refused (only "remove unused" removes runtimes).
 
 ## Lifetime
 

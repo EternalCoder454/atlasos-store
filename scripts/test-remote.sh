@@ -3,8 +3,9 @@
 # so nothing ever touches a real installation or Flathub. Run it in the dev
 # container (scripts/dev.sh scripts/test-remote.sh ...).
 #
-#   scripts/test-remote.sh build [dir]   make the remote: a runtime, an app
-#                                        (version 1.0) and an add-on for it
+#   scripts/test-remote.sh build [dir]   make the remote: a runtime with an
+#                                        extension, an app (version 1.0, on
+#                                        stable and beta) and an add-on for it
 #   scripts/test-remote.sh bump [dir]    publish the app's version 1.1, which
 #                                        asks for more permissions
 #   scripts/test-remote.sh check [dir]   install, update (publishing 1.1) and
@@ -28,6 +29,7 @@ arch=$(flatpak --default-arch)
 app=org.test.Hello
 addon=org.test.Hello.Plugin.Extra
 runtime=org.test.Platform
+rtext=org.test.Platform.Ext
 
 gpg_args() {
     echo "--gpg-sign=$(cat "$base/key.id") --gpg-homedir=$base/gpg"
@@ -66,6 +68,11 @@ build_runtime() {
 name=$runtime
 runtime=$runtime/$arch/stable
 sdk=$runtime/$arch/stable
+
+[Extension $rtext]
+directory=ext
+no-autodownload=true
+autodelete=true
 EOF
     # bash and the libraries it needs, so `flatpak run` works in a test.
     cp /usr/bin/bash "$dir/files/bin/"
@@ -155,6 +162,33 @@ EOF
     # takes icons from the AppStream catalog, which has them.
     # shellcheck disable=SC2046
     flatpak build-export $(gpg_args) "$base/repo" "$dir" stable >/dev/null
+    # Another branch of the app, which shares the app's data folder.
+    # shellcheck disable=SC2046
+    flatpak build-export $(gpg_args) "$base/repo" "$dir" beta >/dev/null
+}
+
+# An extension of the runtime, which goes when the runtime goes.
+build_rtext() {
+    local dir=$base/build/rtext
+    rm -rf "$dir"
+    mkdir -p "$dir/files"
+    cat >"$dir/metadata" <<EOF
+[Runtime]
+name=$rtext
+
+[ExtensionOf]
+ref=runtime/$runtime/$arch/stable
+EOF
+    echo ext >"$dir/files/ext.txt"
+    app_info "$dir" "$rtext" "  <component type=\"addon\">
+    <id>$rtext</id>
+    <extends>$runtime</extends>
+    <name>Platform Extension</name>
+    <summary>An extension of the test runtime</summary>
+    <project_license>MIT</project_license>
+  </component>"
+    # shellcheck disable=SC2046
+    flatpak build-export --runtime --files=files $(gpg_args) "$base/repo" "$dir" stable >/dev/null
 }
 
 build_addon() {
@@ -185,10 +219,18 @@ update_repo() {
     flatpak build-update-repo --title="Atlas Store Test" $(gpg_args) "$base/repo" >/dev/null
 }
 
+# Every mode works only inside /work/flatpak/ (test installations, never real data).
+case $(realpath -m -- "$base") in
+/work/flatpak/?*) ;;
+*)
+    echo "refusing to delete $base: not under /work/flatpak/" >&2
+    exit 2
+    ;;
+esac
 case $cmd in
 build)
     rm -rf "$base"
-    mkdir -p "$base"/{gpg,user,system,etc,run}
+    mkdir -p "$base"/{gpg,user,system,etc,run,triggers}
     chmod 700 "$base/gpg"
     gpg --homedir "$base/gpg" --batch --passphrase '' \
         --quick-gen-key 'Atlas Store Test <test@atlas.invalid>' ed25519 sign never 2>/dev/null
@@ -197,6 +239,7 @@ build)
     gpg --homedir "$base/gpg" --export "$(cat "$base/key.id")" >"$base/key.gpg"
     ostree init --mode=archive-z2 --repo="$base/repo"
     build_runtime
+    build_rtext
     build_app 1.0
     build_addon
     update_repo
@@ -236,7 +279,7 @@ check)
     export FLATPAK_TRIGGERSDIR=$base/triggers
     f=flatpak y=(-y --noninteractive)
     $f --user remote-add --gpg-import="$base/key.gpg" test "file://$base/repo/"
-    $f --user install "${y[@]}" test "$app" >/dev/null
+    $f --user install "${y[@]}" test "app/$app/$arch/stable" >/dev/null
     grep -q "Hello 1" "$FLATPAK_USER_DIR/app/$app/current/active/files/bin/hello"
     echo "installed $($f --user info "$app" | awk '/Version:|Commit:/ {printf "%s %s ", $1, $2}')"
     $f --user install "${y[@]}" test "$addon" >/dev/null
