@@ -35,7 +35,9 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
   icons, screenshots, the Flathub API, flatpakrefs, flatpakrepos, bundles and
   remote definitions, and every launch argument. Parse it in Rust
   (`crates/atlas-store-core`), with limits, never as QML RichText or a
-  remote URL handed to QML. Downloads have a timeout and a size cap.
+  remote URL handed to QML. Every `Text` or `Label` that shows catalog,
+  file or launch text sets `textFormat: Text.PlainText`: Qt's default,
+  `AutoText`, turns a decoded `&lt;b&gt;` into rich text. Downloads have a timeout and a size cap.
 - **Nothing is installed, removed or added as a source without the user's
   confirmation in the Store's own dialog**, showing what will happen
   (permissions, size, the remote and its key). System-wide changes go through

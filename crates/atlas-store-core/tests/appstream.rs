@@ -410,7 +410,7 @@ fn deep_nesting_fails_fast() {
 
 #[test]
 fn huge_text_node() {
-    let big = "a".repeat(5 << 20);
+    let big = "a".repeat(3 << 20);
     let xml = wrap(&comp(
         "a.b",
         "n",
@@ -427,9 +427,20 @@ fn huge_text_node() {
     let huge = wrap(&comp(
         "a.b",
         "n",
-        &format!("<summary>{}</summary>", "a".repeat(17 << 20)),
+        &format!("<summary>{}</summary>", "a".repeat(5 << 20)),
     ));
-    assert_eq!(p(&huge), Err(ParseError::Limit("one text node or tag")));
+    assert_eq!(p(&huge), Err(ParseError::Limit("one text node")));
+}
+
+#[test]
+fn invisible_characters_are_dropped() {
+    let xml = wrap(&comp(
+        "a.b",
+        "A\u{AD}\u{34F}\u{61C}\u{200B}\u{2060}\u{2062}\u{180E}\u{FE0F}\u{3164}\u{115F}\u{1160}\u{FFA0}\u{FFFC}\u{E0041}\u{E007F}B\u{200D}\u{200C}\u{200F}",
+        "",
+    ));
+    let k = &p(&xml).unwrap().components[0];
+    assert_eq!(k.name, "AB\u{200D}\u{200C}\u{200F}");
 }
 
 #[test]
@@ -853,8 +864,8 @@ fn long_attribute_values_are_ignored() {
          <bundle type=\"flatpak\" runtime=\"{v}\">app/a.b/x86_64/stable</bundle></component>"
     ));
     let k = &p(&xml).unwrap().components[0];
-    // The over-long xml:lang counts as absent, so that name is the first unlocalized one.
-    assert_eq!(k.name, "no");
+    // The over-long xml:lang is a language nobody asked for: that name is unwanted.
+    assert_eq!(k.name, "yes");
     assert_eq!(k.bundle.as_ref().unwrap().runtime, None);
 }
 
@@ -876,7 +887,7 @@ fn gzip_file_roundtrip_and_bomb() {
 
     // A tiny file that expands past the cap: it fails, it is not cut short.
     let mut bomb = b"<components>".to_vec();
-    bomb.extend(std::iter::repeat_n(b' ', 8 << 20));
+    bomb.extend(std::iter::repeat_n(b' ', 3 << 20));
     bomb.extend_from_slice(b"</components>");
     let bomb_gz = gz(&bomb);
     assert!(bomb_gz.len() < 64 << 10, "{}", bomb_gz.len());
@@ -905,7 +916,7 @@ fn gzip_file_roundtrip_and_bomb() {
         parse_gz_file(&path, &o),
         Err(ParseError::Limit("compressed size"))
     );
-    assert_eq!(Limits::default().max_decompressed, 512 << 20);
+    assert_eq!(Limits::default().max_decompressed, 150_000_000);
     assert_eq!(Limits::default().max_compressed, 64 << 20);
 }
 
@@ -1013,4 +1024,120 @@ fn random_mutations_never_panic() {
     }
     assert_eq!(ok + err, 2000);
     assert!(err > 100, "mutations should break the XML often: {err}");
+}
+
+// ---- the security-review limits ----
+
+fn quick(xml: &str) -> (Result<Catalog, ParseError>, std::time::Duration) {
+    let t = std::time::Instant::now();
+    let r = p(xml);
+    (r, t.elapsed())
+}
+
+#[test]
+fn many_attributes_fail_fast() {
+    // Too many for the tag cap.
+    let mut attrs = String::new();
+    for i in 0..50_000 {
+        attrs.push_str(&format!(" a{i}=\"\""));
+    }
+    let (r, t) = quick(&format!(
+        "<components><component{attrs}></component></components>"
+    ));
+    assert!(matches!(r, Err(ParseError::Limit(_))), "{r:?}");
+    assert!(t.as_secs() < 2, "{t:?}");
+    // Under the tag cap, over the attribute cap.
+    let mut attrs = String::new();
+    for i in 0..1000 {
+        attrs.push_str(&format!(" a{i}=\"\""));
+    }
+    let (r, t) = quick(&format!(
+        "<components><component{attrs}></component></components>"
+    ));
+    assert_eq!(r, Err(ParseError::Limit("attributes on one element")));
+    assert!(t.as_secs() < 2, "{t:?}");
+    // Duplicates are still refused.
+    assert!(matches!(
+        p("<components a=\"1\" a=\"2\"></components>"),
+        Err(ParseError::Xml { .. })
+    ));
+    // A tag over 64 KiB, one value.
+    let big = "x".repeat(70 << 10);
+    assert!(matches!(
+        p(&format!("<components a=\"{big}\"></components>")),
+        Err(ParseError::Limit(_))
+    ));
+}
+
+#[test]
+fn nodes_full_of_markers_hit_the_cap_early() {
+    let mut o = opts(&[]);
+    o.limits.max_token = 1 << 20;
+    let lts = "<".repeat(8 << 20);
+    for xml in [
+        format!("<components><!--{lts}--></components>"),
+        format!("<components><![CDATA[{lts}]]></components>"),
+        format!("<components><?pi {lts}?></components>"),
+        format!("<components><component a=\"{lts}\"></component></components>"),
+    ] {
+        let t = std::time::Instant::now();
+        let r = parse(xml.as_bytes(), &o);
+        assert!(matches!(r, Err(ParseError::Limit(_))), "{r:?}");
+        assert!(t.elapsed().as_secs() < 2);
+    }
+    // Ordinary comments, CDATA and quoted `>` are fine, however many.
+    let ok = format!(
+        "<components>{}<component a=\"x>y\"/></components>",
+        "<!-- a < b --><![CDATA[ <x> ]]><?p ?>".repeat(1000)
+    );
+    assert!(parse(ok.as_bytes(), &o).is_ok());
+}
+
+#[test]
+fn bundle_must_match_the_component() {
+    let ok = wrap(&comp("a.b", "n", ""));
+    assert_eq!(p(&ok).unwrap().components.len(), 1);
+    let evil = wrap(
+        "<component type=\"desktop-application\"><id>a.b</id><name>n</name>\
+         <bundle type=\"flatpak\">app/x.evil/x86_64/stable</bundle></component>",
+    );
+    let c = p(&evil).unwrap();
+    assert!(c.components.is_empty());
+    assert_eq!(c.skipped, 1);
+    // `.desktop` on either side is allowed.
+    let desk = wrap(
+        "<component type=\"desktop-application\"><id>a.b.desktop</id><name>n</name>\
+         <bundle type=\"flatpak\">app/a.b/x86_64/stable</bundle></component>\
+         <component type=\"desktop-application\"><id>c.d.desktop</id><name>n</name>\
+         <bundle type=\"flatpak\">app/c.d.desktop/x86_64/stable</bundle></component>",
+    );
+    assert_eq!(p(&desk).unwrap().components.len(), 2);
+}
+
+#[test]
+fn retained_budget() {
+    let mut o = opts(&[]);
+    o.limits.max_retained_bytes = 100;
+    assert_eq!(
+        parse(wrap(&comp("a.b", &"n".repeat(150), "")).as_bytes(), &o),
+        Err(ParseError::Limit("text kept for the catalog"))
+    );
+    let mut o = opts(&[]);
+    o.limits.max_retained_objects = 5;
+    assert_eq!(
+        parse(wrap(&comp("a.b", "n", "")).as_bytes(), &o),
+        Err(ParseError::Limit("objects kept for the catalog"))
+    );
+    // Spans in one paragraph are capped.
+    let spans = "<em>a</em>b".repeat(400);
+    let xml = wrap(&comp(
+        "a.b",
+        "n",
+        &format!("<description><p>{spans}</p></description>"),
+    ));
+    let c = p(&xml).unwrap();
+    let Block::Paragraph(s) = &c.components[0].description[0] else {
+        panic!("paragraph")
+    };
+    assert!(s.len() <= 256);
 }

@@ -32,8 +32,18 @@ pub struct Limits {
     pub max_compressed: u64,
     /// Largest XML after decompression, in bytes.
     pub max_decompressed: u64,
-    /// Longest stretch of bytes without a `<`: one text node, comment or tag.
+    /// Longest single node, in bytes: one text node, comment, CDATA section or
+    /// processing instruction. Counted by a small scanner over the raw bytes,
+    /// so a `<` inside a comment or a quoted value doesn't restart the count.
     pub max_token: usize,
+    /// Longest start or empty-element tag, in bytes, attributes included.
+    pub max_tag: usize,
+    /// Most attributes on one element.
+    pub max_attrs: usize,
+    /// Bytes of text kept in all components of a catalog.
+    pub max_retained_bytes: usize,
+    /// Strings, spans, list items and other objects kept in all components.
+    pub max_retained_objects: usize,
     /// Deepest element nesting, counting the root.
     pub max_depth: usize,
     /// Most `<component>` elements.
@@ -69,8 +79,12 @@ impl Default for Limits {
     fn default() -> Limits {
         Limits {
             max_compressed: 64 << 20,
-            max_decompressed: 512 << 20,
-            max_token: 16 << 20,
+            max_decompressed: MAX_DECOMPRESSED,
+            max_token: 4 << 20,
+            max_tag: 64 << 10,
+            max_attrs: 32,
+            max_retained_bytes: MAX_RETAINED_BYTES,
+            max_retained_objects: MAX_RETAINED_OBJECTS,
             max_depth: 32,
             max_components: 100_000,
             name: 200,
@@ -95,6 +109,16 @@ impl Default for Limits {
         }
     }
 }
+
+/// The real Flathub catalog is 49.9 MB decompressed (2026-10); about 3x that.
+const MAX_DECOMPRESSED: u64 = 150_000_000;
+/// Retained text and objects of the real Flathub catalog (11.6 MB of text in
+/// 234,000 objects, 2026-10), with about 4x headroom.
+const MAX_RETAINED_BYTES: usize = 48_000_000;
+const MAX_RETAINED_OBJECTS: usize = 1_000_000;
+
+/// Most spans in one paragraph or list item; text past it is cut.
+const MAX_SPANS: usize = 256;
 
 /// What to parse for.
 #[derive(Debug, Clone, Default)]
@@ -159,14 +183,133 @@ impl fmt::Display for LimitHit {
 
 impl std::error::Error for LimitHit {}
 
+/// Where the raw-byte scanner is. Only the bytes that end a node matter, so
+/// this does no XML checking: quick-xml does that on the same bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Character data.
+    Text,
+    /// Just after a `<`, matching `!--` or `![CDATA[`; `buf[..n]` are the
+    /// bytes seen so far.
+    Open { buf: [u8; 8], n: u8 },
+    /// Inside a start, end or other tag; `quote` is the open quote, or 0.
+    Tag { quote: u8 },
+    /// A comment, ended by `-->`; `dashes` is the run of `-` just seen.
+    Comment { dashes: u8 },
+    /// A CDATA section, ended by `]]>`; `brackets` is the run of `]` just seen.
+    CData { brackets: u8 },
+    /// A processing instruction or the XML declaration, ended by `?>`.
+    Pi { question: bool },
+}
+
+/// How a tag byte moves the scanner: `>` outside quotes ends it.
+fn tag_byte(quote: u8, b: u8) -> Scan {
+    match (quote, b) {
+        (0, b'>') => Scan::Text,
+        (0, b'"' | b'\'') => Scan::Tag { quote: b },
+        (q, c) if q != 0 && q == c => Scan::Tag { quote: 0 },
+        (q, _) => Scan::Tag { quote: q },
+    }
+}
+
 /// Counts what passes through and fails past the caps, so a gzip bomb or a
-/// single endless text node stops early instead of filling memory.
+/// single endless text node, comment, CDATA section or tag stops early
+/// instead of filling memory. Each kind of node is counted from its own
+/// start, so a `<` inside a comment or a quoted value restarts nothing.
 struct Guard<R> {
     inner: R,
     total: u64,
     max_total: u64,
+    state: Scan,
+    /// Bytes of the current node so far.
     run: usize,
     max_run: usize,
+    max_tag: usize,
+}
+
+impl<R> Guard<R> {
+    fn new(inner: R, lim: &Limits) -> Guard<R> {
+        Guard {
+            inner,
+            total: 0,
+            max_total: lim.max_decompressed,
+            state: Scan::Text,
+            run: 0,
+            max_run: lim.max_token,
+            max_tag: lim.max_tag.min(lim.max_token),
+        }
+    }
+
+    /// Advances the scanner over one byte.
+    fn step(&mut self, b: u8) -> Result<(), LimitHit> {
+        self.run += 1;
+        let (cap, what) = match self.state {
+            Scan::Tag { .. } | Scan::Open { .. } => (self.max_tag, "one tag"),
+            Scan::Comment { .. } => (self.max_run, "one comment"),
+            Scan::CData { .. } => (self.max_run, "one CDATA section"),
+            Scan::Pi { .. } => (self.max_run, "one processing instruction"),
+            Scan::Text => (self.max_run, "one text node"),
+        };
+        if self.run > cap {
+            return Err(LimitHit(what));
+        }
+        let next = match self.state {
+            Scan::Text => {
+                if b == b'<' {
+                    self.run = 1;
+                    Scan::Open { buf: [0; 8], n: 0 }
+                } else {
+                    Scan::Text
+                }
+            }
+            Scan::Open { mut buf, n } => {
+                if n == 0 && b == b'?' {
+                    Scan::Pi { question: false }
+                } else {
+                    let i = usize::from(n);
+                    buf[i] = b;
+                    let seen = &buf[..=i];
+                    if seen == b"!--" {
+                        Scan::Comment { dashes: 0 }
+                    } else if seen == b"![CDATA[" {
+                        Scan::CData { brackets: 0 }
+                    } else if b"!--".starts_with(seen) || b"![CDATA[".starts_with(seen) {
+                        Scan::Open { buf, n: n + 1 }
+                    } else {
+                        // Not a comment or CDATA: an ordinary tag. The bytes
+                        // matched so far hold no quote or `>`.
+                        tag_byte(0, b)
+                    }
+                }
+            }
+            Scan::Tag { quote } => tag_byte(quote, b),
+            Scan::Comment { dashes } => match b {
+                b'>' if dashes >= 2 => Scan::Text,
+                b'-' => Scan::Comment {
+                    dashes: dashes.saturating_add(1),
+                },
+                _ => Scan::Comment { dashes: 0 },
+            },
+            Scan::CData { brackets } => match b {
+                b'>' if brackets >= 2 => Scan::Text,
+                b']' => Scan::CData {
+                    brackets: brackets.saturating_add(1),
+                },
+                _ => Scan::CData { brackets: 0 },
+            },
+            Scan::Pi { question } => match b {
+                b'>' if question => Scan::Text,
+                _ => Scan::Pi {
+                    question: b == b'?',
+                },
+            },
+        };
+        if next == Scan::Text && self.state != Scan::Text {
+            self.run = 0;
+        }
+        self.state = next;
+        Ok(())
+    }
 }
 
 impl<R: Read> Read for Guard<R> {
@@ -177,12 +320,16 @@ impl<R: Read> Read for Guard<R> {
             return Err(io::Error::other(LimitHit("decompressed size")));
         }
         let chunk = out.get(..n).unwrap_or(&[]);
-        match chunk.iter().rposition(|&b| b == b'<') {
-            Some(i) => self.run = n - 1 - i,
-            None => self.run = self.run.saturating_add(n),
-        }
-        if self.run > self.max_run {
-            return Err(io::Error::other(LimitHit("one text node or tag")));
+        for &b in chunk {
+            if self.state == Scan::Text && b != b'<' {
+                // Fast path: plain text only counts.
+                self.run += 1;
+                if self.run > self.max_run {
+                    return Err(io::Error::other(LimitHit("one text node")));
+                }
+                continue;
+            }
+            self.step(b).map_err(io::Error::other)?;
         }
         Ok(n)
     }
@@ -222,17 +369,16 @@ pub fn parse_gz_file(path: &Path, opts: &ParseOptions) -> Result<Catalog, ParseE
 /// Parses an uncompressed catalog.
 pub fn parse<R: Read>(reader: R, opts: &ParseOptions) -> Result<Catalog, ParseError> {
     let lim = &opts.limits;
-    let guard = Guard {
-        inner: reader,
-        total: 0,
-        max_total: lim.max_decompressed,
-        run: 0,
-        max_run: lim.max_token,
-    };
+    let guard = Guard::new(reader, lim);
     let mut rd = Reader::from_reader(BufReader::with_capacity(64 << 10, guard));
     let mut st = State::new(opts);
     let mut buf = Vec::with_capacity(8 << 10);
     loop {
+        // The previous event's buffer: whatever the scanner let through, no
+        // event may be larger than a node.
+        if buf.len() > lim.max_token {
+            return Err(ParseError::Limit("one text node or tag"));
+        }
         buf.clear();
         let ev = match rd.read_event_into(&mut buf) {
             Ok(ev) => ev,
@@ -507,6 +653,12 @@ impl Inline {
     }
 
     fn flush(&mut self) {
+        if self.spans.len() >= MAX_SPANS {
+            // Past the span cap the rest of the paragraph is dropped.
+            self.cur.clear();
+            self.over = true;
+            return;
+        }
         if !self.cur.is_empty() {
             let style = self.style();
             self.spans.push(Span {
@@ -601,9 +753,18 @@ struct State<'o> {
     comps: Vec<Component>,
     skipped: u32,
     n_components: usize,
+    retained_bytes: usize,
+    retained_objects: usize,
     cur: Option<Cur>,
     leaf: Option<Leaf>,
     desc: Option<DescB>,
+}
+
+/// The attributes of a tag, without quick-xml's quadratic duplicate check.
+fn attributes<'a>(e: &'a BytesStart<'_>) -> quick_xml::events::attributes::Attributes<'a> {
+    let mut it = e.attributes();
+    it.with_checks(false);
+    it
 }
 
 fn kind_of(t: Option<&str>) -> Kind {
@@ -693,6 +854,8 @@ impl<'o> State<'o> {
             comps: Vec::new(),
             skipped: 0,
             n_components: 0,
+            retained_bytes: 0,
+            retained_objects: 0,
             cur: None,
             leaf: None,
             desc: None,
@@ -714,7 +877,7 @@ impl<'o> State<'o> {
         keys: [&str; N],
     ) -> Result<[Option<Cow<'a, str>>; N], ParseError> {
         let mut out: [Option<Cow<'a, str>>; N] = std::array::from_fn(|_| None);
-        for a in e.attributes() {
+        for a in attributes(e) {
             let a = a.map_err(|er| self.xml_err(er.to_string()))?;
             let Some(i) = keys.iter().position(|k| *k == a.key.as_ref()) else {
                 continue;
@@ -732,18 +895,46 @@ impl<'o> State<'o> {
     /// The rank of an element by its `xml:lang`, or `None` when it is for a
     /// language not wanted or can't beat what is already kept.
     fn rank_of(&self, e: &BytesStart<'_>, best: usize) -> Result<Option<usize>, ParseError> {
-        let [lang] = self.attrs(e, ["xml:lang"])?;
-        Ok(self.langs.rank(lang.as_deref()).filter(|r| *r < best))
+        // A value over the cap means a language nobody asked for, not "no
+        // language": the element is unwanted.
+        for a in attributes(e) {
+            let a = a.map_err(|er| self.xml_err(er.to_string()))?;
+            if a.key.as_ref() != "xml:lang" {
+                continue;
+            }
+            let v = a
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(|er| self.xml_err(er.to_string()))?;
+            if v.len() > self.opts.limits.attr {
+                return Ok(None);
+            }
+            return Ok(self.langs.rank(Some(&v)).filter(|r| *r < best));
+        }
+        Ok(self.langs.rank(None).filter(|r| *r < best))
     }
 
     fn start(&mut self, e: &BytesStart<'_>) -> Result<(), ParseError> {
         if self.stack.len() >= self.opts.limits.max_depth {
             return Err(ParseError::TooDeep);
         }
+        if e.len() > self.opts.limits.max_tag {
+            return Err(ParseError::Limit("one tag"));
+        }
         // Every attribute of every element is checked, read or not: a
-        // malformed one or an entity beyond the predefined five fails the parse.
-        for a in e.attributes() {
+        // malformed one or an entity beyond the predefined five fails the
+        // parse. quick-xml's own duplicate check is quadratic and unbounded,
+        // so it is off; the count is capped first and duplicates are found
+        // here, over at most `max_attrs` names.
+        let mut keys: Vec<&str> = Vec::new();
+        for a in attributes(e) {
             let a = a.map_err(|er| self.xml_err(er.to_string()))?;
+            if keys.len() >= self.opts.limits.max_attrs {
+                return Err(ParseError::Limit("attributes on one element"));
+            }
+            if keys.contains(&a.key.as_ref()) {
+                return Err(self.xml_err("duplicate attribute"));
+            }
+            keys.push(a.key.into_inner());
             a.normalized_value(XmlVersion::Implicit1_0)
                 .map_err(|er| self.xml_err(er.to_string()))?;
         }
@@ -1110,7 +1301,7 @@ impl<'o> State<'o> {
         };
         match el {
             El::Leaf => self.end_leaf(),
-            El::Component => self.end_component(),
+            El::Component => self.end_component()?,
             El::Screenshot => self.end_screenshot(),
             El::Release => self.end_release(),
             El::Desc => self.end_desc(),
@@ -1344,19 +1535,32 @@ impl<'o> State<'o> {
         }
     }
 
-    fn end_component(&mut self) {
-        let Some(c) = self.cur.take() else { return };
+    fn end_component(&mut self) -> Result<(), ParseError> {
+        let Some(c) = self.cur.take() else {
+            return Ok(());
+        };
         self.desc = None;
         self.leaf = None;
         let valid_id = text::valid_id(&c.id);
         let needs_bundle = c.kind != Kind::Other;
         if !valid_id || c.name.s.is_empty() || (needs_bundle && c.bundle.is_none()) {
             self.skipped = self.skipped.saturating_add(1);
-            return;
+            return Ok(());
+        }
+        // The bundle is what gets installed, so it must be the app shown: its
+        // ID has to be the component's own, or that with `.desktop` stripped (a few
+        // real apps, such as org.telegram.desktop, have it in the bundle too).
+        if matches!(c.kind, Kind::DesktopApp | Kind::ConsoleApp | Kind::Addon)
+            && let Some(b) = c.bundle.as_ref()
+            && bundle_id(&b.reference)
+                .is_none_or(|i| i != c.id && Some(i) != c.id.strip_suffix(".desktop"))
+        {
+            self.skipped = self.skipped.saturating_add(1);
+            return Ok(());
         }
         if !self.seen.insert(c.id.clone()) {
             self.skipped = self.skipped.saturating_add(1);
-            return;
+            return Ok(());
         }
         let mut releases = c.releases;
         releases.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
@@ -1379,7 +1583,7 @@ impl<'o> State<'o> {
         } else {
             c.dev.s
         };
-        self.comps.push(Component {
+        let comp = Component {
             id: c.id,
             kind: c.kind,
             name: c.name.s,
@@ -1399,7 +1603,19 @@ impl<'o> State<'o> {
             launchable: c.launchable,
             verification,
             branding,
-        });
+        };
+        let (bytes, objects) = weigh(&comp);
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        self.retained_objects = self.retained_objects.saturating_add(objects);
+        let lim = &self.opts.limits;
+        if self.retained_bytes > lim.max_retained_bytes {
+            return Err(ParseError::Limit("text kept for the catalog"));
+        }
+        if self.retained_objects > lim.max_retained_objects {
+            return Err(ParseError::Limit("objects kept for the catalog"));
+        }
+        self.comps.push(comp);
+        Ok(())
     }
 
     fn finish(self) -> Result<Catalog, ParseError> {
@@ -1418,6 +1634,68 @@ impl<'o> State<'o> {
             skipped: self.skipped,
         })
     }
+}
+
+/// The ID of an `app/ID/arch/branch` or `runtime/ID/arch/branch` reference.
+fn bundle_id(r: &str) -> Option<&str> {
+    r.split('/').nth(1)
+}
+
+/// The text bytes and the objects (strings and spans) a component keeps.
+fn weigh(c: &Component) -> (usize, usize) {
+    let mut bytes = 0;
+    let mut objects = 1;
+    let mut s = |t: &str| {
+        bytes += t.len();
+        objects += 1;
+    };
+    s(&c.id);
+    s(&c.name);
+    s(&c.summary);
+    s(&c.developer);
+    s(&c.license);
+    c.categories.iter().for_each(|t| s(t));
+    c.keywords.iter().for_each(|t| s(t));
+    c.extends.iter().for_each(|t| s(t));
+    if let Some(l) = &c.launchable {
+        s(l);
+    }
+    if let Some(i) = &c.icon {
+        s(&i.file);
+    }
+    c.urls.iter().for_each(|(_, t)| s(t));
+    let blocks = |bl: &[Block], s: &mut dyn FnMut(&str)| {
+        for b in bl {
+            match b {
+                Block::Paragraph(spans) => spans.iter().for_each(|sp| s(&sp.text)),
+                Block::List { items, .. } => items.iter().flatten().for_each(|sp| s(&sp.text)),
+            }
+        }
+    };
+    blocks(&c.description, &mut s);
+    for sh in &c.screenshots {
+        s(&sh.caption);
+        sh.images.iter().for_each(|i| s(&i.url));
+    }
+    for r in &c.releases {
+        s(&r.version);
+        blocks(&r.description, &mut s);
+    }
+    if let Some(r) = &c.content_rating {
+        r.attrs.iter().for_each(|(t, _)| s(t));
+    }
+    if let Some(b) = &c.bundle {
+        s(&b.reference);
+        b.runtime.iter().for_each(|t| s(t));
+        b.sdk.iter().for_each(|t| s(t));
+    }
+    if let Some(v) = &c.verification {
+        s(&v.method);
+        s(&v.website);
+        s(&v.login_name);
+        s(&v.login_provider);
+    }
+    (bytes, objects)
 }
 
 /// How many releases a component keeps.

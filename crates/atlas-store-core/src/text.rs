@@ -23,13 +23,29 @@ pub fn class(c: char) -> Class {
         return Class::Space;
     }
     let u = c as u32;
-    let bad = c.is_control()
-        || (0x202A..=0x202E).contains(&u)
-        || (0x2066..=0x2069).contains(&u)
-        || u == 0xFEFF
-        || (0xFDD0..=0xFDEF).contains(&u)
-        || (u & 0xFFFE) == 0xFFFE;
+    let bad =
+        c.is_control() || invisible(u) || (0xFDD0..=0xFDEF).contains(&u) || (u & 0xFFFE) == 0xFFFE;
     if bad { Class::Drop } else { Class::Keep }
+}
+
+/// Characters that show as nothing or reorder what is around them, so text
+/// could read as something it isn't: soft hyphen, combining grapheme joiner,
+/// Arabic letter mark, Hangul and Halfwidth fillers, Khmer inherent vowels,
+/// Mongolian free variation selectors, zero-width space, the general
+/// punctuation format block (word joiner, invisible operators, bidi isolates,
+/// deprecated format characters), embeddings and overrides, variation
+/// selectors (so an emoji shows in its default form), the BOM, interlinear
+/// annotation and object-replacement characters, musical and shorthand format
+/// controls and the tag characters. Zero-width joiner and non-joiner and the
+/// left-to-right and right-to-left marks stay: scripts need them. This list
+/// follows `launch::hidden`.
+fn invisible(u: u32) -> bool {
+    matches!(u,
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5
+        | 0x180B..=0x180F | 0x200B | 0x202A..=0x202E | 0x2060..=0x206F
+        | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFC
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE007F
+        | 0xE0100..=0xE01EF)
 }
 
 /// Builds one line of cleaned text from pieces, stopping at a cap.
@@ -124,18 +140,20 @@ pub fn valid_id(s: &str) -> bool {
     parts >= 2
 }
 
-/// A bare icon file name: no `/`, `\` or NUL, no leading `.`, no controls,
-/// ending `.png` or `.svg`.
+/// A bare icon file name: only `[A-Za-z0-9._+-]`, 1 to 255 bytes, no leading
+/// `.` or `-`, no `..`, ending `.png` or `.svg`.
 pub fn valid_icon_file(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 255
-        && !s.starts_with('.')
-        && !s.chars().any(|c| c == '/' || c == '\\' || c.is_control())
+        && !s.starts_with(['.', '-'])
+        && !s.contains("..")
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
         && (s.ends_with(".png") || s.ends_with(".svg"))
 }
 
 /// A web URL the Store may keep: `https://` (or `http://` unless `https_only`),
-/// a host, no userinfo, no whitespace, control or bidi characters, at most
+/// a host of `[A-Za-z0-9.-]` with an optional port up to 65535, no userinfo, no whitespace, control or bidi characters, at most
 /// 2048 bytes.
 pub fn valid_url(s: &str, https_only: bool) -> bool {
     if s.len() > 2048 {
@@ -156,16 +174,24 @@ pub fn valid_url(s: &str, https_only: bool) -> bool {
     if auth.is_empty() || auth.contains('@') || auth.contains('[') || auth.contains(']') {
         return false;
     }
-    let host = match auth.rsplit_once(':') {
+    let host = match auth.split_once(':') {
         Some((h, port)) => {
-            if port.is_empty() || port.len() > 5 || !port.bytes().all(|b| b.is_ascii_digit()) {
+            if port.is_empty()
+                || port.len() > 5
+                || !port.bytes().all(|b| b.is_ascii_digit())
+                || port.parse::<u32>().is_ok_and(|p| p > 65535)
+            {
                 return false;
             }
             h
         }
         None => auth,
     };
-    !host.is_empty() && !host.starts_with('.')
+    !host.is_empty()
+        && !host.starts_with('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
 fn arch_ok(s: &str) -> bool {
@@ -218,6 +244,7 @@ mod tests {
     fn urls() {
         assert!(valid_url("https://example.org/a?b#c", false));
         assert!(valid_url("http://example.org:8080/", false));
+        assert!(valid_url("https://example.org:65535/", false));
         assert!(!valid_url("http://example.org/", true));
         for bad in [
             "javascript:alert(1)",
@@ -230,6 +257,11 @@ mod tests {
             "https://example.org/\u{7}",
             "https://example.org\\@evil.org/",
             "https://example.org:/",
+            "https://example.org:80:90/",
+            "https://example.org:65536/",
+            "https://exa%6Dple.org/",
+            "https://exa_mple.org/",
+            "https://ex\u{e4}mple.org/",
             "",
         ] {
             assert!(!valid_url(bad, false), "{bad}");
@@ -247,6 +279,7 @@ mod tests {
             assert!(!valid_id(bad), "{bad}");
         }
         assert!(valid_icon_file("org.x.Y.png"));
+        assert!(valid_icon_file("a+b_c-d.svg"));
         for bad in [
             "../a.png",
             "/etc/passwd",
@@ -255,6 +288,12 @@ mod tests {
             "a.jpg",
             "a\\b.svg",
             "a\0.png",
+            "-a.png",
+            "a..b.png",
+            "a b.png",
+            "a%2e.png",
+            "\u{e4}.png",
+            "a\u{202E}.png",
         ] {
             assert!(!valid_icon_file(bad), "{bad}");
         }

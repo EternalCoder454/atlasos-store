@@ -93,7 +93,11 @@ enters, in `atlas-store-core`:
 - flatpakref and flatpakrepo: size cap, known keys only, https only, the GPG
   key checked, `RuntimeRepo=` never followed without its own confirmation.
 - Cache files live under `~/.cache/atlas-store` (0700), written atomically,
-  symlinks refused.
+  symlinks refused. A cache folder another user can write to is not used.
+  The index's checksum catches corruption, not tampering: a process running
+  as the user can change any of the user's files, so the reader treats the
+  index as untrusted input like the XML (every check the parser makes is
+  made again, sizes are capped, and anything wrong means a rebuild).
 
 **Confirmation:** nothing is installed, removed or added as a source without
 the Store's own dialog, showing the app, the remote, sizes and permissions.

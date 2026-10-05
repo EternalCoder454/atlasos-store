@@ -77,18 +77,14 @@ fn main() -> ExitCode {
         langs: opts.langs.clone(),
         format: FORMAT,
     };
-    let file = match index::cache_file(&dir, &key) {
+    let t = Instant::now();
+    let file = match index::write(&dir, &key, &cat) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("index write failed: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let t = Instant::now();
-    if let Err(e) = index::write(&file, &key, &cat) {
-        eprintln!("index write failed: {e}");
-        return ExitCode::FAILURE;
-    }
     println!("index write: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
     let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     println!("index size: {:.2} MB", size as f64 / 1e6);

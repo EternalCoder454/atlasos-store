@@ -40,6 +40,13 @@ fn catalog() -> Catalog {
     parse(SAMPLE.as_bytes(), &o).expect("the sample parses")
 }
 
+fn empty(origin: &str) -> Catalog {
+    Catalog {
+        origin: origin.into(),
+        ..Catalog::default()
+    }
+}
+
 fn names(d: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(d)
         .unwrap()
@@ -67,7 +74,7 @@ fn roundtrip_and_permissions() {
     );
     assert!(name.ends_with(".bin") && name.len() == "index-flathub-".len() + 16 + 1 + 8 + 4);
     let cat = catalog();
-    index::write(&f, &k, &cat).unwrap();
+    assert_eq!(index::write(&d, &k, &cat).unwrap(), f);
     assert_eq!(index::read(&f, &k).unwrap(), cat);
     assert_eq!(
         fs::metadata(&d).unwrap().permissions().mode() & 0o777,
@@ -85,7 +92,7 @@ fn roundtrip_and_permissions() {
     // Writing again replaces it.
     let mut cat2 = cat.clone();
     cat2.components.truncate(3);
-    index::write(&f, &k, &cat2).unwrap();
+    index::write(&d, &k, &cat2).unwrap();
     assert_eq!(index::read(&f, &k).unwrap(), cat2);
     assert_eq!(names(&d), std::slice::from_ref(&name));
     fs::remove_dir_all(d.parent().unwrap().parent().unwrap()).unwrap();
@@ -126,7 +133,7 @@ fn keys_that_are_not_file_names_are_refused() {
             matches!(index::cache_file(d, &k), Err(IndexError::InvalidKey(_))),
             "{origin:?}"
         );
-        assert!(index::write(&d.join("x.bin"), &k, &Catalog::default()).is_err());
+        assert!(index::write(d, &k, &empty("flathub")).is_err());
     }
     for commit in [
         "",
@@ -154,9 +161,8 @@ fn keys_that_are_not_file_names_are_refused() {
 #[test]
 fn a_different_key_is_an_error() {
     let d = dir("key");
-    let f = d.join("i.bin");
     let k = key();
-    index::write(&f, &k, &catalog()).unwrap();
+    let f = index::write(&d, &k, &catalog()).unwrap();
     let mut o = k.clone();
     o.origin = "fedora".into();
     let mut c = k.clone();
@@ -176,9 +182,8 @@ fn a_different_key_is_an_error() {
 #[test]
 fn damaged_files_are_errors() {
     let d = dir("dmg");
-    let f = d.join("i.bin");
     let k = key();
-    index::write(&f, &k, &catalog()).unwrap();
+    let f = index::write(&d, &k, &catalog()).unwrap();
     let good = fs::read(&f).unwrap();
     // Header, a length field, the checksum and the body.
     for at in [
@@ -222,9 +227,8 @@ fn damaged_files_are_errors() {
 fn symlinks_and_non_files_are_refused() {
     let d = dir("sym");
     fs::create_dir_all(&d).unwrap();
-    let real = d.join("real.bin");
     let k = key();
-    index::write(&real, &k, &catalog()).unwrap();
+    let real = index::write(&d, &k, &catalog()).unwrap();
     let link = d.join("link.bin");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(matches!(index::read(&link, &k), Err(IndexError::Io(_))));
@@ -235,12 +239,13 @@ fn symlinks_and_non_files_are_refused() {
     assert!(index::read(&dangling, &k).is_err());
     let victim = d.join("victim.txt");
     fs::write(&victim, "keep me").unwrap();
-    let evil = d.join("evil.bin");
-    std::os::unix::fs::symlink(&victim, &evil).unwrap();
-    index::write(&evil, &k, &Catalog::default()).unwrap();
+    // The index's own name is a link to the victim: the write replaces the link.
+    fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(&victim, &real).unwrap();
+    index::write(&d, &k, &empty("flathub")).unwrap();
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
     assert!(
-        !fs::symlink_metadata(&evil)
+        !fs::symlink_metadata(&real)
             .unwrap()
             .file_type()
             .is_symlink()
@@ -264,7 +269,7 @@ fn oversized_files_are_refused() {
     fs::create_dir_all(&d).unwrap();
     let f = d.join("big.bin");
     let file = fs::File::create(&f).unwrap();
-    file.set_len((64 << 20) + 1).unwrap();
+    file.set_len((32 << 20) + 1).unwrap();
     assert_eq!(index::read(&f, &key()), Err(IndexError::TooLarge));
     fs::remove_dir_all(&d).unwrap();
 }
@@ -279,16 +284,15 @@ fn older_indexes_of_the_origin_are_removed() {
     other.origin = "flathub-beta".into();
     let mut sub = key();
     sub.origin = "flat".into();
-    let cat = Catalog::default();
-    index::write(&index::cache_file(&d, &other).unwrap(), &other, &cat).unwrap();
-    index::write(&index::cache_file(&d, &sub).unwrap(), &sub, &cat).unwrap();
-    index::write(&index::cache_file(&d, &k1).unwrap(), &k1, &cat).unwrap();
+    index::write(&d, &other, &empty("flathub-beta")).unwrap();
+    index::write(&d, &sub, &empty("flat")).unwrap();
+    index::write(&d, &k1, &empty("flathub")).unwrap();
     fs::write(d.join("notes.txt"), "x").unwrap();
     let outside = d.join("outside.txt");
     fs::write(&outside, "target").unwrap();
     let old_link = d.join("index-flathub-0123456789abcdef-00000000.bin");
     std::os::unix::fs::symlink(&outside, &old_link).unwrap();
-    index::write(&index::cache_file(&d, &k2).unwrap(), &k2, &cat).unwrap();
+    index::write(&d, &k2, &empty("flathub")).unwrap();
     let left = names(&d);
     let f2 = index::cache_file(&d, &k2)
         .unwrap()
@@ -330,13 +334,15 @@ fn a_failed_write_leaves_no_temp_file_and_the_old_index() {
     let k = key();
     let f = index::cache_file(&d, &k).unwrap();
     let cat = catalog();
-    index::write(&f, &k, &cat).unwrap();
+    index::write(&d, &k, &cat).unwrap();
     let before = fs::read(&f).unwrap();
 
-    // The rename fails because the target is now a non-empty directory.
-    let blocked = d.join("blocked.bin");
+    // The rename fails because the target is a non-empty directory.
+    let mut kb = key();
+    kb.commit = "cd".repeat(32);
+    let blocked = index::cache_file(&d, &kb).unwrap();
     fs::create_dir_all(blocked.join("inside")).unwrap();
-    assert!(index::write(&blocked, &k, &cat).is_err());
+    assert!(index::write(&d, &kb, &cat).is_err());
     let stray: Vec<String> = names(&d)
         .into_iter()
         .filter(|n| n.contains(".tmp."))
@@ -349,7 +355,7 @@ fn a_failed_write_leaves_no_temp_file_and_the_old_index() {
         let ro = dir("ro");
         fs::create_dir_all(&ro).unwrap();
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
-        let r = index::write(&ro.join("i.bin"), &k, &cat);
+        let r = index::write(&ro, &k, &cat);
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(r.is_err());
         assert!(names(&ro).is_empty());
@@ -358,6 +364,95 @@ fn a_failed_write_leaves_no_temp_file_and_the_old_index() {
     // A cache "directory" that is a file.
     let notdir = d.join("file");
     fs::write(&notdir, "x").unwrap();
-    assert!(index::write(&notdir.join("i.bin"), &k, &cat).is_err());
+    assert!(index::write(&notdir.join("sub"), &k, &cat).is_err());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn write_refuses_a_foreign_catalog_or_format() {
+    let d = dir("foreign");
+    let k = key();
+    let mut other = catalog();
+    other.origin = "fedora".into();
+    assert!(index::write(&d, &k, &other).is_err());
+    let mut v = key();
+    v.format = FORMAT + 1;
+    assert!(index::write(&d, &v, &catalog()).is_err());
+    assert!(!d.exists(), "nothing is created for a refused write");
+}
+
+#[test]
+fn a_cache_directory_others_can_write_is_not_used() {
+    let d = dir("unsafe");
+    let k = key();
+    let cat = catalog();
+    let f = index::write(&d, &k, &cat).unwrap();
+    for mode in [0o770, 0o707, 0o777] {
+        fs::set_permissions(&d, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(index::write(&d, &k, &cat).is_err(), "write {mode:o}");
+        assert!(
+            matches!(index::read(&f, &k), Err(IndexError::Io(_))),
+            "read {mode:o}"
+        );
+    }
+    // A new directory is private, and a private one works again.
+    fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(index::read(&f, &k).unwrap(), cat);
+    // A directory that is really a file is refused too.
+    let file = d.join("plain");
+    fs::write(&file, "x").unwrap();
+    assert!(index::write(&file, &k, &cat).is_err());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn stale_temp_files_are_removed_and_a_reused_name_is_survived() {
+    let d = dir("temp");
+    fs::create_dir_all(&d).unwrap();
+    let k = key();
+    let f = index::cache_file(&d, &k).unwrap();
+    let name = f.file_name().unwrap().to_str().unwrap().to_string();
+    let mut beta = key();
+    beta.origin = "flathub-beta".into();
+    let beta_name = index::cache_file(&d, &beta)
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let make = |n: &str, aged: bool| {
+        let file = fs::File::create(d.join(n)).unwrap();
+        if aged {
+            file.set_modified(old).unwrap();
+        }
+    };
+    let stale = format!(".{name}.tmp.4242.7");
+    let fresh = format!(".{name}.tmp.4242.8");
+    let others = format!(".{beta_name}.tmp.4242.7");
+    make(&stale, true);
+    make(&fresh, false);
+    make(&others, true);
+    make(".notes.tmp.1.2", true);
+    // Names the next writes might pick: every other counter value is taken.
+    let pid = std::process::id();
+    for n in (0..2000).step_by(2) {
+        make(&format!(".{name}.tmp.{pid}.{n}"), false);
+    }
+
+    let cat = catalog();
+    index::write(&d, &k, &cat).unwrap();
+    index::write(&d, &k, &cat).unwrap();
+    assert_eq!(index::read(&f, &k).unwrap(), cat);
+    let left = names(&d);
+    assert!(!left.contains(&stale), "{left:?}");
+    assert!(
+        left.contains(&fresh),
+        "a temp file a write may be using stays"
+    );
+    assert!(left.contains(&others), "another origin's stays");
+    assert!(left.contains(&".notes.tmp.1.2".to_string()));
     fs::remove_dir_all(&d).unwrap();
 }

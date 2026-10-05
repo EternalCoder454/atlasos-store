@@ -6,6 +6,15 @@
 //! checked against the bytes that are left, and every string must be UTF-8.
 //! Any mismatch is an [`IndexError`] and the caller rebuilds from the XML.
 //!
+//! The checksum only detects accidental damage: anyone who can write the file
+//! can write a matching checksum. So the decoder never trusts the payload: it
+//! applies the parser's own checks to every string (no control or bidi
+//! characters), ID, URL, icon file and bundle reference, requires the
+//! catalog's origin to be the key's, and stops at a total budget of decoded
+//! data, so a small hostile file can't expand without limit. The cache
+//! directory must be the user's own and not writable by group or others, or
+//! the index is neither read nor written.
+//!
 //! Layout, little-endian: the magic `ATLASIDX`, the format version, the key
 //! (origin, commit, languages), the payload length, a checksum of everything
 //! before it and of the payload, then the payload.
@@ -13,9 +22,10 @@
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use super::{
     Block, Branding, Bundle, Catalog, Component, ContentRating, Icon, Image, Intensity, Kind,
@@ -27,8 +37,16 @@ use crate::text;
 pub const FORMAT: u32 = 1;
 
 const MAGIC: &[u8; 8] = b"ATLASIDX";
-/// Largest index file read, and largest written.
-const MAX_FILE: u64 = 64 << 20;
+/// Largest index file read, and largest written. The real Flathub index is
+/// about 14 MB, so this leaves more than twice that.
+const MAX_FILE: u64 = 32 << 20;
+/// Most that decoding may account for: the bytes of every string plus 24 for
+/// its header, 16 for every list item and 512 for every component. The real
+/// Flathub index comes to about 30 MB by this count; 96 MiB is over three
+/// times that, and bounds the memory a hostile file can make us use.
+const MAX_DECODED: usize = 96 << 20;
+/// Temp files of a crashed write older than this are removed.
+const STALE_TEMP: Duration = Duration::from_secs(600);
 
 // Caps on what a file may claim, matching the parser's.
 const MAX_STR: usize = 64 << 10;
@@ -450,41 +468,100 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
-/// Writes the index atomically: a temp file in the same directory (created
-/// exclusively, without following links, mode 0600), fsynced, renamed over
-/// `path`, then the directory fsynced. The directory is created with mode
-/// 0700. Afterwards older index files of the same origin are removed. A
-/// failure leaves no temp file and the previous index as it was.
-pub fn write(path: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<()> {
+/// Whether `name` is a temp file of a write of `origin`'s index:
+/// `.<index file>.tmp.<pid>.<n>`.
+fn is_temp_of(origin: &str, name: &str) -> bool {
+    let Some((base, tail)) = name
+        .strip_prefix('.')
+        .and_then(|n| n.split_once(".bin.tmp."))
+    else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    is_index_of(origin, &format!("{base}.bin"))
+        && tail
+            .split_once('.')
+            .is_some_and(|(a, b)| digits(a) && digits(b))
+}
+
+/// Refuses a cache directory that is not the user's own or that group or
+/// others can write to: somebody else could swap the index. A directory that
+/// doesn't exist yet is fine.
+fn check_dir(dir: &Path) -> io::Result<()> {
+    let meta = match fs::metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    // SAFETY: geteuid has no preconditions and can't fail.
+    let me = unsafe { libc::geteuid() };
+    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+        log::warn!(
+            "not using the cache directory {}: it must be a directory of the current user that group and others can't write to",
+            dir.display()
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a private directory of the user", dir.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Writes the index of `key` into `cache_dir` atomically and returns its path
+/// (see [`cache_file`]): a temp file in the same directory (created
+/// exclusively, without following links, mode 0600), fsynced, renamed into
+/// place, then the directory fsynced (best effort). The directory is created
+/// with mode 0700, and refused when it exists but isn't private to the user.
+/// The catalog must be of the key's origin and the key of this layout version.
+/// Afterwards older index files and stale temp files of the same origin are
+/// removed. A failure leaves no temp file and the previous index as it was.
+pub fn write(cache_dir: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<PathBuf> {
     key.check().map_err(|e| invalid(e.to_string()))?;
+    if key.format != FORMAT {
+        return Err(invalid("the key is of another index layout version"));
+    }
+    if catalog.origin != key.origin {
+        return Err(invalid("the catalog is of another origin than the key"));
+    }
+    let path = cache_file(cache_dir, key).map_err(|e| invalid(e.to_string()))?;
     let name = path
         .file_name()
-        .ok_or_else(|| invalid("the index path has no file name"))?;
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+        .ok_or_else(|| invalid("the index path has no file name"))?
+        .to_owned();
+    let dir = cache_dir;
     let bytes = encode(key, catalog);
     if bytes.len() as u64 > MAX_FILE {
         return Err(invalid("the index would be larger than the cap"));
     }
+    check_dir(dir)?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
+    check_dir(dir)?;
 
-    let tmp = dir.join(format!(
-        ".{}.tmp.{}.{}",
-        name.to_string_lossy(),
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = File::options()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)?;
+    let mut attempts = 0;
+    let (mut file, tmp) = loop {
+        let tmp = dir.join(format!(
+            ".{}.tmp.{}.{}",
+            name.to_string_lossy(),
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(f) => break (f, tmp),
+            // A leftover of a crashed run with the same pid and counter.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 16 => attempts += 1,
+            Err(e) => return Err(e),
+        }
+    };
     let mut guard = TempGuard {
         path: &tmp,
         armed: true,
@@ -492,15 +569,20 @@ pub fn write(path: &Path, key: &IndexKey, catalog: &Catalog) -> io::Result<()> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&tmp, path)?;
+    fs::rename(&tmp, &path)?;
     guard.armed = false;
-    File::open(dir)?.sync_all()?;
+    // The new index is in place; a failed directory sync only means it might
+    // not survive a power cut, and the old files must still be cleaned up.
+    if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+        log::warn!("can't sync the cache directory {}: {e}", dir.display());
+    }
 
-    remove_older(dir, &key.origin, name);
-    Ok(())
+    remove_older(dir, &key.origin, &name);
+    Ok(path)
 }
 
-/// Best-effort removal of the other index files of `origin`. Symlinks are
+/// Best-effort removal of the other index files of `origin`, and of its temp
+/// files older than ten minutes (a running write's is newer). Symlinks are
 /// removed as links, never followed.
 fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr) {
     let entries = match fs::read_dir(dir) {
@@ -510,20 +592,34 @@ fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr) {
             return;
         }
     };
+    let now = SystemTime::now();
     for entry in entries.flatten() {
         let fname = entry.file_name();
         if fname == keep {
             continue;
         }
         let Some(n) = fname.to_str() else { continue };
-        if !is_index_of(origin, n) {
+        let temp = is_temp_of(origin, n);
+        if !temp && !is_index_of(origin, n) {
             continue;
         }
         let Ok(ft) = entry.file_type() else { continue };
-        if (ft.is_file() || ft.is_symlink())
-            && let Err(e) = fs::remove_file(entry.path())
-        {
-            log::warn!("can't remove the old index {n}: {e}");
+        if !(ft.is_file() || ft.is_symlink()) {
+            continue;
+        }
+        if temp {
+            // Not followed: the age of the entry itself.
+            let age = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok());
+            if !age.is_some_and(|a| a >= STALE_TEMP) {
+                continue;
+            }
+        }
+        if let Err(e) = fs::remove_file(entry.path()) {
+            log::warn!("can't remove the old index file {n}: {e}");
         }
     }
 }
@@ -532,9 +628,45 @@ fn remove_older(dir: &Path, origin: &str, keep: &std::ffi::OsStr) {
 
 struct Dec<'a> {
     b: &'a [u8],
+    /// What may still be decoded, see [`MAX_DECODED`].
+    budget: usize,
+}
+
+/// Whether `s` has none of the characters the parser drops: controls (other
+/// than whitespace), bidi embeddings, overrides and isolates, BOM and
+/// noncharacters.
+fn clean_text(s: &str) -> bool {
+    if s.is_ascii() {
+        return s
+            .bytes()
+            .all(|b| b != 0x7f && (b >= 0x20 || (9..=13).contains(&b)));
+    }
+    s.chars().all(|c| text::class(c) != text::Class::Drop)
+}
+
+/// A verification website: the parser keeps what the remote says, which on
+/// Flathub is a bare host name (`example.org`); a full URL is fine too.
+fn valid_website(s: &str) -> bool {
+    s.is_empty()
+        || text::valid_url(s, false)
+        || (!s.contains(['/', '?', '#', '@', ':', '\\'])
+            && text::valid_url(&format!("https://{s}"), true))
 }
 
 impl<'a> Dec<'a> {
+    fn new(b: &'a [u8]) -> Dec<'a> {
+        Dec {
+            b,
+            budget: MAX_DECODED,
+        }
+    }
+    fn charge(&mut self, n: usize) -> Result<(), IndexError> {
+        self.budget = self
+            .budget
+            .checked_sub(n)
+            .ok_or(IndexError::Corrupt("more data than any catalog holds"))?;
+        Ok(())
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], IndexError> {
         if n > self.b.len() {
             return Err(IndexError::Damaged("cut short"));
@@ -580,6 +712,7 @@ impl<'a> Dec<'a> {
         if n > self.b.len() {
             return Err(IndexError::Damaged("count over the bytes left"));
         }
+        self.charge(n.saturating_mul(16))?;
         Ok(n)
     }
     fn str(&mut self) -> Result<String, IndexError> {
@@ -587,8 +720,13 @@ impl<'a> Dec<'a> {
         if n > MAX_STR {
             return Err(IndexError::Corrupt("string over the cap"));
         }
+        self.charge(n + 24)?;
         let b = self.take(n)?;
-        String::from_utf8(b.to_vec()).map_err(|_| IndexError::Corrupt("not UTF-8"))
+        let s = String::from_utf8(b.to_vec()).map_err(|_| IndexError::Corrupt("not UTF-8"))?;
+        if !clean_text(&s) {
+            return Err(IndexError::Corrupt("control or bidi character"));
+        }
+        Ok(s)
     }
     fn opt_str(&mut self) -> Result<Option<String>, IndexError> {
         Ok(if self.flag()? {
@@ -639,6 +777,7 @@ impl<'a> Dec<'a> {
     }
 
     fn component(&mut self) -> Result<Component, IndexError> {
+        self.charge(512)?;
         let id = self.str()?;
         if !text::valid_id(&id) {
             return Err(IndexError::Corrupt("component id"));
@@ -764,11 +903,22 @@ impl<'a> Dec<'a> {
             None
         };
         let extends = self.strs(MAX_LIST)?;
+        if !extends.iter().all(|e| text::valid_id(e)) {
+            return Err(IndexError::Corrupt("extends id"));
+        }
         let launchable = self.opt_str()?;
+        if launchable.as_deref().is_some_and(|l| !text::valid_id(l)) {
+            return Err(IndexError::Corrupt("launchable id"));
+        }
         let verification = if self.flag()? {
+            let method = self.str()?;
+            let website = self.str()?;
+            if !valid_website(&website) {
+                return Err(IndexError::Corrupt("verification website"));
+            }
             Some(Verification {
-                method: self.str()?,
-                website: self.str()?,
+                method,
+                website,
                 login_name: self.str()?,
                 login_provider: self.str()?,
                 organization: self.flag()?,
@@ -811,11 +961,15 @@ impl<'a> Dec<'a> {
     }
 }
 
-/// Reads the index at `path` if it was built for `key`. The file is opened
-/// without following a symlink, must be a regular file of at most 64 MiB and
-/// must pass every check in the module description.
+/// Reads the index at `path` if it was built for `key`. The directory must be
+/// private to the user; the file is opened without following a symlink, must
+/// be a regular file of at most 32 MiB and must pass every check in the
+/// module description.
 pub fn read(path: &Path, key: &IndexKey) -> Result<Catalog, IndexError> {
     key.check()?;
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        check_dir(dir).map_err(|e| IndexError::Io(e.to_string()))?;
+    }
     let io_err = |e: io::Error| IndexError::Io(format!("{}: {e}", path.display()));
     let file = File::options()
         .read(true)
@@ -840,10 +994,14 @@ pub fn read(path: &Path, key: &IndexKey) -> Result<Catalog, IndexError> {
 }
 
 fn decode(bytes: &[u8], key: &IndexKey) -> Result<Catalog, IndexError> {
+    decode_with(bytes, key, MAX_DECODED)
+}
+
+fn decode_with(bytes: &[u8], key: &IndexKey, budget: usize) -> Result<Catalog, IndexError> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(IndexError::TooLarge);
     }
-    let mut d = Dec { b: bytes };
+    let mut d = Dec::new(bytes);
     if d.take(8).map_err(|_| IndexError::BadHeader("too short"))? != MAGIC {
         return Err(IndexError::BadHeader("magic"));
     }
@@ -879,8 +1037,12 @@ fn decode(bytes: &[u8], key: &IndexKey) -> Result<Catalog, IndexError> {
         return Err(IndexError::Damaged("checksum"));
     }
 
-    let mut d = Dec { b: d.b };
+    let mut d = Dec::new(d.b);
+    d.budget = budget;
     let cat_origin = d.str()?;
+    if cat_origin != key.origin {
+        return Err(IndexError::KeyMismatch);
+    }
     let skipped = d.u32()?;
     let n = d.count(MAX_COMPONENTS)?;
     let mut components = Vec::with_capacity(n);
@@ -911,6 +1073,13 @@ mod tests {
         }
     }
 
+    fn empty() -> Catalog {
+        Catalog {
+            origin: "flathub".into(),
+            ..Catalog::default()
+        }
+    }
+
     fn catalog() -> Catalog {
         let xml = include_str!("../../tests/fixtures/flathub-sample.xml");
         let o = ParseOptions {
@@ -924,7 +1093,7 @@ mod tests {
     /// Recomputes the checksum after `bytes` was edited, so the decoder's own
     /// bounds checks are what gets exercised.
     fn refix(bytes: &mut [u8], key: &IndexKey) {
-        let head = encode(key, &Catalog::default());
+        let head = encode(key, &empty());
         // The header is the same length for the same key: payload_len and
         // checksum are the last 16 bytes of it.
         let header_len = head.len() - payload_of(&head).len();
@@ -937,8 +1106,8 @@ mod tests {
     }
 
     fn payload_of(b: &[u8]) -> &[u8] {
-        // For the empty catalog: the origin string (4 + 0), skipped (4), count (4).
-        &b[b.len() - 12..]
+        // For the empty catalog: the origin string (4 + 7), skipped (4), count (4).
+        &b[b.len() - 19..]
     }
 
     #[test]
@@ -946,10 +1115,7 @@ mod tests {
         let cat = catalog();
         let bytes = encode(&key(), &cat);
         assert_eq!(decode(&bytes, &key()).unwrap(), cat);
-        assert_eq!(
-            decode(&encode(&key(), &Catalog::default()), &key()).unwrap(),
-            Catalog::default()
-        );
+        assert_eq!(decode(&encode(&key(), &empty()), &key()).unwrap(), empty());
     }
 
     #[test]
@@ -973,7 +1139,7 @@ mod tests {
         let k = key();
         let bytes = encode(&k, &catalog());
         let header_len = bytes.len() - {
-            let mut d = Dec { b: &bytes };
+            let mut d = Dec::new(&bytes);
             d.take(8).unwrap();
             d.u32().unwrap();
             for _ in 0..2 {
@@ -1022,7 +1188,7 @@ mod tests {
     #[test]
     fn huge_counts_and_lengths_are_refused_without_allocating() {
         let k = key();
-        let mut bytes = encode(&k, &Catalog::default());
+        let mut bytes = encode(&k, &empty());
         // The component count is the last four bytes.
         let n = bytes.len();
         bytes[n - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -1032,8 +1198,8 @@ mod tests {
         refix(&mut bytes, &k);
         assert!(matches!(decode(&bytes, &k), Err(IndexError::Damaged(_))));
         // A string longer than the bytes left.
-        let mut bytes = encode(&k, &Catalog::default());
-        let hl = bytes.len() - 12;
+        let mut bytes = encode(&k, &empty());
+        let hl = bytes.len() - 19;
         bytes[hl..hl + 4].copy_from_slice(&60_000u32.to_le_bytes());
         refix(&mut bytes, &k);
         assert!(matches!(decode(&bytes, &k), Err(IndexError::Damaged(_))));
@@ -1057,5 +1223,136 @@ mod tests {
             "index-foo-0123456789abcdef-0a1b2c3d.bin.tmp"
         ));
         assert!(!is_index_of("foo", "notes.txt"));
+    }
+
+    /// The first component of the sample with `edit` applied, encoded.
+    fn hostile(edit: impl FnOnce(&mut Component)) -> Vec<u8> {
+        let mut cat = catalog();
+        cat.components.truncate(1);
+        edit(&mut cat.components[0]);
+        encode(&key(), &cat)
+    }
+
+    fn verification(website: &str, method: &str) -> Verification {
+        Verification {
+            method: method.into(),
+            website: website.into(),
+            login_name: String::new(),
+            login_provider: String::new(),
+            organization: false,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn the_payload_origin_must_be_the_keys() {
+        let mut cat = catalog();
+        cat.origin = "fedora".into();
+        let bytes = encode(&key(), &cat);
+        assert_eq!(decode(&bytes, &key()), Err(IndexError::KeyMismatch));
+    }
+
+    #[test]
+    fn hostile_text_in_a_valid_file_is_corrupt() {
+        let bad = "a\u{202e}b";
+        let ctl = "a\u{1}b";
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("name", hostile(|c| c.name = bad.into())),
+            ("summary", hostile(|c| c.summary = ctl.into())),
+            ("developer", hostile(|c| c.developer = "x\u{2066}".into())),
+            ("license", hostile(|c| c.license = "\u{feff}".into())),
+            ("keyword", hostile(|c| c.keywords = vec![ctl.into()])),
+            (
+                "span",
+                hostile(|c| {
+                    c.description = vec![Block::Paragraph(vec![Span {
+                        text: bad.into(),
+                        style: Style::Plain,
+                    }])]
+                }),
+            ),
+            (
+                "caption",
+                hostile(|c| {
+                    c.screenshots = vec![Screenshot {
+                        default: true,
+                        caption: ctl.into(),
+                        images: vec![],
+                    }]
+                }),
+            ),
+            (
+                "version",
+                hostile(|c| {
+                    c.releases = vec![Release {
+                        version: bad.into(),
+                        timestamp: 0,
+                        kind: ReleaseKind::Stable,
+                        description: vec![],
+                    }]
+                }),
+            ),
+            (
+                "rating id",
+                hostile(|c| {
+                    c.content_rating = Some(ContentRating {
+                        scheme: RatingScheme::Oars11,
+                        attrs: vec![(ctl.into(), Intensity::Mild)],
+                    })
+                }),
+            ),
+            (
+                "method",
+                hostile(|c| c.verification = Some(verification("example.org", bad))),
+            ),
+            (
+                "website",
+                hostile(|c| c.verification = Some(verification("javascript:alert(1)", ""))),
+            ),
+            (
+                "website with a path",
+                hostile(|c| c.verification = Some(verification("a.org/x y", ""))),
+            ),
+            ("extends", hostile(|c| c.extends = vec!["not an id".into()])),
+            (
+                "launchable",
+                hostile(|c| c.launchable = Some("../x".into())),
+            ),
+        ];
+        for (what, bytes) in cases {
+            assert!(
+                matches!(decode(&bytes, &key()), Err(IndexError::Corrupt(_))),
+                "{what}"
+            );
+        }
+        // The good forms pass.
+        let ok = hostile(|c| {
+            c.verification = Some(verification("example.org", "website"));
+            c.extends = vec!["org.example.App".into()];
+            c.launchable = Some("org.example.App.desktop".into());
+        });
+        assert!(decode(&ok, &key()).is_ok());
+        let ok = hostile(|c| c.verification = Some(verification("https://example.org/x", "")));
+        assert!(decode(&ok, &key()).is_ok());
+    }
+
+    #[test]
+    fn decoding_stops_at_the_budget() {
+        let bytes = encode(&key(), &catalog());
+        assert!(decode_with(&bytes, &key(), MAX_DECODED).is_ok());
+        assert!(matches!(
+            decode_with(&bytes, &key(), 4096),
+            Err(IndexError::Corrupt(_))
+        ));
+        // Many tiny strings cost more than their bytes: 4 bytes on disk, 24 charged.
+        let mut cat = empty();
+        let mut c = catalog().components.swap_remove(0);
+        c.keywords = vec![String::new(); MAX_LIST];
+        c.categories = vec![String::new(); MAX_LIST];
+        cat.components = vec![c; 200];
+        let bytes = encode(&key(), &cat);
+        // Each component costs at least 5120: 128 strings at 24 and 128 list items at 16.
+        assert!(decode_with(&bytes, &key(), MAX_DECODED).is_ok());
+        assert!(decode_with(&bytes, &key(), 200 * 5000).is_err());
     }
 }
