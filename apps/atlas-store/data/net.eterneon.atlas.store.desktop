@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Atlas Store
+GenericName=App Store
+Comment=Find, install and update apps
+Exec=atlas-store %U
+Icon=net.eterneon.atlas.store
+Terminal=false
+Categories=Qt;KDE;System;PackageManager;
+Keywords=software;apps;install;flatpak;flathub;store;updates;discover;
+# Flatpak's files, its links, AppStream links (Plasma's "Uninstall or Manage
+# Add-Ons" and KRunner) and RPM files, which the Store explains instead of
+# installing.
+MimeType=application/vnd.flatpak.ref;application/vnd.flatpak.repo;application/vnd.flatpak;application/x-rpm;x-scheme-handler/appstream;x-scheme-handler/flatpak+https;
+StartupNotify=true
+SingleMainWindow=true
+X-KDE-StartupNotify=true
+Actions=Updates;
+
+[Desktop Action Updates]
+Name=Updates
+Exec=atlas-store --page updates

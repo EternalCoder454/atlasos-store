@@ -1,0 +1,91 @@
+# Atlas Store (AtlasOS)
+
+Rust + Qt 6.11 + Kirigami (CXX-Qt) app store for AtlasOS, a Fedora Kinoite 44
+bootc image (repo `~/Documents/Projects/AtlasOS/AtlasOS`). It replaces KDE
+Discover: Flatpak apps from every enabled remote (Flathub first), their
+add-ons and updates, and the flatpak/appstream links and files Discover opens.
+Read `docs/DESIGN.md` first: it fixes the layout, the threading rule, what
+comes from the network and how it is checked, and who owns what. Change it
+only together with the code that implements the change.
+The plan and roadmap are the Atlas Notes notes "AtlasOS/Store/Plan" and
+"AtlasOS/Store/Roadmap".
+
+The stack, build and look are Atlas Monitor's
+(`~/Documents/Projects/AtlasOS/AtlasOS Monitor`). When in doubt, do what it
+does, except for what atlas-framework provides (startup, settings file,
+logging, crash reports, Flatpak updates), which the Store takes from there.
+
+## Hard rules
+
+- **Build and test inside the `fedora:44` dev container**, never on the host:
+  `scripts/dev.sh <command>`. The repo is at `/src`; all build output goes to
+  `/work` (`~/.cache/claude-builds/atlas-store` on the host), never into the
+  repo or `/tmp`. Use a separate target dir per agent or task
+  (`CARGO_TARGET_DIR=/work/target/<name> scripts/dev.sh ...`).
+- **Never touch a real Flatpak installation.** Tests and smoke runs set
+  `FLATPAK_USER_DIR` and `FLATPAK_SYSTEM_DIR` under `/work/flatpak/<name>` and
+  use the local test remotes; never the host's `/var/lib/flatpak` or
+  `~/.local/share/flatpak`, and never Flathub for installs.
+- **Never run the GUI on the user's display.** Smoke runs use
+  `QT_QPA_PLATFORM=offscreen`, or `xvfb-run -a -s "-screen 0 1920x1080x24"`,
+  inside `dbus-run-session`, with `XDG_*_HOME` pointed under `/work`. Real
+  end-to-end tests happen in the AtlasOS test VM, which the AtlasOS session
+  runs.
+- **Everything from the network is untrusted**: AppStream XML and its markup,
+  icons, screenshots, the Flathub API, flatpakrefs, flatpakrepos, bundles and
+  remote definitions, and every launch argument. Parse it in Rust
+  (`crates/atlas-store-core`), with limits, never as QML RichText or a
+  remote URL handed to QML. Downloads have a timeout and a size cap.
+- **Nothing is installed, removed or added as a source without the user's
+  confirmation in the Store's own dialog**, showing what will happen
+  (permissions, size, the remote and its key). System-wide changes go through
+  flatpak's polkit actions; nothing else asks for privilege.
+- **No background work when closed**: no timer, autostart, D-Bus activation
+  or notification. Atlas Updater owns background checks, auto-updates,
+  update notifications and firmware. The Store takes Updater's lock
+  (`$XDG_RUNTIME_DIR/atlas-updater-apps.lock`) from a worker before changing
+  installations.
+- **Atlas.Ui is the installed `atlas-ui` package** from atlas-framework
+  (`~/Documents/Atlas Framework`, read-only from here).
+  Never fork Atlas.Ui components into this repo: ask the "AtlasOS Framework"
+  session. Pieces it hasn't shipped yet live in `qml/` with the requested API
+  shape, and move upstream later.
+- **The GUI thread never blocks.** Parsing, search, libflatpak calls,
+  downloads and image decoding run on worker threads; results come back with
+  `qt_thread().queue`.
+- Tests assert invariants and use fixtures in
+  `crates/atlas-store-core/tests/fixtures`, never this machine's Flatpaks.
+- Commits are authored as
+  `EternalHell <77252745+EternalCoder454@users.noreply.github.com>`. Commit
+  only the paths you own (`git commit -- <paths>`). Don't push unless the
+  lead asked.
+- Licence: MIT. App ID `net.eterneon.atlas.store`. Wording follows KDE:
+  Title Case buttons and titles, US spelling.
+
+## Commands
+
+| Task | Command (from the repo root on the host) |
+|---|---|
+| Format | `scripts/dev.sh cargo fmt --all --check` |
+| Lint | `scripts/dev.sh cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| Tests | `scripts/dev.sh cargo test --workspace --locked` |
+| App build | `scripts/dev.sh bash -c 'cmake -S apps/atlas-store -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
+| Smoke run | `scripts/dev.sh dbus-run-session -- env QT_QPA_PLATFORM=offscreen /work/cmake/dev/atlas-store` |
+| RPM | `podman run --rm -v "$PWD":/src:Z -v <framework rpms>:/atlas-rpms:ro,z -e ATLAS_LOCAL_RPMS=/atlas-rpms -v atlas-cargo:/root/.cargo/registry -v atlas-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
+| Atlas checks | `git -C ~/Documents/Atlas\ Framework archive v1.4.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/atlas-store` and `<dir>/tools/check-app-names.sh apps/atlas-store` |
+
+`<framework rpms>` is the out dir of atlas-framework's `packaging/build-rpm.sh`:
+no repository has atlas-ui. `scripts/dev.sh` builds
+`localhost/atlas-store-dev:44` on first use, which needs
+`ATLAS_LOCAL_RPMS=<dir>` holding them.
+
+## Moving the atlas-framework pin
+
+1. Change `tag` in `Cargo.toml`, then
+   `scripts/dev.sh cargo update -p atlas-framework-ui -p atlas-framework-flatpak`.
+2. Move the pin in `.github/workflows/ci.yml` (app-checks, its
+   `framework-ref` and the framework RPM job): CI pins by the tag's commit
+   SHA, with the tag in a comment (`gh api repos/EternalCoder454/atlas-framework/commits/vX.Y.Z --jq .sha`), and when the app uses something new in Atlas.Ui, `ui:`
+   in `src/lib.rs` and `atlas-ui >=` in the spec (Requires and BuildRequires).
+3. Rebuild the dev image against that release's RPMs.
+4. Commit `Cargo.toml` and `Cargo.lock` together.

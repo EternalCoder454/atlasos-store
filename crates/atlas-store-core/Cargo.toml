@@ -1,0 +1,11 @@
+[package]
+name = "atlas-store-core"
+description = "Atlas Store's Qt-free core: AppStream index, search, Flatpak jobs, downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+log.workspace = true
