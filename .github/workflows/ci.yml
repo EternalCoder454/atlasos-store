@@ -42,7 +42,7 @@ jobs:
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Tools for checkout and cache
-        run: dnf -y install git-core tar zstd
+        run: dnf -y install git-core tar zstd diffutils gawk
       - id: month
         run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
       - id: cache
