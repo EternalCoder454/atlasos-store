@@ -24,6 +24,7 @@
 mod installed;
 pub mod lock;
 mod remote;
+pub mod running;
 pub mod sources;
 mod supervise;
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub use installed::{
 };
 pub use lock::{LockError, LockName, OperationLock};
 pub use remote::{RemoteRefInfo, remote_ref_info};
+pub use running::{close_app, launch_app, valid_activation_token};
 pub use sources::{
     RefResolution, RefSource, RemoteProposal, SweepOutcome, add_ref_remote, add_remote,
     remove_remote, resolve_ref_source, sweep_pending_remotes, update_appstream,
@@ -260,7 +262,8 @@ pub enum Error {
     /// apps could not be listed or read, say), so nothing was changed. The
     /// text says what, in plain words.
     CouldNotCheck(String),
-    /// The app is running: close it first.
+    /// The app is running. The Store offers to close it (`running::close_app`)
+    /// and try again.
     AppRunning,
     /// A runtime the app needs is not available from its source.
     RuntimeNotFound,
@@ -351,7 +354,7 @@ impl fmt::Display for Error {
                     "Could not check {what}, so nothing was changed. Try again."
                 )
             }
-            Error::AppRunning => f.write_str("The app is running. Close it first."),
+            Error::AppRunning => f.write_str("App is running"),
             Error::RuntimeNotFound => {
                 f.write_str("A runtime this app needs is not available from its source.")
             }

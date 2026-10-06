@@ -62,6 +62,12 @@ pub mod qobject {
         #[cxx_name = "planReady"]
         fn plan_ready(self: Pin<&mut Jobs>, app_id: QString);
 
+        /// A removal with "Also Delete App Data" stopped because the app is
+        /// running; the dialog offers to close it (`closeAndRemove`).
+        #[qsignal]
+        #[cxx_name = "removeBlocked"]
+        fn remove_blocked(self: Pin<&mut Jobs>, app_id: QString, full_ref: QString);
+
         /// The unused runtimes were listed (`count` may be 0).
         #[qsignal]
         #[cxx_name = "unusedReady"]
@@ -95,6 +101,12 @@ pub mod qobject {
         #[qinvokable]
         fn remove(self: Pin<&mut Jobs>, app_id: &QString, full_ref: &QString, delete_data: bool);
 
+        /// Closes the running app (SIGTERM, then SIGKILL after 3 s), then
+        /// removes it with its data. Only after the user confirmed that.
+        #[qinvokable]
+        #[cxx_name = "closeAndRemove"]
+        fn close_and_remove(self: Pin<&mut Jobs>, app_id: &QString, full_ref: &QString);
+
         /// Lists the unused runtimes (signals `unusedReady`).
         #[qinvokable]
         #[cxx_name = "checkUnused"]
@@ -105,9 +117,10 @@ pub mod qobject {
         #[cxx_name = "removeUnused"]
         fn remove_unused(self: Pin<&mut Jobs>);
 
-        /// Opens an installed app.
+        /// Opens an installed app. `token` is the activation token QML got
+        /// from `ActivationToken` ("" for none).
         #[qinvokable]
-        fn open(self: Pin<&mut Jobs>, app_id: &QString);
+        fn open(self: Pin<&mut Jobs>, app_id: &QString, token: &QString);
 
         #[qinvokable]
         #[cxx_name = "clearMessages"]
@@ -144,15 +157,14 @@ use atlas_store_core::appstream::{Block, Span, UrlKind};
 use atlas_store_core::catalog::is_free_license;
 use atlas_store_core::flatpak::{
     CancelToken, Error, InstallPlan, InstalledRef, LockError, OperationLock, Progress, RefKind,
-    Scope, install, list_installed_all, list_unused, open as open_installation, plan_install,
-    sweep_pending_remotes, uninstall, uninstall_unused,
+    Scope, close_app, install, launch_app, list_installed_all, list_unused, plan_install,
+    sweep_pending_remotes, uninstall, uninstall_unused, valid_activation_token,
 };
 use atlas_store_core::launch::https_url;
 use atlas_store_core::permissions::{Permissions, Risk};
 use atlas_store_core::text::clean;
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use libflatpak::prelude::*;
 use serde_json::{Value, json};
 
 use crate::catalog::{ICON_SIZE, library, safe_icon};
@@ -208,13 +220,17 @@ enum Job {
     },
     Remove {
         name: String,
+        app_id: String,
         scope: Scope,
         ref_: String,
         delete_data: bool,
+        /// Close the app's running instances first (the user said so).
+        close_first: bool,
     },
     Unused,
     RemoveUnused(Vec<(Scope, Vec<String>)>),
-    Open(Entry),
+    /// The app and the activation token QML got for it, if any.
+    Open(Entry, Option<String>),
 }
 
 impl Job {
@@ -235,6 +251,8 @@ struct Outcome {
     result: Option<String>,
     plan: Option<(InstallPlan, String)>,
     unused: Option<Vec<Unused>>,
+    /// The removal stopped because the app runs: the ref to offer closing it for.
+    blocked_ref: Option<String>,
 }
 
 pub struct JobsRust {
@@ -652,22 +670,35 @@ fn run_job(thread: &CxxQtThread<qobject::Jobs>, job: Job, cancel: &CancelToken) 
         }
         Job::Remove {
             name,
+            app_id,
             scope,
             ref_,
             delete_data,
+            close_first,
         } => {
             say(thread, "Removing\u{2026}");
             match take_lock(thread, cancel) {
                 Err(e) => fail(&mut out, &e),
                 Ok(lock) => {
-                    match uninstall(
-                        scope,
-                        &ref_,
-                        delete_data,
-                        &lock,
-                        cancel,
-                        progress_sink(thread),
-                    ) {
+                    // The user confirmed closing the app. On the worker: it
+                    // polls and sleeps for up to a few seconds.
+                    let closed = if close_first {
+                        say(thread, "Closing the app\u{2026}");
+                        close_app(&app_id, cancel)
+                    } else {
+                        Ok(())
+                    };
+                    let removed = closed.and_then(|()| {
+                        uninstall(
+                            scope,
+                            &ref_,
+                            delete_data,
+                            &lock,
+                            cancel,
+                            progress_sink(thread),
+                        )
+                    });
+                    match removed {
                         Ok(done) => {
                             use atlas_store_core::flatpak::DataResult as D;
                             let mut text = format!("Removed {name}.");
@@ -687,6 +718,9 @@ fn run_job(thread: &CxxQtThread<qobject::Jobs>, job: Job, cancel: &CancelToken) 
                                 out.unused = Some(unused);
                             }
                         }
+                        // Asked in the dialog, not shown as an error. A second
+                        // AppRunning after closing is a real failure.
+                        Err(Error::AppRunning) if !close_first => out.blocked_ref = Some(ref_),
                         Err(e) => fail(&mut out, &e),
                     }
                     drop(lock);
@@ -726,20 +760,18 @@ fn run_job(thread: &CxxQtThread<qobject::Jobs>, job: Job, cancel: &CancelToken) 
                 }
             }
         }
-        Job::Open(entry) => {
-            let launched = open_installation(entry.scope).and_then(|inst| {
-                inst.launch(
-                    &entry.id,
-                    Some(&entry.arch),
-                    Some(&entry.branch),
-                    None,
-                    Some(cancel.cancellable()),
-                )
-                .map_err(|e| Error::Flatpak {
-                    action: "open the app",
-                    message: clean(e.message(), 300),
-                })
-            });
+        Job::Open(entry, token) => {
+            // `flatpak run` with the activation token in its environment:
+            // libflatpak's launch takes no environment, and Wayland does not
+            // bring a window forward that arrives without a token.
+            let launched = launch_app(
+                entry.scope,
+                &entry.id,
+                &entry.arch,
+                &entry.branch,
+                token.as_deref(),
+                cancel,
+            );
             if let Err(e) = launched {
                 fail(&mut out, &e);
             }
@@ -861,6 +893,12 @@ impl qobject::Jobs {
             self.as_mut().set_percent(-1);
             self.as_mut().set_status(QString::default());
             self.as_mut().set_not_responding(false);
+        }
+        if let Some(full_ref) = out.blocked_ref {
+            self.as_mut().remove_blocked(
+                QString::from(app.as_str()),
+                QString::from(full_ref.as_str()),
+            );
         }
         if let Some((plan, json)) = out.plan {
             self.as_mut().rust_mut().plan = Some(plan);
@@ -988,11 +1026,20 @@ impl qobject::Jobs {
         self.rust().fg_cancel.cancel();
     }
 
-    pub fn remove(
+    pub fn remove(self: Pin<&mut Self>, app_id: &QString, full_ref: &QString, delete_data: bool) {
+        self.start_remove(app_id, full_ref, delete_data, false);
+    }
+
+    pub fn close_and_remove(self: Pin<&mut Self>, app_id: &QString, full_ref: &QString) {
+        self.start_remove(app_id, full_ref, true, true);
+    }
+
+    fn start_remove(
         mut self: Pin<&mut Self>,
         app_id: &QString,
         full_ref: &QString,
         delete_data: bool,
+        close_first: bool,
     ) {
         if !self.idle() {
             return;
@@ -1018,9 +1065,11 @@ impl qobject::Jobs {
         self.submit(
             Job::Remove {
                 name: e.name,
+                app_id: e.id,
                 scope: e.scope,
                 ref_: e.full_ref,
                 delete_data: delete_data && !shared,
+                close_first: close_first && delete_data && !shared,
             },
             "removing",
             &id,
@@ -1050,7 +1099,7 @@ impl qobject::Jobs {
         self.submit(Job::RemoveUnused(lists), "removing", "");
     }
 
-    pub fn open(mut self: Pin<&mut Self>, app_id: &QString) {
+    pub fn open(mut self: Pin<&mut Self>, app_id: &QString, token: &QString) {
         if !self.idle() {
             return;
         }
@@ -1059,7 +1108,11 @@ impl qobject::Jobs {
             self.as_mut().set_message("This app is not installed.", &id);
             return;
         };
-        self.submit(Job::Open(e), "opening", &id);
+        // The token comes from the window system through QML; it goes into a
+        // child's environment, so it is checked here.
+        let token = token.to_string();
+        let token = valid_activation_token(&token).map(str::to_string);
+        self.submit(Job::Open(e, token), "opening", &id);
     }
 
     pub fn clear_messages(mut self: Pin<&mut Self>) {

@@ -32,6 +32,30 @@ AtlasPage {
 
     signal removeRequested(string appId, string name, string scope, string ref)
 
+    // Open asks the window system for an activation token first (C++,
+    // activation_token.cpp) and starts the app when it, or "" for none, comes
+    // back: without a token Wayland can leave the app's window behind this one.
+    property bool opening: false
+
+    function openApp() {
+        if (page.opening || !page.idle) {
+            return;
+        }
+        page.opening = true;
+        ActivationToken.request(page.Window.window, page.appId);
+    }
+
+    Connections {
+        target: ActivationToken
+        function onReady(appId, token) {
+            if (!page.opening || appId !== page.appId) {
+                return;
+            }
+            page.opening = false;
+            page.jobs.open(page.appId, token);
+        }
+    }
+
     function dateText(seconds) {
         return seconds > 0 ? new Date(seconds * 1000).toLocaleDateString(Qt.locale(), Locale.LongFormat) : "";
     }
@@ -136,8 +160,8 @@ AtlasPage {
                     visible: page.installed
                     text: qsTr("Open")
                     prominent: true
-                    enabled: page.idle
-                    onClicked: page.jobs.open(page.appId)
+                    enabled: page.idle && !page.opening
+                    onClicked: page.openApp()
                 }
                 Repeater {
                     model: page.info.installs ?? []
