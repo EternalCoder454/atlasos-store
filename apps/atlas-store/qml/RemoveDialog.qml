@@ -4,7 +4,9 @@ import Atlas.Ui
 
 // The remove confirmation. "Also Delete App Data" is off by default. The
 // default button is Cancel and the dialog ignores input for its first half
-// second.
+// second. When the app is running and its data was to be deleted, the same
+// dialog comes back (`showRunning`) and offers "Close and Remove": the app is
+// closed on the worker, with no chance to save, so the text says so.
 ConfirmDialog {
     id: dlg
 
@@ -15,10 +17,11 @@ ConfirmDialog {
     property string fullRef
     property bool shared: false
     property bool armed: false
+    property bool running: false
 
-    title: qsTr("Remove %1?").arg(dlg.appName)
-    text: qsTr("From the %1 installation. The app will be uninstalled. Runtimes it used stay until you remove unused ones.").arg(dlg.scope)
-    acceptText: qsTr("Remove")
+    title: dlg.running ? qsTr("%1 Is Running").arg(dlg.appName) : qsTr("Remove %1?").arg(dlg.appName)
+    text: dlg.running ? qsTr("To delete its data, the app has to be closed first. Anything unsaved in it is lost.") : qsTr("From the %1 installation. The app will be uninstalled. Runtimes it used stay until you remove unused ones.").arg(dlg.scope)
+    acceptText: dlg.running ? qsTr("Close and Remove") : qsTr("Remove")
     rejectText: qsTr("Cancel")
     destructive: true
     defaultButton: "reject"
@@ -32,6 +35,21 @@ ConfirmDialog {
         dlg.fullRef = ref;
         dlg.shared = shared;
         deleteData.checked = false;
+        dlg.running = false;
+        dlg.armed = false;
+        armTimer.restart();
+        dlg.open();
+    }
+
+    // The removal stopped because the app runs (Jobs.removeBlocked).
+    function showRunning(id, name, scope, ref) {
+        dlg.appId = id;
+        dlg.appName = name;
+        dlg.scope = scope;
+        dlg.fullRef = ref;
+        dlg.shared = false;
+        deleteData.checked = true;
+        dlg.running = true;
         dlg.armed = false;
         armTimer.restart();
         dlg.open();
@@ -48,12 +66,17 @@ ConfirmDialog {
             return;
         }
         dlg.close();
-        dlg.jobs.remove(dlg.appId, dlg.fullRef, deleteData.checked && !dlg.shared);
+        if (dlg.running) {
+            dlg.jobs.closeAndRemove(dlg.appId, dlg.fullRef);
+        } else {
+            dlg.jobs.remove(dlg.appId, dlg.fullRef, deleteData.checked && !dlg.shared);
+        }
     }
 
     AtlasCheckBox {
         id: deleteData
         Layout.fillWidth: true
+        visible: !dlg.running
         text: qsTr("Also Delete App Data")
         checked: false
         enabled: !dlg.shared

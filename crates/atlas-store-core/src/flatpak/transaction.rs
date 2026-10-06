@@ -56,6 +56,7 @@ use libflatpak::prelude::*;
 
 use super::installed::list_unused_raw;
 use super::lock::OperationLock;
+use super::running::app_running;
 use super::supervise::{Limits, Msg, OpPhase, Phase, run_supervised, run_supervised_with};
 use super::{
     CancelToken, Error, InstalledRef, ListError, ListErrorKind, PlanChange, RefKind, Scope,
@@ -1766,12 +1767,6 @@ fn runtime_users(deps: &[Dep], target: &str, skip: &[String]) -> Result<Vec<Stri
         .filter(|d| d.uses.contains(&want))
         .map(|d| d.full_ref.clone())
         .collect())
-}
-
-fn app_running(id: &str) -> bool {
-    libflatpak::Instance::all()
-        .iter()
-        .any(|i| i.is_running() && i.app().as_deref() == Some(id))
 }
 
 /// `$HOME`, canonicalized (a symlinked home is fine).

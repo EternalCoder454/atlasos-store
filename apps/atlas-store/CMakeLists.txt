@@ -73,6 +73,9 @@ target_include_directories(atlas-store-app PRIVATE "${ATLAS_UI_CRATE_DIR}/includ
 qt_add_qml_module(atlas-store-app
     URI net.eterneon.atlas.store
     VERSION 1.0
+    SOURCES
+        cpp/activation_token.h
+        cpp/activation_token.cpp
     QML_FILES
         qml/Main.qml
         qml/AppPage.qml

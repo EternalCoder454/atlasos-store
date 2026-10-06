@@ -143,8 +143,18 @@ lists: the source is re-checked (same URL and signing, still enabled) and a
 fresh transaction is compared with the plan before anything downloads, else
 `PlanChanged` says what differs and the user is asked again. Uninstalling an
 app deletes its data only on request, for the current user, never while it
-runs and never while another branch of it is installed; a runtime an
+runs (the dialog then offers "Close and Remove": SIGTERM, 3 s, SIGKILL, on the
+worker, after the user confirms) and never while another branch of it is installed; a runtime an
 installed app uses is refused (only "remove unused" removes runtimes).
+
+## Opening an app
+
+Open asks the window system for an XDG activation token on the GUI thread
+(`cpp/activation_token.cpp`, KWaylandExtras, a signal and a 1 s timeout, none
+on X11), then the worker runs `flatpak run --user|--system --arch --branch <id>`
+with `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` set, in its own process
+group, and does not wait for the app. Without the token Wayland can leave the
+app's window behind the Store.
 
 ## Lifetime
 

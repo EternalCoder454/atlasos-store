@@ -212,6 +212,13 @@ AtlasWindow {
         function onPlanReady(appId) {
             installDialog.show();
         }
+        function onRemoveBlocked(appId, fullRef) {
+            const info = JSON.parse(root.jobs.appInfo(appId));
+            const install = (info.installs ?? []).find(i => i.ref === fullRef);
+            if (install) {
+                removeDialog.showRunning(appId, info.name, install.scope, fullRef);
+            }
+        }
         function onUnusedReady(count) {
             if (count > 0) {
                 unusedDialog.show();
