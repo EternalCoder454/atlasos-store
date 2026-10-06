@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use libflatpak::prelude::*;
+use sha2::{Digest, Sha256};
 
 use super::{CatalogSource, LoadError, SourcesOutcome};
 use crate::appstream::{self, Catalog, IndexKey, ParseError, ParseOptions, index};
@@ -26,15 +27,44 @@ fn commit_name(dir: &Path) -> Result<String, String> {
     }
 }
 
-/// `dir`, `commit` and `updated` of the catalog behind the `active` link:
-/// all `None` when it was never downloaded, an error line when it is there
-/// but unusable.
+/// The catalog of an OCI remote (Fedora's registry): flatpak keeps no
+/// `active` link and no commit for it, only `appstream.xml.gz` and `icons/`
+/// in the arch folder itself, replaced on each refresh. Its "commit" (the
+/// index key) is a digest of the file's size and mtime, so the index is
+/// rebuilt whenever the catalog is.
+fn locate_plain(dir: &Path) -> Result<(PathBuf, String, std::time::SystemTime), Option<String>> {
+    let xml = dir.join("appstream.xml.gz");
+    let meta = match fs::symlink_metadata(&xml) {
+        Ok(m) if m.is_file() => m,
+        Ok(_) => return Err(Some("the catalog is not a plain file".to_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(None),
+        Err(e) => return Err(Some(e.to_string())),
+    };
+    let updated = meta.modified().map_err(|e| Some(e.to_string()))?;
+    let stamp = updated
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut h = Sha256::new();
+    h.update(b"atlas-store oci catalog\0");
+    h.update(meta.len().to_le_bytes());
+    h.update(stamp.to_le_bytes());
+    let commit = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let dir = fs::canonicalize(dir).map_err(|e| Some(e.to_string()))?;
+    Ok((dir, commit, updated))
+}
+
+/// `dir`, `commit` and `updated` of the catalog behind the `active` link
+/// (or in the folder itself, for an OCI remote): all `None` when it was
+/// never downloaded, an error line when it is there but unusable.
 fn locate(link: &Path) -> Result<(PathBuf, String, std::time::SystemTime), Option<String>> {
     let meta = match fs::symlink_metadata(link) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(None),
         Err(e) => return Err(Some(e.to_string())),
     };
+    if meta.is_dir() {
+        return locate_plain(link);
+    }
     // One resolution gives both: flatpak swaps `active` during a refresh, and
     // a commit from one look with the folder of another would index one
     // commit's catalog under the other's name.
@@ -190,4 +220,74 @@ pub(super) fn load(
         log::warn!("could not write the index of {}: {e}", source.remote);
     }
     Ok(cat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// A fresh folder under the system temp dir, removed when dropped.
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let p = std::env::temp_dir()
+                .join(format!("atlas-store-sources-{}-{n}", std::process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_oci_catalog_folder_is_read_in_place() {
+        let d = TmpDir::new();
+        let arch = d.path().join("fedora").join("x86_64");
+        fs::create_dir_all(arch.join("icons")).unwrap();
+        // Never downloaded yet: nothing, and no error.
+        assert_eq!(locate(&arch), Err(None));
+
+        let xml = arch.join("appstream.xml.gz");
+        fs::write(&xml, b"not really gzip").unwrap();
+        let (dir, commit, _) = locate(&arch).unwrap();
+        assert_eq!(dir, fs::canonicalize(&arch).unwrap());
+        assert_eq!(commit.len(), 64);
+        assert!(commit_name(&PathBuf::from(&commit)).is_ok());
+        // Same file, same key; a refresh (new mtime) gives a new one.
+        assert_eq!(locate(&arch).unwrap().1, commit);
+        let f = fs::File::options().write(true).open(&xml).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        assert_ne!(locate(&arch).unwrap().1, commit);
+    }
+
+    #[test]
+    fn an_oci_catalog_that_is_not_a_file_is_an_error() {
+        let d = TmpDir::new();
+        fs::create_dir_all(d.path().join("appstream.xml.gz")).unwrap();
+        assert!(matches!(locate(d.path()), Err(Some(_))));
+    }
+
+    #[test]
+    fn an_ostree_catalog_needs_a_commit_named_target() {
+        let d = TmpDir::new();
+        let commit = "b119957b053ed222b6d5750cd10bb105cf9d5f0c62c2a40c7ae7d819729ff3ad";
+        fs::create_dir(d.path().join(commit)).unwrap();
+        std::os::unix::fs::symlink(commit, d.path().join("active")).unwrap();
+        assert_eq!(locate(&d.path().join("active")).unwrap().1, commit);
+
+        fs::create_dir(d.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", d.path().join("bad")).unwrap();
+        assert!(matches!(locate(&d.path().join("bad")), Err(Some(_))));
+    }
 }

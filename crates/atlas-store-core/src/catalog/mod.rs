@@ -118,10 +118,12 @@ pub struct CatalogSource {
     pub title: String,
     /// The remote's priority (higher first).
     pub priority: i32,
-    /// `.../appstream/<remote>/<arch>/active`, resolved. `None` when the
-    /// catalog was never downloaded.
+    /// `.../appstream/<remote>/<arch>/active`, resolved (an OCI remote's
+    /// `.../appstream/<remote>/<arch>` itself). `None` when the catalog was
+    /// never downloaded.
     pub dir: Option<PathBuf>,
-    /// The OSTree commit `active` points to: lowercase hex, 16 to 64
+    /// The OSTree commit `active` points to (for an OCI remote, a digest of
+    /// its catalog file's size and mtime): lowercase hex, 16 to 64
     /// characters, checked. `None` together with `dir`.
     pub commit: Option<String>,
     /// When the catalog was last downloaded (the `active` link's mtime).
