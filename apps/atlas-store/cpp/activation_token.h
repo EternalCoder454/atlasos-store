@@ -8,9 +8,8 @@
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <QWindow>
 #include <QtQml/qqmlregistration.h>
-
-class QWindow;
 
 class ActivationToken : public QObject
 {

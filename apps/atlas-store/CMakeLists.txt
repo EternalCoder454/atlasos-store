@@ -66,7 +66,9 @@ endif()
 
 qt_add_executable(atlas-store-app cpp/main.cpp)
 set_target_properties(atlas-store-app PROPERTIES OUTPUT_NAME atlas-store)
-target_include_directories(atlas-store-app PRIVATE "${ATLAS_UI_CRATE_DIR}/include")
+# cpp/ too: the QML type registrations Qt generates include the headers of
+# the C++ QML types (cpp/activation_token.h) by file name alone.
+target_include_directories(atlas-store-app PRIVATE "${ATLAS_UI_CRATE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/cpp")
 
 # qmlcachegen compiles every QML file to C++ at build time; the app reads no
 # .qml from disk at run time.
