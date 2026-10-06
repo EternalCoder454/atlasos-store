@@ -22,8 +22,8 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "atlas-framework-core"
-version = "1.4.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.4.0#7a114a112bd1fff4fe3d6facc81b0a81e5d2db30"
+version = "1.6.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
 dependencies = [
  "libc",
  "log",
@@ -32,8 +32,8 @@ dependencies = [
 
 [[package]]
 name = "atlas-framework-system"
-version = "1.4.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.4.0#7a114a112bd1fff4fe3d6facc81b0a81e5d2db30"
+version = "1.6.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
 dependencies = [
  "atlas-framework-core",
  "getrandom 0.3.4",
@@ -46,8 +46,8 @@ dependencies = [
 
 [[package]]
 name = "atlas-framework-ui"
-version = "1.4.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.4.0#7a114a112bd1fff4fe3d6facc81b0a81e5d2db30"
+version = "1.6.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
 dependencies = [
  "atlas-framework-core",
  "atlas-framework-system",
