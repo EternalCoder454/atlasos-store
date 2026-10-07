@@ -21,71 +21,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "atlas-framework-core"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "libc",
- "log",
- "serde",
-]
-
-[[package]]
-name = "atlas-framework-system"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "atlas-framework-core",
- "getrandom 0.3.4",
- "libc",
- "log",
- "serde",
- "serde_json",
- "unicode-normalization",
-]
-
-[[package]]
-name = "atlas-framework-ui"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "atlas-framework-core",
- "atlas-framework-system",
- "cxx-qt-build",
- "libc",
- "log",
-]
-
-[[package]]
-name = "atlas-store"
-version = "0.1.0"
-dependencies = [
- "atlas-framework-ui",
- "atlas-store-core",
- "cxx",
- "cxx-qt",
- "cxx-qt-build",
- "cxx-qt-lib",
- "libflatpak",
- "log",
- "serde_json",
-]
-
-[[package]]
-name = "atlas-store-core"
-version = "0.1.0"
-dependencies = [
- "atlas-store-core",
- "flate2",
- "libc",
- "libflatpak",
- "log",
- "quick-xml",
- "sha1",
- "sha2",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -936,6 +871,71 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "telamon-framework-core"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "libc",
+ "log",
+ "serde",
+]
+
+[[package]]
+name = "telamon-framework-system"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "telamon-framework-core",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "telamon-framework-ui"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "cxx-qt-build",
+ "libc",
+ "log",
+ "telamon-framework-core",
+ "telamon-framework-system",
+]
+
+[[package]]
+name = "telamon-store"
+version = "0.2.0"
+dependencies = [
+ "cxx",
+ "cxx-qt",
+ "cxx-qt-build",
+ "cxx-qt-lib",
+ "libflatpak",
+ "log",
+ "serde_json",
+ "telamon-framework-ui",
+ "telamon-store-core",
+]
+
+[[package]]
+name = "telamon-store-core"
+version = "0.2.0"
+dependencies = [
+ "flate2",
+ "libc",
+ "libflatpak",
+ "log",
+ "quick-xml",
+ "sha1",
+ "sha2",
+ "telamon-store-core",
+]
 
 [[package]]
 name = "termcolor"

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+# The name before the rename to Telamon Store (0.2.0). Kept for this release
+# for what still launches it by this desktop ID (the apps move one by one); it
+# is hidden and starts the same app. The real entry is
+# net.eterneon.telamon.store.desktop.
+Name=Telamon Store
+Exec=telamon-store %U
+Icon=net.eterneon.telamon.store
+NoDisplay=true
+Terminal=false
+StartupNotify=true
+X-KDE-StartupNotify=true
