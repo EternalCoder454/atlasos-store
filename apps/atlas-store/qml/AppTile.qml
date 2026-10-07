@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Templates as T
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // One app in a grid: icon, name, summary and developer. Made to be cheap
 // (a grid shows thousands): one asynchronous, size-limited image and a few
@@ -26,7 +26,7 @@ T.AbstractButton {
 
     implicitWidth: Kirigami.Units.gridUnit * 18
     implicitHeight: Math.round(Kirigami.Units.gridUnit * 3.4) + topPadding + bottomPadding
-    padding: AtlasStyle.spacingLarge
+    padding: TelamonStyle.spacingLarge
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 
@@ -49,26 +49,26 @@ T.AbstractButton {
         Rectangle {
             id: card
             anchors.fill: parent
-            radius: AtlasStyle.radius
-            color: control.down ? AtlasStyle.pressed : control.hovered ? AtlasStyle.hover : AtlasStyle.control
+            radius: TelamonStyle.radius
+            color: control.down ? TelamonStyle.pressed : control.hovered ? TelamonStyle.hover : TelamonStyle.control
             border.width: 1
-            border.color: AtlasStyle.separator
+            border.color: TelamonStyle.separator
         }
-        AtlasFocusRing {
+        TelamonFocusRing {
             radius: card.radius + gap
             shown: control.visualFocus
         }
     }
 
     contentItem: RowLayout {
-        spacing: AtlasStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
 
         Rectangle {
             Layout.preferredWidth: control.iconSide
             Layout.preferredHeight: control.iconSide
             Layout.alignment: Qt.AlignVCenter
             radius: Math.round(control.iconSide * 0.225)
-            color: icon.status === Image.Ready ? "transparent" : Qt.alpha(AtlasStyle.accent, 0.14)
+            color: icon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
             Image {
                 id: icon
                 anchors.fill: parent
@@ -85,13 +85,13 @@ T.AbstractButton {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignVCenter
-            spacing: Math.round(AtlasStyle.spacingSmall / 2)
+            spacing: Math.round(TelamonStyle.spacingSmall / 2)
 
             Text {
                 Layout.fillWidth: true
                 text: control.name
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeBody
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeBody
                 font.bold: true
                 color: Kirigami.Theme.textColor
                 textFormat: Text.PlainText
@@ -101,9 +101,9 @@ T.AbstractButton {
                 Layout.fillWidth: true
                 visible: text.length > 0
                 text: control.summary
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeCaption
-                color: AtlasStyle.textMuted
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeCaption
+                color: TelamonStyle.textMuted
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
             }
@@ -111,9 +111,9 @@ T.AbstractButton {
                 Layout.fillWidth: true
                 visible: text.length > 0
                 text: control.verified ? qsTr("%1 · Verified").arg(control.developer) : control.developer
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeCaption
-                color: control.verified ? AtlasStyle.success : AtlasStyle.textMuted
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeCaption
+                color: control.verified ? TelamonStyle.success : TelamonStyle.textMuted
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
             }

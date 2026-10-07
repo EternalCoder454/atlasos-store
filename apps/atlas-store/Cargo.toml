@@ -15,7 +15,7 @@ name = "atlas_store"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-atlas-framework-ui.workspace = true
+telamon-framework-ui.workspace = true
 atlas-store-core = { path = "../../crates/atlas-store-core" }
 cxx = "1"
 cxx-qt = "0.10"

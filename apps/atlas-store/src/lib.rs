@@ -6,11 +6,11 @@ mod backend;
 mod catalog;
 mod jobs;
 
-atlas_framework_ui::app! {
+telamon_framework_ui::app! {
     name: "Atlas Store",
     id: "net.eterneon.atlas.store",
     repo: "atlasos-store",
-    ui: "1.4.0",
+    ui: "2.0.0",
 }
 
 use std::ffi::c_void;

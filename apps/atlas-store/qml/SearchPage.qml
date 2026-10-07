@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // Search: a field and a grid of the apps that match, as you type. The query
 // is looked up on a worker (see AppListModel), at most 500 results.
@@ -59,11 +59,11 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.leftMargin: AtlasStyle.spacingXXLarge
-        anchors.rightMargin: AtlasStyle.spacingXXLarge
-        spacing: AtlasStyle.spacingLarge
+        anchors.leftMargin: TelamonStyle.spacingXXLarge
+        anchors.rightMargin: TelamonStyle.spacingXXLarge
+        spacing: TelamonStyle.spacingLarge
 
-        AtlasTextField {
+        TelamonTextField {
             id: field
             Layout.fillWidth: true
             placeholderText: qsTr("Search Apps")
@@ -93,14 +93,14 @@ Item {
                 visible: page.model.count > 0
                 onOpened: appId => page.appRequested(appId)
             }
-            AtlasEmptyState {
+            TelamonEmptyState {
                 anchors.fill: parent
                 visible: page.model.count === 0 && !page.model.busy
                 symbol: Symbols.Search
                 title: page.query.trim().length === 0 ? qsTr("Search for Apps") : qsTr("No Results")
                 text: page.query.trim().length === 0 ? qsTr("Type a name, a keyword or a developer.") : qsTr("No apps match “%1”.").arg(page.query.trim())
             }
-            AtlasSpinner {
+            TelamonSpinner {
                 anchors.centerIn: parent
                 visible: page.model.count === 0 && page.model.busy
                 running: visible

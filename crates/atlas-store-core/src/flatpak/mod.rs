@@ -1,6 +1,6 @@
 //! Flatpak operations through libflatpak: what is installed, what a remote
 //! offers, and the lock that keeps one operation at a time. These names move
-//! to atlas-framework-flatpak unchanged (Framework roadmap item 40).
+//! to telamon-framework-flatpak unchanged (Framework roadmap item 40).
 //!
 //! # Rules for everything here
 //!

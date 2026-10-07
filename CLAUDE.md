@@ -47,9 +47,9 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
   update notifications and firmware. The Store takes Updater's lock
   (`$XDG_RUNTIME_DIR/atlas-updater-apps.lock`) from a worker before changing
   installations.
-- **Atlas.Ui is the installed `atlas-ui` package** from atlas-framework
+- **Telamon.Ui is the installed `telamon-ui` package** from atlas-framework
   (`~/Documents/Atlas Framework`, read-only from here).
-  Never fork Atlas.Ui components into this repo: ask the "AtlasOS Framework"
+  Never fork Telamon.Ui components into this repo: ask the "AtlasOS Framework"
   session. Pieces it hasn't shipped yet live in `qml/` with the requested API
   shape, and move upstream later.
 - **The GUI thread never blocks.** Parsing, search, libflatpak calls,
@@ -77,17 +77,17 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
 | Atlas checks | `git -C ~/Documents/Atlas\ Framework archive v1.4.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/atlas-store` and `<dir>/tools/check-app-names.sh apps/atlas-store` |
 
 `<framework rpms>` is the out dir of atlas-framework's `packaging/build-rpm.sh`:
-no repository has atlas-ui. `scripts/dev.sh` builds
+no repository has telamon-ui. `scripts/dev.sh` builds
 `localhost/atlas-store-dev:44` on first use, which needs
 `ATLAS_LOCAL_RPMS=<dir>` holding them.
 
 ## Moving the atlas-framework pin
 
 1. Change `tag` in `Cargo.toml`, then
-   `scripts/dev.sh cargo update -p atlas-framework-ui -p atlas-framework-flatpak`.
+   `scripts/dev.sh cargo update -p telamon-framework-ui -p telamon-framework-flatpak`.
 2. Move the pin in `.github/workflows/ci.yml` (app-checks, its
    `framework-ref` and the framework RPM job): CI pins by the tag's commit
-   SHA, with the tag in a comment (`gh api repos/EternalCoder454/atlas-framework/commits/vX.Y.Z --jq .sha`), and when the app uses something new in Atlas.Ui, `ui:`
-   in `src/lib.rs` and `atlas-ui >=` in the spec (Requires and BuildRequires).
+   SHA, with the tag in a comment (`gh api repos/EternalCoder454/atlas-framework/commits/vX.Y.Z --jq .sha`), and when the app uses something new in Telamon.Ui, `ui:`
+   in `src/lib.rs` and `telamon-ui >=` in the spec (Requires and BuildRequires).
 3. Rebuild the dev image against that release's RPMs.
 4. Commit `Cargo.toml` and `Cargo.lock` together.

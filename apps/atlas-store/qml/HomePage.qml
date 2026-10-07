@@ -1,11 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // Home: a search field and the categories. Popular, new and updated apps come
 // with the Flathub API item. Typing in the field opens the search page.
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -19,7 +19,7 @@ AtlasPage {
     signal categoryRequested(int index)
     signal openSources
 
-    AtlasTextField {
+    TelamonTextField {
         id: field
         Layout.fillWidth: true
         placeholderText: qsTr("Search Apps")
@@ -47,9 +47,9 @@ AtlasPage {
         visible: page.catalog.ready && page.catalog.appCount > 0 && page.catalog.errorText.length > 0
         text: page.catalog.errorText
         wrapMode: Text.Wrap
-        font.family: AtlasStyle.fontFamily
-        font.pointSize: AtlasStyle.fontSizeCaption
-        color: AtlasStyle.warning
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeCaption
+        color: TelamonStyle.warning
         textFormat: Text.PlainText
     }
 
@@ -63,10 +63,10 @@ AtlasPage {
     Text {
         visible: page.catalog.ready && page.catalog.appCount > 0
         text: qsTr("Categories")
-        font.family: AtlasStyle.fontFamily
-        font.pointSize: AtlasStyle.fontSizeHeading
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeHeading
         font.bold: true
-        color: AtlasStyle.text
+        color: TelamonStyle.text
         textFormat: Text.PlainText
         Accessible.role: Accessible.Heading
     }
@@ -75,8 +75,8 @@ AtlasPage {
         Layout.fillWidth: true
         visible: page.catalog.ready && page.catalog.appCount > 0
         columns: Math.max(1, Math.floor(width / (Kirigami.Units.gridUnit * 11)))
-        columnSpacing: AtlasStyle.spacingLarge
-        rowSpacing: AtlasStyle.spacingLarge
+        columnSpacing: TelamonStyle.spacingLarge
+        rowSpacing: TelamonStyle.spacingLarge
 
         Repeater {
             model: page.categories

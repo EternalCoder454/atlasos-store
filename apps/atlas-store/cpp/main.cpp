@@ -2,7 +2,7 @@
 // launch (a link from the browser, a .flatpakref from the file manager,
 // `atlas-store --app <id>` from Atlas Updater) hands its arguments to this
 // one and exits; they are read in Rust (src/backend.rs), never here.
-#include <atlas/app.h>
+#include <telamon/app.h>
 
 #include <KDBusService>
 #include <KWindowSystem>
@@ -54,7 +54,7 @@ static void raise(QQmlApplicationEngine *engine)
 
 int main(int argc, char *argv[])
 {
-    atlas_app_init();
+    telamon_app_init();
     // Drawn on the CPU like the other Atlas apps unless QT_QUICK_BACKEND says
     // otherwise (the P phase measures whether the Store's image grid is
     // better on the GPU).
@@ -63,7 +63,7 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-    atlas_app_ready();
+    telamon_app_ready();
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("The app store of AtlasOS."));

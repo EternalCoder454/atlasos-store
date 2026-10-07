@@ -1,13 +1,13 @@
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // An app's page: from the catalog when it has an entry, from the installed
 // data when it only is installed. Install, Open and Remove are here; each of
 // Install and Remove asks in a dialog of its own (Main.qml). Everything shown
 // comes from the catalog or a remote, so every Text is plain.
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var catalog
@@ -60,12 +60,12 @@ AtlasPage {
         return seconds > 0 ? new Date(seconds * 1000).toLocaleDateString(Qt.locale(), Locale.LongFormat) : "";
     }
 
-    AtlasSpinner {
+    TelamonSpinner {
         Layout.alignment: Qt.AlignHCenter
         visible: !page.found && !page.catalog.ready
         running: visible
     }
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.preferredHeight: Kirigami.Units.gridUnit * 14
         visible: !page.found && page.catalog.ready
@@ -77,14 +77,14 @@ AtlasPage {
     RowLayout {
         Layout.fillWidth: true
         visible: page.found
-        spacing: AtlasStyle.spacingXLarge
+        spacing: TelamonStyle.spacingXLarge
 
         Rectangle {
             Layout.preferredWidth: Kirigami.Units.gridUnit * 5
             Layout.preferredHeight: Kirigami.Units.gridUnit * 5
             Layout.alignment: Qt.AlignTop
             radius: Math.round(width * 0.225)
-            color: appIcon.status === Image.Ready ? "transparent" : Qt.alpha(AtlasStyle.accent, 0.14)
+            color: appIcon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
             Image {
                 id: appIcon
                 anchors.fill: parent
@@ -98,32 +98,32 @@ AtlasPage {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignTop
-            spacing: AtlasStyle.spacingSmall
+            spacing: TelamonStyle.spacingSmall
 
             Text {
                 Layout.fillWidth: true
                 text: page.info.name ?? ""
                 wrapMode: Text.Wrap
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeTitle
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeTitle
                 font.bold: true
-                color: AtlasStyle.text
+                color: TelamonStyle.text
                 textFormat: Text.PlainText
             }
             RowLayout {
                 Layout.fillWidth: true
                 visible: (page.info.developer ?? "").length > 0
-                spacing: AtlasStyle.spacingLarge
+                spacing: TelamonStyle.spacingLarge
                 Text {
                     Layout.fillWidth: true
                     text: page.info.developer ?? ""
                     elide: Text.ElideRight
-                    font.family: AtlasStyle.fontFamily
-                    font.pointSize: AtlasStyle.fontSizeBody
-                    color: AtlasStyle.textMuted
+                    font.family: TelamonStyle.fontFamily
+                    font.pointSize: TelamonStyle.fontSizeBody
+                    color: TelamonStyle.textMuted
                     textFormat: Text.PlainText
                 }
-                AtlasBadge {
+                TelamonBadge {
                     visible: page.info.verified === true
                     text: qsTr("Verified")
                     type: "success"
@@ -134,17 +134,17 @@ AtlasPage {
                 visible: text.length > 0
                 text: page.info.summary ?? ""
                 wrapMode: Text.Wrap
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeBody
-                color: AtlasStyle.text
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeBody
+                color: TelamonStyle.text
                 textFormat: Text.PlainText
             }
 
             RowLayout {
-                Layout.topMargin: AtlasStyle.spacingLarge
-                spacing: AtlasStyle.spacingLarge
+                Layout.topMargin: TelamonStyle.spacingLarge
+                spacing: TelamonStyle.spacingLarge
 
-                AtlasInstallButton {
+                TelamonInstallButton {
                     visible: !page.installed && page.info.canInstall === true
                     installState: page.mine && page.jobs.phase !== "idle" ? "installing" : "install"
                     progress: page.jobs.percent >= 0 ? page.jobs.percent / 100 : -1
@@ -156,7 +156,7 @@ AtlasPage {
                     }
                     onCancelRequested: page.jobs.cancel()
                 }
-                AtlasButton {
+                TelamonButton {
                     visible: page.installed
                     text: qsTr("Open")
                     prominent: true
@@ -165,10 +165,10 @@ AtlasPage {
                 }
                 Repeater {
                     model: page.info.installs ?? []
-                    AtlasButton {
+                    TelamonButton {
                         required property var modelData
                         text: (page.info.installs ?? []).length > 1 ? qsTr("Remove from %1 Installation").arg(modelData.scope) : qsTr("Remove")
-                        variant: AtlasButton.Destructive
+                        variant: TelamonButton.Destructive
                         enabled: page.idle
                         onClicked: page.removeRequested(page.appId, page.info.name, modelData.scope, modelData.ref)
                     }
@@ -188,8 +188,8 @@ AtlasPage {
         Layout.fillWidth: true
         visible: page.found
         columns: 2
-        columnSpacing: AtlasStyle.spacingXLarge
-        rowSpacing: AtlasStyle.spacingSmall
+        columnSpacing: TelamonStyle.spacingXLarge
+        rowSpacing: TelamonStyle.spacingSmall
 
         Repeater {
             model: {
@@ -221,23 +221,23 @@ AtlasPage {
                 RowLayout {
                     id: cellRow
                     width: parent.width
-                    spacing: AtlasStyle.spacingXLarge
+                    spacing: TelamonStyle.spacingXLarge
                     Text {
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 7
                         Layout.alignment: Qt.AlignTop
                         text: cell.modelData[0]
-                        font.family: AtlasStyle.fontFamily
-                        font.pointSize: AtlasStyle.fontSizeCaption
-                        color: AtlasStyle.textMuted
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeCaption
+                        color: TelamonStyle.textMuted
                         textFormat: Text.PlainText
                     }
                     Text {
                         Layout.fillWidth: true
                         text: cell.modelData[1]
                         wrapMode: Text.Wrap
-                        font.family: AtlasStyle.fontFamily
-                        font.pointSize: AtlasStyle.fontSizeBody
-                        color: AtlasStyle.text
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeBody
+                        color: TelamonStyle.text
                         textFormat: Text.PlainText
                     }
                 }
@@ -252,9 +252,9 @@ AtlasPage {
             Layout.fillWidth: true
             text: modelData
             wrapMode: Text.Wrap
-            font.family: AtlasStyle.fontFamily
-            font.pointSize: AtlasStyle.fontSizeBody
-            color: AtlasStyle.text
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeBody
+            color: TelamonStyle.text
             textFormat: Text.PlainText
         }
     }
@@ -263,14 +263,14 @@ AtlasPage {
     Flow {
         Layout.fillWidth: true
         visible: (page.info.links ?? []).length > 0
-        spacing: AtlasStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
         Repeater {
             model: page.info.links ?? []
-            AtlasButton {
+            TelamonButton {
                 required property var modelData
                 text: modelData.label
-                onClicked: AtlasPortal.openUrl(modelData.url)
-                AtlasToolTip {
+                onClicked: TelamonPortal.openUrl(modelData.url)
+                TelamonToolTip {
                     text: parent.modelData.host
                     shown: parent.hovered || parent.visualFocus
                 }

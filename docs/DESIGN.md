@@ -86,7 +86,7 @@ enters, in `atlas-store-core`:
 - AppStream XML: size cap before parsing, depth and count limits, text
   cleaned of control and bidi characters, length caps, IDs validated.
 - AppStream markup becomes blocks of plain text. Nothing is shown as QML
-  RichText or HTML. Links open through AtlasPortal, https only.
+  RichText or HTML. Links open through TelamonPortal, https only.
 - Images (screenshots, remote icons): https, an allowlisted host per remote
   (Flathub: `dl.flathub.org`), 15 s timeout, 8 MB cap, redirect cap, magic
   bytes and a pixel cap checked, decoded off the GUI thread, stored in a 200 MB

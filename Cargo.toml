@@ -11,15 +11,15 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 # The atlas-framework crates (startup, settings, logging, crash reports,
-# Flatpak); to move the pin, see CLAUDE.md. Atlas.Ui is not pinned here: it is
-# the installed atlas-ui package.
-atlas-framework-ui = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.6.0" }
-atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.6.0" }
+# Flatpak); to move the pin, see CLAUDE.md. Telamon.Ui is not pinned here: it is
+# the installed telamon-ui package.
+telamon-framework-ui = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+telamon-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
 log = { version = "0.4", features = ["std"] }
 # AppStream XML (streaming reader, no serde) and the gzip it comes in.
 quick-xml = { version = "0.42", default-features = false }
 libc = "0.2"
-# libflatpak, as atlas-framework-flatpak uses it (one lock entry).
+# libflatpak, as telamon-framework-flatpak uses it (one lock entry).
 libflatpak = "0.7"
 # SHA-1 and SHA-256 for OpenPGP key fingerprints (RustCrypto, no default features).
 sha1 = { version = "0.10", default-features = false }

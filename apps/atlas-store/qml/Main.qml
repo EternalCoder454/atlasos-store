@@ -1,11 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // The Store's window: a sidebar of places, and a navigation stack per place
 // for the pages opened from it (an app's page, a category).
-AtlasWindow {
+TelamonWindow {
     id: root
 
     // The Rust backend (src/backend.rs); main.cpp sets it.
@@ -21,7 +21,7 @@ AtlasWindow {
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
 
-    title: AtlasApp.name
+    title: TelamonApp.name
     width: Kirigami.Units.gridUnit * 64
     height: Kirigami.Units.gridUnit * 42
     minimumWidth: Kirigami.Units.gridUnit * 24
@@ -264,7 +264,7 @@ AtlasWindow {
             Layout.preferredWidth: root.sidebarCollapsed ? Kirigami.Units.gridUnit * 3.6 : Kirigami.Units.gridUnit * 12.5
 
             // Scrolls by itself when the window is too short for every place.
-            AtlasSidebar {
+            TelamonSidebar {
                 id: sidebar
                 anchors.left: parent.left
                 anchors.right: parent.right
@@ -324,7 +324,7 @@ AtlasWindow {
             }
         }
 
-        AtlasNavigationStack {
+        TelamonNavigationStack {
             id: stack
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -410,7 +410,7 @@ AtlasWindow {
     }
     Component {
         id: aboutPage
-        AtlasAboutPage {
+        TelamonAboutPage {
             description: qsTr("Find, install and update apps for AtlasOS.")
         }
     }

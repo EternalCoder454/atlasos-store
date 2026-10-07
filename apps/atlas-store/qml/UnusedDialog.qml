@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // The list of runtimes nothing uses any more, shown before they are removed.
 // The default button is Cancel and the dialog ignores input for its first
@@ -49,9 +49,9 @@ ConfirmDialog {
             Layout.fillWidth: true
             text: qsTr("%1 (%2) · %3 · %4").arg(modelData.name).arg(modelData.branch).arg(modelData.scope).arg(modelData.size)
             wrapMode: Text.Wrap
-            font.family: AtlasStyle.fontFamily
-            font.pointSize: AtlasStyle.fontSizeCaption
-            color: AtlasStyle.text
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeCaption
+            color: TelamonStyle.text
             textFormat: Text.PlainText
         }
     }

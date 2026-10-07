@@ -1,5 +1,5 @@
 import QtQuick
-import Atlas.Ui
+import Telamon.Ui
 
 // What a page shows in place of apps while there are none to show: the
 // catalogs are loading, there is no source, a catalog was never downloaded,
@@ -38,14 +38,14 @@ Item {
         return 4;
     }
 
-    AtlasSpinner {
+    TelamonSpinner {
         anchors.centerIn: parent
         visible: root.kind === 0 || root.catalog.loading
         running: visible
         z: 1
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         id: state
         anchors.fill: parent
         visible: root.kind !== 0

@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Templates as T
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // A category on the home page: a symbol, its name and how many apps it has.
 T.AbstractButton {
@@ -14,7 +14,7 @@ T.AbstractButton {
 
     implicitWidth: Kirigami.Units.gridUnit * 11
     implicitHeight: Kirigami.Units.gridUnit * 3.6
-    padding: AtlasStyle.spacingLarge
+    padding: TelamonStyle.spacingLarge
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 
@@ -32,23 +32,23 @@ T.AbstractButton {
         Rectangle {
             id: card
             anchors.fill: parent
-            radius: AtlasStyle.radius
-            color: control.down ? AtlasStyle.pressed : control.hovered ? AtlasStyle.hover : AtlasStyle.control
+            radius: TelamonStyle.radius
+            color: control.down ? TelamonStyle.pressed : control.hovered ? TelamonStyle.hover : TelamonStyle.control
             border.width: 1
-            border.color: AtlasStyle.separator
+            border.color: TelamonStyle.separator
         }
-        AtlasFocusRing {
+        TelamonFocusRing {
             radius: card.radius + gap
             shown: control.visualFocus
         }
     }
 
     contentItem: RowLayout {
-        spacing: AtlasStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
         Symbol {
             icon: control.symbol
             size: Kirigami.Units.iconSizes.medium
-            color: AtlasStyle.accent
+            color: TelamonStyle.accent
         }
         ColumnLayout {
             Layout.fillWidth: true
@@ -56,8 +56,8 @@ T.AbstractButton {
             Text {
                 Layout.fillWidth: true
                 text: control.text
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeBody
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeBody
                 font.bold: true
                 color: Kirigami.Theme.textColor
                 textFormat: Text.PlainText
@@ -67,9 +67,9 @@ T.AbstractButton {
                 Layout.fillWidth: true
                 visible: control.count >= 0
                 text: (control.count === 1 ? qsTr("1 app") : qsTr("%1 apps").arg(Math.max(0, control.count)))
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeCaption
-                color: AtlasStyle.textMuted
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeCaption
+                color: TelamonStyle.textMuted
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
             }

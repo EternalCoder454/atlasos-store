@@ -523,7 +523,7 @@ fn limits_hold() {
 }
 
 /// What Atlas Updater's `new_permissions` reports for the same pairs
-/// (atlas-framework-flatpak's tests) is the least this must report.
+/// (telamon-framework-flatpak's tests) is the least this must report.
 #[test]
 fn reports_at_least_what_the_updater_does() {
     let text = String::from_utf8(fixture("framework-pairs.txt")).unwrap();

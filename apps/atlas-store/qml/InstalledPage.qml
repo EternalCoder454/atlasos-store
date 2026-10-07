@@ -2,13 +2,13 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // The installed apps (src/jobs.rs reads them on the worker) as rows of one
 // grouped card: icon, name, installation, size and version, each row with
 // its own Remove, and Remove Unused with the list shown first. Every text is
 // plain.
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var jobs
@@ -25,7 +25,7 @@ AtlasPage {
     readonly property bool idle: page.jobs.phase === "idle"
 
     headerTrailing: [
-        AtlasButton {
+        TelamonButton {
             text: qsTr("Remove Unused")
             enabled: page.idle && page.jobs.installedReady
             onClicked: page.jobs.checkUnused()
@@ -42,19 +42,19 @@ AtlasPage {
         visible: page.jobs.installedError.length > 0
         text: page.jobs.installedError
         wrapMode: Text.Wrap
-        font.family: AtlasStyle.fontFamily
-        font.pointSize: AtlasStyle.fontSizeCaption
-        color: AtlasStyle.error
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeCaption
+        color: TelamonStyle.error
         textFormat: Text.PlainText
     }
 
-    AtlasSpinner {
+    TelamonSpinner {
         Layout.alignment: Qt.AlignHCenter
         visible: !page.jobs.installedReady
         running: visible
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.preferredHeight: 260
         visible: page.jobs.installedReady && page.apps.length === 0
@@ -89,7 +89,7 @@ AtlasPage {
                     width: row.iconSide
                     height: row.iconSide
                     radius: Math.round(row.iconSide * 0.225)
-                    color: icon.status === Image.Ready ? "transparent" : Qt.alpha(AtlasStyle.accent, 0.14)
+                    color: icon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
                     Accessible.ignored: true
                     Image {
                         id: icon
@@ -108,15 +108,15 @@ AtlasPage {
                 content: ColumnLayout {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
-                    spacing: AtlasStyle.spacingXSmall
+                    spacing: TelamonStyle.spacingXSmall
 
                     Text {
                         Layout.fillWidth: true
                         text: row.title
-                        font.family: AtlasStyle.fontFamily
-                        font.pointSize: AtlasStyle.fontSizeBody
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeBody
                         font.bold: true
-                        color: AtlasStyle.text
+                        color: TelamonStyle.text
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         Accessible.ignored: true
@@ -124,20 +124,20 @@ AtlasPage {
                     Text {
                         Layout.fillWidth: true
                         text: row.subtitle
-                        font.family: AtlasStyle.fontFamily
-                        font.pointSize: AtlasStyle.fontSizeCaption
-                        color: AtlasStyle.textMuted
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeCaption
+                        color: TelamonStyle.textMuted
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         Accessible.ignored: true
                     }
                 }
 
-                AtlasButton {
+                TelamonButton {
                     text: qsTr("Remove")
                     //: A Remove button in a row of the Installed list; %1 is the app's name
                     Accessible.name: qsTr("Remove %1").arg(row.modelData.name)
-                    variant: AtlasButton.Destructive
+                    variant: TelamonButton.Destructive
                     enabled: page.idle
                     onClicked: page.removeRequested(row.modelData.appId, row.modelData.name, row.modelData.scope, row.modelData.ref)
                 }

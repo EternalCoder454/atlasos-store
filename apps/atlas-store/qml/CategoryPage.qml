@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // The apps of one category: a sort choice, two filters and a grid. The list
 // is made on a worker (see AppListModel); changing a choice asks again and
@@ -41,28 +41,28 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.leftMargin: AtlasStyle.spacingXXLarge
-        anchors.rightMargin: AtlasStyle.spacingXXLarge
-        spacing: AtlasStyle.spacingLarge
+        anchors.leftMargin: TelamonStyle.spacingXXLarge
+        anchors.rightMargin: TelamonStyle.spacingXXLarge
+        spacing: TelamonStyle.spacingLarge
 
         Flow {
             Layout.fillWidth: true
-            spacing: AtlasStyle.spacingXLarge
+            spacing: TelamonStyle.spacingXLarge
             visible: !blockedState.blocked
 
-            AtlasSegmentedControl {
+            TelamonSegmentedControl {
                 id: sortControl
                 model: [qsTr("Name"), qsTr("Recently Updated")]
                 currentIndex: 0
                 Accessible.name: qsTr("Sort by")
                 onActivated: page.run()
             }
-            AtlasSwitch {
+            TelamonSwitch {
                 id: verified
                 text: qsTr("Verified Only")
                 onToggled: page.run()
             }
-            AtlasSwitch {
+            TelamonSwitch {
                 id: free
                 text: qsTr("Free Licenses Only")
                 onToggled: page.run()
@@ -88,14 +88,14 @@ Item {
                 visible: page.model.count > 0
                 onOpened: appId => page.appRequested(appId)
             }
-            AtlasEmptyState {
+            TelamonEmptyState {
                 anchors.fill: parent
                 visible: page.model.count === 0 && !page.model.busy
                 symbol: Symbols.Storefront
                 title: qsTr("No Apps")
                 text: verified.checked || free.checked ? qsTr("No apps in this category match the filters.") : qsTr("This category has no apps.")
             }
-            AtlasSpinner {
+            TelamonSpinner {
                 anchors.centerIn: parent
                 visible: page.model.count === 0 && page.model.busy
                 running: visible

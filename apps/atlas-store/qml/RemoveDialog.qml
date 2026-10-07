@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // The remove confirmation. "Also Delete App Data" is off by default. The
 // default button is Cancel and the dialog ignores input for its first half
@@ -73,7 +73,7 @@ ConfirmDialog {
         }
     }
 
-    AtlasCheckBox {
+    TelamonCheckBox {
         id: deleteData
         Layout.fillWidth: true
         visible: !dlg.running
@@ -86,9 +86,9 @@ ConfirmDialog {
         visible: dlg.shared
         text: qsTr("The app is installed more than once, and its data folder is shared, so its data is kept.")
         wrapMode: Text.Wrap
-        font.family: AtlasStyle.fontFamily
-        font.pointSize: AtlasStyle.fontSizeCaption
-        color: AtlasStyle.textMuted
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeCaption
+        color: TelamonStyle.textMuted
         textFormat: Text.PlainText
     }
     Text {
@@ -96,9 +96,9 @@ ConfirmDialog {
         visible: deleteData.checked
         text: qsTr("The app's settings and files for your user will be deleted. This can't be undone.")
         wrapMode: Text.Wrap
-        font.family: AtlasStyle.fontFamily
-        font.pointSize: AtlasStyle.fontSizeCaption
-        color: AtlasStyle.warning
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeCaption
+        color: TelamonStyle.warning
         textFormat: Text.PlainText
     }
 }

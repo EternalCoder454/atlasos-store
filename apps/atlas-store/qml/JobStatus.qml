@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // What the Flatpak worker (src/jobs.rs) is doing and what it last did: a
 // progress line with Cancel while a job runs for `forApp` (any app when ""),
@@ -21,33 +21,33 @@ ColumnLayout {
     readonly property bool hasMessage: messageHere && (jobs.errorText.length > 0 || jobs.resultText.length > 0)
 
     visible: running || hasMessage
-    spacing: AtlasStyle.spacingSmall
+    spacing: TelamonStyle.spacingSmall
 
     RowLayout {
         Layout.fillWidth: true
         visible: root.running
-        spacing: AtlasStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
 
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: AtlasStyle.spacingSmall
+            spacing: TelamonStyle.spacingSmall
             Text {
                 Layout.fillWidth: true
                 text: root.jobs.status.length > 0 ? root.jobs.status : qsTr("Working…")
                 wrapMode: Text.Wrap
-                font.family: AtlasStyle.fontFamily
-                font.pointSize: AtlasStyle.fontSizeCaption
-                color: root.jobs.notResponding ? AtlasStyle.warning : AtlasStyle.textMuted
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeCaption
+                color: root.jobs.notResponding ? TelamonStyle.warning : TelamonStyle.textMuted
                 textFormat: Text.PlainText
             }
-            AtlasProgressBar {
+            TelamonProgressBar {
                 Layout.fillWidth: true
                 indeterminate: root.jobs.percent < 0
                 value: Math.max(0, root.jobs.percent) / 100
             }
         }
         // Cancel stays enabled, also when the job is not responding.
-        AtlasButton {
+        TelamonButton {
             text: qsTr("Cancel")
             enabled: root.jobs.phase === "planning" || root.jobs.phase === "installing" || root.jobs.phase === "removing"
             onClicked: root.jobs.cancel()
@@ -57,17 +57,17 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         visible: !root.running && root.hasMessage
-        spacing: AtlasStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
         Text {
             Layout.fillWidth: true
             text: root.jobs.errorText.length > 0 ? root.jobs.errorText : root.jobs.resultText
             wrapMode: Text.Wrap
-            font.family: AtlasStyle.fontFamily
-            font.pointSize: AtlasStyle.fontSizeBody
-            color: root.jobs.errorText.length > 0 ? AtlasStyle.error : AtlasStyle.success
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeBody
+            color: root.jobs.errorText.length > 0 ? TelamonStyle.error : TelamonStyle.success
             textFormat: Text.PlainText
         }
-        AtlasButton {
+        TelamonButton {
             text: qsTr("Dismiss")
             onClicked: root.jobs.clearMessages()
         }

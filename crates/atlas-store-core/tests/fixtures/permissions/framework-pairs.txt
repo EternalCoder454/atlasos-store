@@ -1,4 +1,4 @@
-# Pairs from atlas-framework-flatpak's new_permissions tests (OLD and the
+# Pairs from telamon-framework-flatpak's new_permissions tests (OLD and the
 # metadata each test builds). A case starts with three hashes, a name and
 # min: how many entries
 # new_permissions reports for the pair. Old and new are split by `@@@`.

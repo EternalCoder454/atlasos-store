@@ -18,7 +18,7 @@
 //! groups are ignored, as flatpak ignores them. Every URL follows the launch policy
 //! ([`crate::launch::https_url`]) and is kept in its normalized form.
 //!
-//! Names and shapes move to atlas-framework-flatpak later unchanged.
+//! Names and shapes move to telamon-framework-flatpak later unchanged.
 
 use std::fmt;
 

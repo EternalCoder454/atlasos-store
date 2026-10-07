@@ -2,7 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // A scrolling grid of AppTiles over an AppListModel (src/catalog.rs). A
 // GridView makes cells only for what is on screen, so all of Flathub costs
@@ -17,12 +17,12 @@ GridView {
 
     clip: true
     cellWidth: Math.floor(width / columns)
-    cellHeight: Math.round(Kirigami.Units.gridUnit * 3.4) + AtlasStyle.spacingLarge * 2 + AtlasStyle.spacing
+    cellHeight: Math.round(Kirigami.Units.gridUnit * 3.4) + TelamonStyle.spacingLarge * 2 + TelamonStyle.spacing
     boundsBehavior: Flickable.StopAtBounds
     reuseItems: true
     cacheBuffer: cellHeight * 4
 
-    ScrollBar.vertical: AtlasScrollBar {}
+    ScrollBar.vertical: TelamonScrollBar {}
 
     delegate: Item {
         id: cell
@@ -40,8 +40,8 @@ GridView {
 
         AppTile {
             anchors.fill: parent
-            anchors.rightMargin: AtlasStyle.spacing
-            anchors.bottomMargin: AtlasStyle.spacing
+            anchors.rightMargin: TelamonStyle.spacing
+            anchors.bottomMargin: TelamonStyle.spacing
             appId: cell.appId
             name: cell.name
             summary: cell.summary
