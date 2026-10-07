@@ -1,0 +1,27 @@
+[package]
+name = "telamon-store-core"
+description = "Telamon Store's Qt-free core: AppStream index, search, Flatpak jobs, downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+log.workspace = true
+quick-xml.workspace = true
+flate2.workspace = true
+libc.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+libflatpak.workspace = true
+
+[features]
+# The hooks the integration tests use to force a branch that is otherwise a
+# matter of timing (`flatpak::transaction::test_hooks`, the `*_in` lock
+# functions). Never enabled for a normal build; the tests turn it on through
+# the self dev-dependency below.
+test-hooks = []
+
+[dev-dependencies]
+telamon-store-core = { path = ".", features = ["test-hooks"] }

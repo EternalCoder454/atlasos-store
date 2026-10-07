@@ -22,8 +22,8 @@ jobs:
   # a moved tag can't change what runs here.
   # atlas-framework's design rules (no default buttons, no QML file named
   # like a Telamon.Ui type), at the release the crates are pinned to.
-  atlas:
-    name: Atlas app checks
+  telamon:
+    name: Telamon app checks
     uses: EternalCoder454/atlas-framework/.github/workflows/app-checks.yml@8e6a53569363aec3d7e42920875d03ca113ef3eb # v2.0.0
     with:
       framework-ref: 8e6a53569363aec3d7e42920875d03ca113ef3eb # v2.0.0
@@ -97,7 +97,7 @@ jobs:
           dnf -y install dnf5-plugins clippy rustfmt \
             /tmp/atlas-framework-rpms/telamon-ui-[0-9]*.rpm \
             /tmp/atlas-framework-rpms/telamon-symbols-fonts-[0-9]*.rpm
-          dnf -y builddep packaging/atlas-store.spec
+          dnf -y builddep packaging/telamon-store.spec
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           # Only the downloads: an old target dir would grow without bound.
@@ -132,9 +132,9 @@ jobs:
           # In the container: runner.temp would be the host's path.
           path: /tmp/atlas-framework-rpms
       - name: Build the RPM
-        run: ATLAS_LOCAL_RPMS=/tmp/atlas-framework-rpms packaging/build-rpm.sh "$GITHUB_WORKSPACE/out"
+        run: TELAMON_LOCAL_RPMS=/tmp/atlas-framework-rpms packaging/build-rpm.sh "$GITHUB_WORKSPACE/out"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: atlas-store-rpm
+          name: telamon-store-rpm
           path: out/*.rpm
           if-no-files-found: error

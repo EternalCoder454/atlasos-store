@@ -82,7 +82,7 @@ EOF
     app_info "$dir" "$runtime" "  <component type=\"runtime\">
     <id>$runtime</id>
     <name>Test Platform</name>
-    <summary>The runtime of the Atlas Store's test apps</summary>
+    <summary>The runtime of the Telamon Store's test apps</summary>
     <project_license>MIT</project_license>
   </component>"
     # shellcheck disable=SC2046
@@ -133,7 +133,7 @@ EOF
     <id>$app</id>
     <name>Hello</name>
     <name xml:lang=\"de\">Hallo</name>
-    <summary>Says hello, for the Atlas Store's tests</summary>
+    <summary>Says hello, for the Telamon Store's tests</summary>
     <project_license>MIT</project_license>
     <developer id=\"net.eterneon\"><name>Eterneon</name></developer>
     <description>
@@ -217,7 +217,7 @@ EOF
 
 update_repo() {
     # shellcheck disable=SC2046
-    flatpak build-update-repo --title="Atlas Store Test" $(gpg_args) "$base/repo" >/dev/null
+    flatpak build-update-repo --title="Telamon Store Test" $(gpg_args) "$base/repo" >/dev/null
 }
 
 # Every mode works only inside /work/flatpak/ (test installations, never real data).
@@ -234,7 +234,7 @@ build)
     mkdir -p "$base"/{gpg,user,system,etc,run,triggers}
     chmod 700 "$base/gpg"
     gpg --homedir "$base/gpg" --batch --passphrase '' \
-        --quick-gen-key 'Atlas Store Test <test@atlas.invalid>' ed25519 sign never 2>/dev/null
+        --quick-gen-key 'Telamon Store Test <test@telamon.invalid>' ed25519 sign never 2>/dev/null
     gpg --homedir "$base/gpg" --list-keys --with-colons |
         awk -F: '/^fpr:/ {print $10; exit}' >"$base/key.id"
     gpg --homedir "$base/gpg" --export "$(cat "$base/key.id")" >"$base/key.gpg"
@@ -247,7 +247,7 @@ build)
     key=$(base64 -w0 "$base/key.gpg")
     cat >"$base/test.flatpakrepo" <<EOF
 [Flatpak Repo]
-Title=Atlas Store Test
+Title=Telamon Store Test
 Url=file://$base/repo/
 GPGKey=$key
 EOF
@@ -275,7 +275,7 @@ check)
     # The container can't start flatpak's bwrap sandbox (no nested user
     # namespaces), so no install triggers run (empty triggers dir) and the
     # app isn't started: its installed files are checked instead. Running
-    # apps is for the AtlasOS test VM.
+    # apps is for the Telamon OS test VM.
     mkdir -p "$base/triggers"
     export FLATPAK_TRIGGERSDIR=$base/triggers
     f=flatpak y=(-y --noninteractive)

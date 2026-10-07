@@ -1,6 +1,6 @@
-# Atlas Store
+# Telamon Store
 
-The app store of [AtlasOS](https://github.com/EternalCoder454/AtlasOS). It
+The app store of [Telamon OS](https://github.com/EternalCoder454/AtlasOS). It
 finds, installs, updates and removes Flatpak apps from Flathub and your other
 sources, and replaces KDE Discover.
 
@@ -12,7 +12,7 @@ sources, and replaces KDE Discover.
 - Opens `appstream:` and `flatpak+https:` links and `.flatpakref`,
   `.flatpakrepo` and `.flatpak` files, always asking first.
 
-Nothing runs when the Store is closed: Atlas Updater checks for updates in the
+Nothing runs when the Store is closed: Telamon Updater checks for updates in the
 background.
 
 Built with Rust, Qt 6 Quick and Kirigami on
