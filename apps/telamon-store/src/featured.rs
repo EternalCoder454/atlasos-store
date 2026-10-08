@@ -5,15 +5,14 @@
 //! and checked); what is shown is the local catalog's own name, summary,
 //! developer and icon for each ID it has. Nothing here shows API text.
 //!
-//! Threading: one worker thread, started by the first request, handles the
-//! requests in turn (so one refresh runs at a time). A request reads the
-//! cached list first and publishes it, however old, then fetches a new one
-//! only when the cached one has expired, the Store's retry gate allows it and
-//! a page asked: pages ask when they are shown (`ensureHome`,
-//! `ensureCategory`), and again when the catalog is replaced. There is no
-//! timer and no retry loop; a failed fetch is tried again only when a page
-//! asks after ten minutes. Results come back as JSON in properties with
-//! `qt_thread().queue`; the GUI thread only swaps strings.
+//! Threading: one worker thread, started by the first request, owns the
+//! state. A request (`ensureHome`, `ensureCategory`, made when a page is shown
+//! and again when the catalog is replaced) is answered at once from the cache,
+//! whatever its age; a list that has expired is then fetched, one at a time,
+//! by a thread of its own, so a slow server never holds back what is cached.
+//! A failed fetch is not tried again for ten minutes, and only when a page
+//! asks: there is no timer and no retry loop. Results come back as JSON in
+//! properties with `qt_thread().queue`; the GUI thread only swaps strings.
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -72,7 +71,7 @@ pub mod qobject {
 }
 
 use core::pin::Pin;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -81,7 +80,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use telamon_store_core::catalog::{Category, EntryId, Library};
-use telamon_store_core::flathub::{self, Fetch, List, RetryGate};
+use telamon_store_core::flathub::{self, List, RetryGate};
 
 /// Apps on each Home shelf.
 const POPULAR_SHOWN: usize = 12;
@@ -104,19 +103,6 @@ impl Job {
             Job::Category(c) => vec![List::Category(c)],
         }
     }
-}
-
-/// The requests to do now out of those that piled up: Home once, and only the
-/// newest category (the user has moved on from the others).
-fn coalesce(jobs: Vec<Job>) -> Vec<Job> {
-    let mut out = Vec::new();
-    if jobs.contains(&Job::Home) {
-        out.push(Job::Home);
-    }
-    if let Some(category) = jobs.iter().rev().find(|j| matches!(j, Job::Category(_))) {
-        out.push(*category);
-    }
-    out
 }
 
 /// The JSON of apps, in the order given: the catalog's own text.
@@ -156,15 +142,34 @@ fn list_json(library: &Library, list: List, ids: &[String]) -> String {
     }
 }
 
+/// What the worker is told.
+enum Msg {
+    /// A page asked for its lists.
+    Ask(Job),
+    /// A fetch the worker started has ended.
+    Fetched(List, Result<Vec<String>, flathub::RefreshError>),
+}
+
 /// The worker's memory: where the cache is, which fetches failed, the IDs of
-/// each list and what was last published for it.
+/// each list, what was last published for it and which fetches are to come.
+///
+/// It never waits for the network: a request is answered from the cache at
+/// once and the fetches it needs are done one at a time by a thread of their
+/// own, whose end comes back as [`Msg::Fetched`]. So a slow server delays
+/// the new list, never the cached one.
 struct Worker {
     /// `None` when there is no cache folder (no HOME): nothing is fetched.
     dir: Option<PathBuf>,
     gate: RetryGate,
     ids: HashMap<List, Vec<String>>,
     published: HashMap<List, String>,
+    /// Lists to fetch, the next first.
+    wanted: VecDeque<List>,
+    /// The list being fetched.
+    busy: Option<List>,
 }
+
+type Emit<'a> = &'a mut dyn FnMut(List, String) -> bool;
 
 impl Worker {
     fn new(dir: Option<PathBuf>) -> Worker {
@@ -173,18 +178,15 @@ impl Worker {
             gate: RetryGate::default(),
             ids: HashMap::new(),
             published: HashMap::new(),
+            wanted: VecDeque::new(),
+            busy: None,
         }
     }
 
     /// Hands `emit` the JSON of `list` for `library`, if there is a library
     /// and it differs from what was last handed over. False when `emit` says
     /// the GUI object is gone.
-    fn publish(
-        &mut self,
-        list: List,
-        library: Option<&Library>,
-        emit: &mut dyn FnMut(List, String) -> bool,
-    ) -> bool {
+    fn publish(&mut self, list: List, library: Option<&Library>, emit: Emit<'_>) -> bool {
         // No library yet: the IDs wait here until a page asks again.
         let (Some(library), Some(ids)) = (library, self.ids.get(&list)) else {
             return true;
@@ -197,40 +199,70 @@ impl Worker {
         emit(list, json)
     }
 
-    /// One list: the cached copy is published first, whatever its age; a new
-    /// one is fetched only when the cached one has expired (or there is none)
-    /// and the gate allows it.
-    fn load(
-        &mut self,
-        list: List,
-        now: u64,
-        fetch: Fetch<'_>,
-        library: Option<&Library>,
-        emit: &mut dyn FnMut(List, String) -> bool,
-    ) -> bool {
+    /// A page asked: the cached copy of each of its lists is published first,
+    /// whatever its age, and a list that has expired (or has no copy) is put
+    /// on the list of fetches unless the retry gate holds it back. A category
+    /// goes before the Home lists: the user is looking at it.
+    fn ask(&mut self, job: Job, now: u64, library: Option<&Library>, emit: Emit<'_>) -> bool {
         let Some(dir) = self.dir.clone() else {
             return true;
         };
-        let mut fresh = false;
-        if let Some(cached) = flathub::read_cache(&dir, list) {
-            fresh = cached.is_fresh(list, now);
-            self.ids.insert(list, cached.ids);
-            if !self.publish(list, library, emit) {
-                return false;
+        for list in job.lists() {
+            let mut fresh = false;
+            if let Some(cached) = flathub::read_cache(&dir, list) {
+                fresh = cached.is_fresh(list, now);
+                self.ids.insert(list, cached.ids);
+                if !self.publish(list, library, emit) {
+                    return false;
+                }
+            }
+            let queued = self.busy == Some(list) || self.wanted.contains(&list);
+            if !fresh && !queued && self.gate.allowed(list, now) {
+                match job {
+                    Job::Home => self.wanted.push_back(list),
+                    Job::Category(_) => self.wanted.push_front(list),
+                }
             }
         }
-        if fresh || !self.gate.allowed(list, now) {
-            return true;
+        true
+    }
+
+    /// The next list to fetch, if none is being fetched; skips the ones the
+    /// retry gate has meanwhile closed. The caller fetches it
+    /// ([`flathub::refresh`]) and reports with [`Worker::fetched`].
+    fn next_fetch(&mut self, now: u64) -> Option<(PathBuf, List)> {
+        if self.busy.is_some() {
+            return None;
         }
-        match flathub::refresh(&dir, list, now, fetch) {
+        let dir = self.dir.clone()?;
+        while let Some(list) = self.wanted.pop_front() {
+            if self.gate.allowed(list, now) {
+                self.busy = Some(list);
+                return Some((dir, list));
+            }
+        }
+        None
+    }
+
+    /// A fetch ended: a good list is published; a failed one is logged, held
+    /// back for ten minutes and leaves the cached copy (if any) as it is.
+    fn fetched(
+        &mut self,
+        list: List,
+        result: Result<Vec<String>, flathub::RefreshError>,
+        now: u64,
+        library: Option<&Library>,
+        emit: Emit<'_>,
+    ) -> bool {
+        self.busy = None;
+        match result {
             Ok(ids) => {
                 self.gate.succeeded(list);
                 self.ids.insert(list, ids);
                 self.publish(list, library, emit)
             }
             Err(e) => {
-                // Not an error to show: the lists are a bonus. The cached
-                // copy (if any) stays on the screen.
+                // Not an error to show: the lists are a bonus.
                 log::info!("could not update the {} list: {e}", list.name());
                 self.gate.failed(list, &e, now);
                 true
@@ -245,43 +277,47 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The worker thread: runs the requests in turn until the object is gone.
-fn work(requests: mpsc::Receiver<Job>, thread: CxxQtThread<qobject::Featured>) {
+/// The worker thread: handles what pages ask and what the fetches report,
+/// until the object is gone.
+fn work(
+    messages: mpsc::Receiver<Msg>,
+    sender: mpsc::Sender<Msg>,
+    thread: CxxQtThread<qobject::Featured>,
+) {
     let mut worker = Worker::new(crate::catalog::cache_dir().map(|d| flathub::cache_dir(&d)));
-    while let Ok(first) = requests.recv() {
-        let mut jobs = vec![first];
-        while let Ok(more) = requests.try_recv() {
-            jobs.push(more);
+    let mut emit = |list: List, json: String| {
+        thread
+            .queue(move |featured| featured.apply(list, &json))
+            .is_ok()
+    };
+    while let Ok(message) = messages.recv() {
+        let library = crate::catalog::library();
+        let now = now_secs();
+        let alive = catch_unwind(AssertUnwindSafe(|| match message {
+            Msg::Ask(job) => worker.ask(job, now, library.as_deref(), &mut emit),
+            Msg::Fetched(list, result) => {
+                worker.fetched(list, result, now, library.as_deref(), &mut emit)
+            }
+        }))
+        .unwrap_or_else(|_| {
+            log::error!("the featured lists worker panicked");
+            true
+        });
+        if !alive {
+            return;
         }
-        for job in coalesce(jobs) {
-            let alive = catch_unwind(AssertUnwindSafe(|| {
-                let mut alive = true;
-                for list in job.lists() {
-                    let library = crate::catalog::library();
-                    let mut emit = |list: List, json: String| {
-                        thread
-                            .queue(move |featured| featured.apply(list, &json))
-                            .is_ok()
-                    };
-                    alive = worker.load(
-                        list,
-                        now_secs(),
-                        &flathub::http_fetch,
-                        library.as_deref(),
-                        &mut emit,
-                    );
-                    if !alive {
-                        break;
-                    }
-                }
-                alive
-            }))
-            .unwrap_or_else(|_| {
-                log::error!("the featured lists worker panicked");
-                true
-            });
-            if !alive {
-                return;
+        // At most one fetch runs, on a thread of its own.
+        if let Some((dir, list)) = worker.next_fetch(now) {
+            let sender = sender.clone();
+            let spawned = std::thread::Builder::new()
+                .name("telamon-store-flathub".into())
+                .spawn(move || {
+                    let result = flathub::refresh(&dir, list, now_secs(), &flathub::http_fetch);
+                    let _ = sender.send(Msg::Fetched(list, result));
+                });
+            if let Err(e) = spawned {
+                log::error!("could not start a fetch of the featured lists: {e}");
+                worker.busy = None;
             }
         }
     }
@@ -295,7 +331,7 @@ pub struct FeaturedRust {
     picks_json: QString,
     category_json: QString,
     /// To the worker, started with the first request.
-    requests: Option<mpsc::Sender<Job>>,
+    requests: Option<mpsc::Sender<Msg>>,
 }
 
 impl qobject::Featured {
@@ -319,9 +355,10 @@ impl qobject::Featured {
         if self.rust().requests.is_none() {
             let (tx, rx) = mpsc::channel();
             let thread = self.qt_thread();
+            let own = tx.clone();
             let spawned = std::thread::Builder::new()
                 .name("telamon-store-featured".into())
-                .spawn(move || work(rx, thread));
+                .spawn(move || work(rx, own, thread));
             match spawned {
                 Ok(_) => self.as_mut().rust_mut().requests = Some(tx),
                 Err(e) => {
@@ -334,7 +371,7 @@ impl qobject::Featured {
             .rust()
             .requests
             .as_ref()
-            .is_some_and(|tx| tx.send(job).is_ok());
+            .is_some_and(|tx| tx.send(Msg::Ask(job)).is_ok());
         if !sent {
             // The worker ended: start a new one with the next request.
             self.as_mut().rust_mut().requests = None;
@@ -366,6 +403,7 @@ mod tests {
     const ALPHA: &str =
         include_str!("../../../crates/telamon-store-core/tests/fixtures/catalog-alpha.xml");
     const NOW: u64 = 1_791_331_200;
+    const DAY: u64 = 24 * 3600;
 
     fn library() -> Library {
         let opts = ParseOptions {
@@ -395,7 +433,16 @@ mod tests {
         d.join("telamon-store").join("flathub")
     }
 
-    fn answer(ids: &[&str]) -> Vec<u8> {
+    /// The API's answer to `url` listing `ids`.
+    fn answer(url: &str, ids: &[&str]) -> Vec<u8> {
+        if url.contains("/app-picks/") {
+            let apps: Vec<String> = ids
+                .iter()
+                .enumerate()
+                .map(|(n, i)| format!(r#"{{"app_id":"{i}","position":{n}}}"#))
+                .collect();
+            return format!(r#"{{"apps":[{}]}}"#, apps.join(",")).into_bytes();
+        }
         let hits: Vec<String> = ids
             .iter()
             .map(|i| format!(r#"{{"app_id":"{i}"}}"#))
@@ -403,19 +450,27 @@ mod tests {
         format!(r#"{{"hits":[{}]}}"#, hits.join(",")).into_bytes()
     }
 
-    #[test]
-    fn pending_requests_are_merged() {
-        let net = Category::Network;
-        let games = Category::Games;
-        assert_eq!(coalesce(vec![Job::Home, Job::Home]), [Job::Home]);
-        assert_eq!(
-            coalesce(vec![Job::Category(net), Job::Home, Job::Category(games)]),
-            [Job::Home, Job::Category(games)]
-        );
-        assert_eq!(
-            coalesce(vec![Job::Category(net), Job::Category(net)]),
-            [Job::Category(net)]
-        );
+    type Published = RefCell<Vec<(List, String)>>;
+
+    /// What the worker thread does: asks, then fetches what the worker wants
+    /// one by one with `fetch` (the fake network) and reports each.
+    fn drive(
+        worker: &mut Worker,
+        job: Job,
+        now: u64,
+        library: Option<&Library>,
+        fetch: &dyn Fn(&str) -> Result<Vec<u8>, NetError>,
+        published: &Published,
+    ) {
+        let mut emit = |l: List, j: String| {
+            published.borrow_mut().push((l, j));
+            true
+        };
+        assert!(worker.ask(job, now, library, &mut emit));
+        while let Some((dir, list)) = worker.next_fetch(now) {
+            let result = flathub::refresh(&dir, list, now, fetch);
+            assert!(worker.fetched(list, result, now, library, &mut emit));
+        }
     }
 
     #[test]
@@ -462,70 +517,145 @@ mod tests {
     fn the_worker_shows_the_cache_then_fetches_only_what_expired() {
         let dir = scratch("flow");
         let lib = library();
-        let mut worker = Worker::new(Some(dir.clone()));
         let calls = Cell::new(0);
         let online = Cell::new(true);
-        let fetch = |_: &str| {
+        let fetch = |url: &str| {
             calls.set(calls.get() + 1);
             if online.get() {
-                Ok(answer(&["org.example.Browser", "org.example.Pictures"]))
+                Ok(answer(
+                    url,
+                    &["org.example.Browser", "org.example.Pictures"],
+                ))
             } else {
                 Err(NetError::Failed("no route".into()))
             }
         };
-        let emitted: RefCell<Vec<(List, String)>> = RefCell::new(Vec::new());
-        let mut emit = |l: List, j: String| {
-            emitted.borrow_mut().push((l, j));
-            true
-        };
+        let published: Published = RefCell::new(Vec::new());
 
-        // Nothing cached, online: fetched once and published.
-        assert!(worker.load(List::Popular, NOW, &fetch, Some(&lib), &mut emit));
-        assert_eq!(calls.get(), 1);
-        assert_eq!(emitted.borrow().len(), 1);
+        // Nothing cached, online: the three Home lists are fetched, each
+        // published once.
+        let mut worker = Worker::new(Some(dir.clone()));
+        drive(&mut worker, Job::Home, NOW, Some(&lib), &fetch, &published);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(published.borrow().len(), 3);
 
-        // Fresh: not fetched, and the same JSON is not published twice.
-        assert!(worker.load(List::Popular, NOW + 60, &fetch, Some(&lib), &mut emit));
-        assert_eq!(calls.get(), 1);
-        assert_eq!(emitted.borrow().len(), 1);
+        // Fresh: nothing is fetched, and the same JSON is not published twice.
+        drive(
+            &mut worker,
+            Job::Home,
+            NOW + 60,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(published.borrow().len(), 3);
 
-        // A new worker (the Store was restarted), expired cache, offline: the
-        // old list is published and one fetch fails.
+        // The Store was restarted, the lists have expired and the network is
+        // down: the old lists are published and the first fetch fails; the
+        // others are not tried.
         let mut worker = Worker::new(Some(dir.clone()));
         online.set(false);
-        let later = NOW + 3 * 24 * 3600;
-        assert!(worker.load(List::Popular, later, &fetch, Some(&lib), &mut emit));
-        assert_eq!(calls.get(), 2);
-        assert_eq!(emitted.borrow().len(), 2);
-        assert_eq!(emitted.borrow()[1].1, emitted.borrow()[0].1);
+        let later = NOW + 3 * DAY;
+        published.borrow_mut().clear();
+        drive(
+            &mut worker,
+            Job::Home,
+            later,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(calls.get(), 4);
+        assert_eq!(published.borrow().len(), 3);
+        assert!(
+            published
+                .borrow()
+                .iter()
+                .all(|(_, j)| j.contains("Browser"))
+        );
 
         // Asked again at once and after 9 minutes: no new attempt. After 10
-        // minutes: one, and it works.
-        assert!(worker.load(List::Popular, later + 60, &fetch, Some(&lib), &mut emit));
-        assert!(worker.load(List::Popular, later + 539, &fetch, Some(&lib), &mut emit));
-        assert_eq!(calls.get(), 2);
+        // minutes: the network is back and all three work.
+        drive(
+            &mut worker,
+            Job::Home,
+            later + 60,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        drive(
+            &mut worker,
+            Job::Home,
+            later + 539,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(calls.get(), 4);
         online.set(true);
-        assert!(worker.load(List::Popular, later + 600, &fetch, Some(&lib), &mut emit));
-        assert_eq!(calls.get(), 3);
+        drive(
+            &mut worker,
+            Job::Home,
+            later + 600,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(calls.get(), 7);
+    }
+
+    #[test]
+    fn a_category_does_not_wait_for_the_home_lists() {
+        let dir = scratch("order");
+        let lib = library();
+        let mut worker = Worker::new(Some(dir.clone()));
+        let mut emit = |_: List, _: String| true;
+        // Home asked, its first fetch is running...
+        assert!(worker.ask(Job::Home, NOW, Some(&lib), &mut emit));
+        let first = worker.next_fetch(NOW).unwrap().1;
+        assert_eq!(first, List::Popular);
+        assert!(worker.next_fetch(NOW).is_none(), "one fetch at a time");
+        // ... a category is asked: its cached list needs no fetch to show,
+        // and its fetch goes before the rest of Home's.
+        let games = List::Category(Category::Games);
+        assert!(worker.ask(Job::Category(Category::Games), NOW, Some(&lib), &mut emit));
+        assert!(worker.ask(Job::Category(Category::Games), NOW, Some(&lib), &mut emit));
+        let result = Err(flathub::RefreshError::Fetch(NetError::Status(404)));
+        assert!(worker.fetched(first, result, NOW, Some(&lib), &mut emit));
+        assert_eq!(worker.next_fetch(NOW).unwrap().1, games);
+        assert!(worker.fetched(
+            games,
+            Ok(vec!["org.example.GameOne".into()]),
+            NOW,
+            Some(&lib),
+            &mut emit
+        ));
+        // Asked twice, fetched once; then Home's other lists.
+        assert_eq!(worker.next_fetch(NOW).unwrap().1, List::RecentlyUpdated);
     }
 
     #[test]
     fn without_a_library_the_ids_wait_for_one() {
         let dir = scratch("nolib");
         let mut worker = Worker::new(Some(dir));
-        let fetch = |_: &str| Ok(answer(&["org.example.Browser"]));
-        let emitted: RefCell<Vec<(List, String)>> = RefCell::new(Vec::new());
-        let mut emit = |l: List, j: String| {
-            emitted.borrow_mut().push((l, j));
-            true
-        };
-        assert!(worker.load(List::Popular, NOW, &fetch, None, &mut emit));
-        assert!(emitted.borrow().is_empty());
+        let fetch = |url: &str| Ok(answer(url, &["org.example.Browser"]));
+        let published: Published = RefCell::new(Vec::new());
+        drive(&mut worker, Job::Home, NOW, None, &fetch, &published);
+        assert!(published.borrow().is_empty());
         // The catalog arrived: the next request publishes from the cache.
         let lib = library();
-        assert!(worker.load(List::Popular, NOW + 1, &fetch, Some(&lib), &mut emit));
-        assert_eq!(emitted.borrow().len(), 1);
-        assert!(emitted.borrow()[0].1.contains("org.example.Browser"));
+        drive(
+            &mut worker,
+            Job::Home,
+            NOW + 1,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(published.borrow().len(), 3);
+        assert!(published.borrow()[0].1.contains("org.example.Browser"));
     }
 
     #[test]
@@ -534,28 +664,29 @@ mod tests {
         let lib = library();
         let mut worker = Worker::new(Some(dir));
         let fetch = |_: &str| Err(NetError::Failed("offline".into()));
-        let emitted: RefCell<Vec<(List, String)>> = RefCell::new(Vec::new());
-        let mut emit = |l: List, j: String| {
-            emitted.borrow_mut().push((l, j));
-            true
-        };
-        for list in [List::Popular, List::RecentlyUpdated, List::Picks] {
-            assert!(worker.load(list, NOW, &fetch, Some(&lib), &mut emit));
-        }
-        assert!(emitted.borrow().is_empty());
+        let published: Published = RefCell::new(Vec::new());
+        drive(&mut worker, Job::Home, NOW, Some(&lib), &fetch, &published);
+        assert!(published.borrow().is_empty());
         // And with no cache folder at all, nothing is even asked for.
         let mut worker = Worker::new(None);
         let never = |_: &str| -> Result<Vec<u8>, NetError> { panic!("fetched without a cache") };
-        assert!(worker.load(List::Popular, NOW, &never, Some(&lib), &mut emit));
+        drive(&mut worker, Job::Home, NOW, Some(&lib), &never, &published);
+        assert!(published.borrow().is_empty());
     }
 
     #[test]
     fn a_gone_gui_object_ends_the_worker() {
         let dir = scratch("gone");
         let lib = library();
-        let mut worker = Worker::new(Some(dir));
-        let fetch = |_: &str| Ok(answer(&["org.example.Browser"]));
+        let mut worker = Worker::new(Some(dir.clone()));
         let mut emit = |_: List, _: String| false;
-        assert!(!worker.load(List::Popular, NOW, &fetch, Some(&lib), &mut emit));
+        flathub::write_cache(
+            &dir,
+            List::Popular,
+            &["org.example.Browser".to_string()],
+            NOW,
+        )
+        .unwrap();
+        assert!(!worker.ask(Job::Home, NOW, Some(&lib), &mut emit));
     }
 }
