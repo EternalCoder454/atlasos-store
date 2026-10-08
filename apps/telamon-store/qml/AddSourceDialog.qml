@@ -72,7 +72,7 @@ TelamonDialog {
     Connections {
         target: dlg.sources
         function onPreviewReady() {
-            if (!dlg.opened) {
+            if (!dlg.visible) {
                 return;
             }
             dlg.preview = JSON.parse(dlg.sources.previewJson);
@@ -340,7 +340,7 @@ TelamonDialog {
             Layout.fillWidth: true
             spacing: TelamonStyle.spacingSmall
             Text {
-                text: qsTr("Add it")
+                text: qsTr("Who is it for?")
                 font.family: TelamonStyle.fontFamily
                 font.pointSize: TelamonStyle.fontSizeBody
                 font.bold: true

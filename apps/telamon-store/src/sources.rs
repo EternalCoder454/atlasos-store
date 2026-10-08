@@ -556,10 +556,12 @@ fn run_job(thread: &CxxQtThread<qobject::Sources>, job: Job, cancel: &CancelToke
                                 Some(Error::Cancelled) => format!(
                                     "Added {title}. Its list of apps was not downloaded; the Store tries again when it is next open."
                                 ),
-                                Some(why) => format!(
-                                    "Added {title}, but its list of apps could not be downloaded yet ({}). The Store tries again when it is next open.",
-                                    clean(&why.to_string(), 160)
-                                ),
+                                Some(why) => {
+                                    log::warn!("the app list of {title} was not downloaded: {why}");
+                                    format!(
+                                        "Added {title}, but its list of apps could not be downloaded yet. Its apps show up once the Store can reach it; it tries again whenever it is open."
+                                    )
+                                }
                             });
                         }
                         Err(e) => fail(&mut out, &e, &title),
@@ -1002,6 +1004,42 @@ mod tests {
         );
         assert_eq!(hint_of_url("https://dl.example.org/"), "");
         assert_eq!(hint_of_url("https://dl.example.org"), "");
+    }
+
+    #[test]
+    fn the_list_json_flags_unsigned_off_and_single_app_sources() {
+        use telamon_store_core::flatpak::{RefKind, SourceUse};
+        let r = |name: &str, enabled: bool, signed: bool, single: bool| RemoteInfo {
+            scope: Scope::System,
+            name: name.into(),
+            title: format!("Title of {name}"),
+            url: "https://dl.example.org/repo".into(),
+            enabled,
+            signed,
+            registry: false,
+            single_app: single,
+            priority: 1,
+            installed: (0..7)
+                .map(|i| SourceUse {
+                    kind: RefKind::App,
+                    id: format!("org.x.App{i}"),
+                    name: format!("App{i}"),
+                })
+                .collect(),
+        };
+        let v: Value = serde_json::from_str(&sources_json(&[
+            r("a", true, true, false),
+            r("b", false, false, true),
+        ]))
+        .unwrap();
+        assert_eq!(v[0]["scope"], "system");
+        assert_eq!(v[0]["unsigned"], false);
+        assert_eq!(v[1]["unsigned"], true);
+        assert_eq!(v[1]["enabled"], false);
+        assert_eq!(v[1]["singleApp"], true);
+        // Seven apps are counted, the first five named.
+        assert_eq!(v[0]["appCount"], 7);
+        assert_eq!(v[0]["apps"].as_array().unwrap().len(), APPS_SHOWN);
     }
 
     #[test]

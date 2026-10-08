@@ -18,7 +18,7 @@ SectionRow {
     signal removeRequested
 
     readonly property string scopeText: row.source.scope === "system" ? qsTr("For everyone on this computer (system)") : qsTr("For you only (user)")
-    readonly property string installedText: row.source.appCount > 0 ? qsTr("%n app(s) installed from it", "", row.source.appCount) : ""
+    readonly property string installedText: row.source.appCount > 0 ? (row.source.appCount === 1 ? qsTr("1 app installed from it") : qsTr("%1 apps installed from it").arg(row.source.appCount)) : ""
 
     title: row.source.title
     // What a screen reader reads: everything the row shows.

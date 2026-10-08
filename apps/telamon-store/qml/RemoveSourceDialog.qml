@@ -16,7 +16,7 @@ ConfirmDialog {
 
     readonly property bool blocked: dlg.info.blocked === true
 
-    title: dlg.blocked ? qsTr("Can't Remove %1").arg(dlg.info.title ?? "") : qsTr("Remove %1?").arg(dlg.info.title ?? "")
+    title: dlg.blocked ? qsTr("Source Still in Use") : qsTr("Remove %1?").arg(dlg.info.title ?? "")
     text: dlg.blocked ? (dlg.info.message ?? "") : (dlg.info.scope === "system" ? qsTr("The source will be taken off the list for everyone on this computer. It will ask for your password. Nothing is installed from it, so no apps change. You can add it again later.") : qsTr("The source will be taken off your list. Nothing is installed from it, so no apps change. You can add it again later."))
     acceptText: dlg.blocked ? qsTr("OK") : qsTr("Remove")
     rejectText: qsTr("Cancel")
