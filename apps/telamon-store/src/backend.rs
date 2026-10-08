@@ -22,7 +22,7 @@ pub mod qobject {
         fn activate(self: Pin<&mut Backend>, args: &QStringList, cwd: &QString);
 
         /// One request: `kind` is `page`, `app`, `search`, `remove`, `ref`,
-        /// `repo`, `bundle`, `rpm` or `refUrl`; `value` the page name, ID,
+        /// `repo`, `bundle`, `rpm`, `appimage` or `refUrl`; `value` the page name, ID,
         /// text, path or URL.
         #[qsignal]
         fn requested(self: Pin<&mut Backend>, kind: QString, value: QString);
@@ -63,7 +63,9 @@ impl qobject::Backend {
             .map(|a| a.to_string())
             .collect();
         let cwd = PathBuf::from(cwd.to_string());
-        let mut launch = launch::parse(&args, &cwd);
+        let mut launch = launch::parse_with(&args, &cwd, &|p| {
+            telamon_store_core::appimage::format::sniff_path(p).is_some()
+        });
         launch.dropped += total.saturating_sub(args.len());
         let mut lines: Vec<String> = launch
             .refused
@@ -100,6 +102,7 @@ fn describe(request: &Request) -> (&'static str, String) {
                 FileKind::Repo => "repo",
                 FileKind::Bundle => "bundle",
                 FileKind::Rpm => "rpm",
+                FileKind::AppImage => "appimage",
             },
             path.to_string_lossy().into_owned(),
         ),

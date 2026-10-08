@@ -2,6 +2,8 @@
 //! service; everything else lives here as QObjects exposed to QML, over the
 //! Qt-free `telamon-store-core`.
 
+mod appimage_cli;
+mod appimages;
 mod backend;
 mod catalog;
 mod featured;
@@ -29,6 +31,7 @@ pub struct StoreObjects {
     pub sources: *mut c_void,
     pub updates: *mut c_void,
     pub featured: *mut c_void,
+    pub app_images: *mut c_void,
 }
 
 /// Called once from `main.cpp`, after `QApplication` exists. Makes every
@@ -47,9 +50,11 @@ pub extern "C" fn store_objects_new() -> StoreObjects {
     let mut sources = sources::qobject::sources_make_unique();
     let mut updates = updates::qobject::app_updates_make_unique();
     let mut featured = featured::qobject::featured_make_unique();
+    let mut app_images = appimages::qobject::app_images_make_unique();
     sources.pin_mut().start();
     updates.pin_mut().start();
     featured.pin_mut().start();
+    app_images.pin_mut().refresh();
     StoreObjects {
         backend: backend.into_raw().cast(),
         catalog: catalog.into_raw().cast(),
@@ -59,5 +64,6 @@ pub extern "C" fn store_objects_new() -> StoreObjects {
         sources: sources.into_raw().cast(),
         updates: updates.into_raw().cast(),
         featured: featured.into_raw().cast(),
+        app_images: app_images.into_raw().cast(),
     }
 }

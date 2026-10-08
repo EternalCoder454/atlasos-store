@@ -27,6 +27,8 @@ BuildRequires:  corrosion
 # Cargo fetches the atlas-framework crates from GitHub.
 BuildRequires:  git-core
 BuildRequires:  desktop-file-utils
+# %%systemd_user_post and the unit and preset folders
+BuildRequires:  systemd-rpm-macros
 BuildRequires:  libappstream-glib
 BuildRequires:  cmake(Qt6Core)
 BuildRequires:  cmake(Qt6Gui)
@@ -56,12 +58,21 @@ Requires:       qt6-qtdeclarative
 Requires:       qt6-qtsvg
 # the system installation, its polkit rules and the remotes it reads
 Requires:       flatpak
+# AppImages: gpgv checks the signature an AppImage carries (without it the
+# Store says it could not check); the AppImage MIME types; the user path unit
+# that watches Downloads is turned on by the preset.
+Recommends:     gnupg2
+Requires:       shared-mime-info
+Requires:       systemd
+%{?systemd_ordering}
 
 %description
 Telamon Store is the app store of Telamon OS. Browse and search the apps on Flathub
 and your other Flatpak sources, see their screenshots, what they can access and
 who made them, and install, update and remove them. It opens flatpak: links,
-appstream: links and .flatpakref, .flatpakrepo and .flatpak files.
+appstream: links and .flatpakref, .flatpakrepo and .flatpak files. It also
+notices AppImages the user downloads, looks inside them without running them
+and, after a plain warning, installs them for the user.
 
 %prep
 %autosetup -n telamon-store-%{version}
@@ -108,6 +119,15 @@ install -Dpm0644 apps/telamon-store/data/net.eterneon.atlas.store.desktop \
 ln -s net.eterneon.telamon.store.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/net.eterneon.atlas.store.svg
 
+%post
+%systemd_user_post telamon-store-appimage.path
+
+%preun
+%systemd_user_preun telamon-store-appimage.path
+
+%postun
+%systemd_user_postun telamon-store-appimage.path
+
 %check
 # No path into the build tree (checked as well as set: see %%build).
 # grep: 0 = found, 1 = not found, anything else (no binary) fails too.
@@ -133,6 +153,11 @@ appstream-util validate-relax --nonet \
 %{_datadir}/icons/hicolor/scalable/apps/net.eterneon.telamon.store.svg
 %{_datadir}/icons/hicolor/scalable/apps/net.eterneon.atlas.store.svg
 %config(noreplace) %{_sysconfdir}/dnf/protected.d/telamon-store.conf
+# the Downloads watcher for AppImages, and the preset that turns it on
+%{_userunitdir}/telamon-store-appimage.path
+%{_userunitdir}/telamon-store-appimage.service
+%{_userpresetdir}/90-telamon-store.preset
+%{_datadir}/knotifications6/telamon-store.notifyrc
 
 %changelog
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.0-1

@@ -18,6 +18,7 @@ Discover's only backends there are Flatpak and fwupd.
 | `application/vnd.flatpak.ref`, `.repo`, `vnd.flatpak` bundles | Store |
 | `application/x-rpm` | Store explains that RPMs aren't installed on Telamon OS and points to toolbox |
 | `appstream:` and `flatpak+https:` links (Kicker, KRunner) | Store |
+| AppImages (not in Discover): noticed in Downloads, looked into without running, installed for the user after a plain warning | Store (see "AppImages") |
 | Background update checks, automatic updates, notifications | Telamon Updater (unchanged) |
 | Firmware (fwupd) | Telamon Updater |
 | Launcher and menu entries, `mimeapps.list`, removing Discover | The Telamon OS image |
@@ -115,8 +116,20 @@ QML:
 - `--remove <id>`: the app's page with its Remove confirmation open (the
   launcher's Uninstall; it starts `telamon-store --remove <id>` with
   `XDG_ACTIVATION_TOKEN` set). The user still confirms there.
+- `--appimage-install <file>`: the install confirmation for an AppImage (the
+  notification's Install and Show in Store buttons; the file's name does not
+  matter, its bytes are checked)
 - `appstream://<id>`, `appstream:<id>`, `flatpak+https://...`
-- `.flatpakref`, `.flatpakrepo`, `.flatpak` and `.rpm` paths or `file:` URLs
+- `.flatpakref`, `.flatpakrepo`, `.flatpak`, `.rpm` and `.AppImage` paths or
+  `file:` URLs (a file with another name that starts like an AppImage is
+  taken too, which is how the file manager hands over `application/vnd.appimage`)
+
+Two more options never reach the window: `main.cpp` hands `--appimage-check
+<folder>` and `--appimage-inspect <file>` to Rust before Qt starts
+(`telamon_store_early`, read with `launch::internal_path`: exactly one plain
+absolute path), and they run to completion with no window and no
+single-instance service. Sent to a running Store (`Open`, a second launch)
+they are "unknown option" like any other.
 
 Anything else is refused with a reason, logged, and shown in the window as
 plain text. Per launch at most 64 arguments are read, 8 requests acted on and
@@ -223,6 +236,12 @@ The Store does nothing when closed: no timer, autostart, D-Bus activation or
 notification. AppStream is refreshed only while it is open (when older than
 6 h), on a worker, while the cached data is shown.
 
+The one exception is the AppImage notice (see "AppImages"): a systemd user path
+unit holds an inotify watch on `~/Downloads`, and when that folder changes
+starts a short-lived `telamon-store --appimage-check` that exits when it has
+told the user (or after at most 10 minutes). No daemon, no timer, no polling
+while nothing changes, no network.
+
 ## Budgets
 
 | What | Budget |
@@ -235,6 +254,151 @@ notification. AppStream is refreshed only while it is open (when older than
 | Idle CPU, window open | 0 % |
 | Disk | index ≤ 15 MB, screenshots ≤ 200 MB |
 | RPM | ≤ 15 MB |
+
+## AppImages
+
+An AppImage is a program in one file. It is not sandboxed, it runs as the user
+and can read and change all the user's files, use the network and see
+everything the user can, and Telamon does not check it. The Store never calls
+one "safe": the first line of every confirmation is "This app isn't sandboxed
+and isn't checked by Telamon", and "What It Can Access" says what that means.
+It is the Store's job to say what it can find out, in plain words, and to
+install only after the user answers in its own dialog.
+
+**Facts about the format** (`appimage/format.rs`, `squash.rs`). A type 2 file
+is an ELF runtime followed by a squashfs; the squashfs starts at the end of the
+ELF (`e_shoff + e_shentsize * e_shnum`). The marker `AI` and the type byte are
+at offset 8 of the ELF header (`AI\x02` type 2, `AI\x01` type 1, an ISO 9660
+payload). The ELF sections `.sha256_sig` (1 KiB) and `.sig_key` (8 KiB) hold
+the signature and the signer's key, all zeros when unsigned. A type 1 file is
+recognized and not parsed: it gets the strongest warning ("can't look
+inside"). A file is an AppImage by its first bytes, never by its name.
+
+**Looking inside never runs it.** The Store reads the squashfs with the
+`backhand` crate (gzip, xz and zstd; MIT or Apache-2.0; no `parallel`), never
+mounts it and never uses `--appimage-extract` or any other `--appimage-*`
+option. Everything in the file is untrusted and is capped where it is read:
+the superblock is checked before the reader gets it (version, block size,
+counts, offsets, and the inode and directory tables are walked block by block
+so a table of thousands of tiny blocks is refused before anything is
+decompressed); only the top folder, `usr/share/metainfo`, `applications`,
+`pixmaps` and the hicolor icons are indexed; a file over its cap (2 MiB) is
+refused, not cut; all reads together have a budget (8 MiB); links are
+resolved inside the image only. From the desktop entry (parsed with the
+Store's key file reader), the AppStream metainfo (parsed by the Store's own
+AppStream parser, `parse_metainfo`: same limits and cleaning as a catalog) and
+the icon the Store takes name, version, publisher, summary, an app ID and an
+icon (a PNG up to 2048 px, or a small SVG without scripts, entities, `<use>`,
+`<image>`, styles or any `href` that leaves the document). Texts go through `text::clean`; the embedded `Exec=` is never
+used (the Store writes its own). All of it is shown as `Text.PlainText`.
+
+**The helper process.** Inspection runs in `telamon-store --appimage-inspect
+<file>` (the same binary, before Qt starts) with `RLIMIT_AS` (its size at
+start plus 1 GiB), `RLIMIT_CPU` 150 s, `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 1 MiB
+and no new privileges, and a 180 s timeout on the Store's side. It prints one
+line of JSON and then the icon's bytes; the Store reads at most 2 MiB of it
+and treats it as untrusted again (`Inspection::sanitize`: texts cleaned again,
+IDs, hash, host and fingerprint checked, an icon that is not an image
+dropped). A helper that fails (out of memory, too long) means "Telamon
+couldn't look at this file" and no Install.
+
+**What the user is told** (`appimage/trust.rs`, always, before Install). The
+findings are `Info`, `Caution` or `Danger`; any `Danger` makes the whole box
+red and the Install button the red kind:
+
+- Signature (`sign.rs`): none in the file, "Not signed" (danger); present
+  and good, "Signed by <fingerprint>, but this key isn't one Telamon knows"
+  (caution: Telamon knows no keys, and a key that comes in the file proves
+  nothing about who made it); present and wrong, "The signature is wrong (the
+  file was changed)" (danger); present but not checkable (no `gpgv`, an
+  unreadable key), danger. The check is what `appimagetool --sign` makes: a
+  detached armored OpenPGP signature of the 64-character lowercase hex
+  SHA-256 of the file with both sections zeroed. It runs `gpgv` (only `/usr/bin/gpgv` or `/bin/gpgv`: a `PATH` in a
+  user session holds folders the user can write to) by argv with an empty
+  environment, a keyring made of the embedded key alone in a 0700
+  temporary folder that is removed after, and a 10 s timeout. The user's
+  keyring is never read or changed and the key is trusted nowhere.
+- Where it came from (`origin.rs`): the browser's `user.xdg.origin.url`
+  (or `referrer.url` when the origin is not a web address) read with
+  `fgetxattr` from the file that was inspected, at most 2 KiB. `https` from a
+  public host (any port): "The browser recorded <host> as where it came
+  from" (info). `http`: danger, naming the
+  host. None, or anything else: danger, "We can't tell where this file came
+  from". Any program can write these attributes; they are a hint, not proof.
+- A file that cannot be looked into (type 1, damaged, over a limit): danger.
+- Flathub: when the file's AppStream ID, or its exact name (ignoring case and
+  spacing, and only when one app has it), is in the local catalog from the
+  `flathub` remote, "Get Flathub Version" is the main button and the default,
+  and "Install AppImage Anyway" the other. Otherwise the default is Cancel.
+  Nothing is fetched to decide this.
+
+**Installing** (`appimage/install.rs`; the Store's dialog is the only way).
+The file is copied (never moved) to a temporary name in `~/Applications`
+(created 0755; refused when it is a link or not the user's), hashed while
+copying and compared with the hash the user was shown (a changed file is not
+installed), set 0755 and renamed to `<Name>.AppImage` with `RENAME_NOREPLACE`.
+`<Name>` is the app's name reduced to letters, digits, `.`, `_`, `-`. A name
+that is taken is numbered (`-2`, `-3`); only the Store's own earlier install
+of the same app (its entry carries the marker and the path) is replaced. The
+icon goes to `$XDG_DATA_HOME/icons/hicolor/<size>/apps/appimage-<id>.png` (or
+`scalable/.../.svg`), and last the desktop entry
+`$XDG_DATA_HOME/applications/appimage-<id>.desktop`:
+`Type=Application`, `X-Telamon-AppImage=true`,
+`X-Telamon-AppImage-Path=<path>`, `X-Telamon-AppImage-Icon=<path under
+icons>`, the Store's own `Exec` with every argument quoted by the Desktop
+Entry rules (`%` as `%%`; tested to round trip). If the FUSE 2 library
+(`libfuse.so.2`) is missing when installing, `Exec` is `env
+APPIMAGE_EXTRACT_AND_RUN=1 <path>` (the app unpacks itself on every start; the
+Telamon OS image should carry `fuse-libs` so AppImages start fast), and Open
+makes the same choice when it starts the app.
+
+**Installed, Open, Uninstall.** Installed lists the Store's AppImages (entries
+that carry the marker, whose recorded path is a plain `*.AppImage` file
+directly in `~/Applications`) below the Flatpak apps. Open runs the recorded
+file directly (no shell, no arguments, an own process group, the activation
+token only when valid ASCII). Uninstall asks first, then removes exactly the
+three files the entry records, each only if it is a regular file of the user
+(never through a link; anything else is left and named), the entry last. An
+entry that is not the Store's, or whose path or icon reference does not check
+out, removes nothing.
+
+**The Downloads watcher** (`check.rs`, `appimage_cli.rs`, `data/systemd`).
+`telamon-store-appimage.path` (`PathChanged=%h/Downloads`, no trigger or start limit so a busy folder does not stop the watch; a path unit cannot
+expand the XDG download folder, so another download folder is not watched)
+starts `telamon-store-appimage.service` (oneshot: `telamon-store
+--appimage-check %h/Downloads`, `NoNewPrivileges`, `AF_UNIX` only,
+`MemoryMax=2G`). The RPM installs both in `/usr/lib/systemd/user` and
+`90-telamon-store.preset` (`enable telamon-store-appimage.path`) in
+`/usr/lib/systemd/user-preset`, and runs `%systemd_user_post`. A preset only
+says what `systemctl preset` should do: the image must run `systemctl
+--global preset telamon-store-appimage.path` (the RPM scriptlet does it at
+image build when the package is installed there) for it to start at every
+login. The check looks one level deep at regular files (not links, not
+hidden, not `.part`, `.crdownload`, `.download`, `.partial`, `.opdownload`,
+`.tmp`) that arrived in the last 15 minutes (at most 8 are waited for and
+inspected per round) and are named `*.AppImage` or
+start like one, waits until a file has not changed for 3 s (at most 2
+minutes), inspects it through the helper, and remembers path, size,
+modification time and SHA-256 in
+`$XDG_STATE_HOME/telamon-store/appimage-seen.json` (folder 0700, file 0600,
+atomic, at most 256 entries, a damaged file reads as empty, a link or another
+user's file is refused) before it tells the user: if that cannot be saved,
+nobody is told. The same file is never announced twice (same path, size and
+time; or the same size, time and content under another name); a changed file
+is. A run looks at the folder again after each round (at most 4 rounds, so files that
+arrived while it ran, or past the 8, are found; the path unit does not start a
+service that is still running), announces at most 4 files, starts no new file
+after 8 minutes and ends itself after 10 (the unit's timeout is 11). The notification
+(`org.freedesktop.Notifications` through `telamon-updater-core`'s notifier, event
+`appimageFound` in `telamon-store.notifyrc`, so Plasma's settings apply) says
+"Install <name>?" with plain text only (cleaned fields, markup escaped),
+buttons Install, Not Now and Show in Store, and waits at most 60 s for one.
+Install and Show in Store both start the Store with the install dialog open
+(`systemd-run --user --collect --no-block telamon-store --appimage-install
+<file>`, so the window is not killed with the service) and pass the
+notification server's activation token when it sends one; the dialog is where
+the user decides. Not Now remembers nothing beyond the de-duplication.
+
 
 ## Names before the rename (0.2.0)
 

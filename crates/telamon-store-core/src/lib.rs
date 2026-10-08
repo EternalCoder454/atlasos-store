@@ -2,6 +2,7 @@
 //! is tested on its own. Everything it reads from a remote, a file or a URL is
 //! untrusted and is checked where it enters (see docs/DESIGN.md, Security).
 
+pub mod appimage;
 pub mod appstream;
 pub mod catalog;
 pub mod flathub;

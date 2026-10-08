@@ -1,0 +1,18 @@
+# Watches the Downloads folder and starts telamon-store-appimage.service when
+# something in it changes (a file closed after writing, one renamed in, one
+# created). Only ~/Downloads: a path unit cannot expand the XDG download
+# folder, so another download folder is not watched.
+#
+# Nothing runs between changes: this is an inotify watch held by systemd.
+[Unit]
+Description=Watch Downloads for AppImages
+Documentation=https://github.com/EternalCoder454/atlasos-store
+
+[Path]
+PathChanged=%h/Downloads
+Unit=telamon-store-appimage.service
+# No trigger limit: a busy folder must not stop the watch.
+TriggerLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

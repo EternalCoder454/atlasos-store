@@ -27,8 +27,13 @@ struct StoreObjects {
     void *sources;
     void *updates;
     void *featured;
+    void *app_images;
 };
 extern "C" StoreObjects store_objects_new();
+// Defined in src/appimage_cli.rs: the two options that run without a window
+// (--appimage-check, --appimage-inspect). Sets *handled to 1 and returns the
+// exit code when argv was one of them.
+extern "C" int telamon_store_early(int argc, const char *const *argv, int *handled);
 
 // Hands a launch's arguments (without the program name) to the backend.
 static void activate(QObject *backend, const QStringList &arguments, const QString &cwd)
@@ -57,6 +62,16 @@ static void raise(QQmlApplicationEngine *engine)
 
 int main(int argc, char *argv[])
 {
+    // `telamon-store --appimage-check <folder>` (the Downloads watcher's
+    // service) and `--appimage-inspect <file>` (the helper that looks inside
+    // an AppImage under resource limits) run to completion here: no Qt
+    // application, no window, no single-instance service.
+    int handled = 0;
+    const int early = telamon_store_early(argc, argv, &handled);
+    if (handled) {
+        return early;
+    }
+
     telamon_app_init();
     // Drawn on the CPU like the other Telamon apps unless QT_QUICK_BACKEND says
     // otherwise (the P phase measures whether the Store's image grid is
@@ -75,7 +90,11 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("app"), QStringLiteral("Open the page of the app <id>."), QStringLiteral("id")});
     parser.addOption({QStringLiteral("search"), QStringLiteral("Search for <text>."), QStringLiteral("text")});
     parser.addOption({QStringLiteral("page"), QStringLiteral("Open home, installed, updates or sources."), QStringLiteral("page")});
-    parser.addPositionalArgument(QStringLiteral("link"), QStringLiteral(".flatpakref, .flatpakrepo or .flatpak files, appstream: or flatpak+https: links."),
+    parser.addOption({QStringLiteral("appimage-install"), QStringLiteral("Look at the AppImage <file> and ask before installing it."), QStringLiteral("file")});
+    parser.addOption({QStringLiteral("appimage-check"),
+                      QStringLiteral("Tell the user about AppImages that just arrived in <folder>, then exit (run by the systemd user unit that watches Downloads)."),
+                      QStringLiteral("folder")});
+    parser.addPositionalArgument(QStringLiteral("link"), QStringLiteral(".flatpakref, .flatpakrepo, .flatpak or .AppImage files, appstream: or flatpak+https: links."),
                                  QStringLiteral("[link...]"));
     // Only --help and --version are acted on here. Every other argument goes
     // to the backend, which alone decides what is valid and says what it
@@ -103,6 +122,7 @@ int main(int argc, char *argv[])
     std::unique_ptr<QObject> sources(static_cast<QObject *>(made.sources));
     std::unique_ptr<QObject> updates(static_cast<QObject *>(made.updates));
     std::unique_ptr<QObject> featured(static_cast<QObject *>(made.featured));
+    std::unique_ptr<QObject> appImages(static_cast<QObject *>(made.app_images));
     auto engine = std::make_unique<QQmlApplicationEngine>();
     QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine->setInitialProperties({
@@ -114,6 +134,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("sources"), QVariant::fromValue(sources.get())},
         {QStringLiteral("updates"), QVariant::fromValue(updates.get())},
         {QStringLiteral("featured"), QVariant::fromValue(featured.get())},
+        {QStringLiteral("appImages"), QVariant::fromValue(appImages.get())},
     });
     engine->loadFromModule("net.eterneon.telamon.store", "Main");
     if (engine->rootObjects().isEmpty()) {

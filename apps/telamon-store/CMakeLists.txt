@@ -81,6 +81,8 @@ qt_add_qml_module(telamon-store-app
     QML_FILES
         qml/Main.qml
         qml/AddSourceDialog.qml
+        qml/AppImageDialog.qml
+        qml/AppImageRemoveDialog.qml
         qml/AppPage.qml
         qml/InstallDialog.qml
         qml/InstalledPage.qml
@@ -116,3 +118,13 @@ install(FILES data/net.eterneon.telamon.store.metainfo.xml
         DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES data/net.eterneon.telamon.store.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+
+# AppImages the user downloads: a systemd user path unit on Downloads runs
+# `telamon-store --appimage-check` (and the preset turns it on for every user),
+# and the notification's settings.
+install(FILES data/systemd/telamon-store-appimage.path data/systemd/telamon-store-appimage.service
+        DESTINATION lib/systemd/user)
+install(FILES data/systemd/90-telamon-store.preset
+        DESTINATION lib/systemd/user-preset)
+install(FILES data/telamon-store.notifyrc
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/knotifications6)

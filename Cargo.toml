@@ -27,12 +27,22 @@ log = { version = "0.4", features = ["std"] }
 # AppStream XML (streaming reader, no serde) and the gzip it comes in.
 quick-xml = { version = "0.42", default-features = false }
 libc = "0.2"
+# The AppImage check sends a notification and waits for its buttons over D-Bus
+# (the same zbus and tokio, features and versions as telamon-framework-system's
+# notify module, which sends it).
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "time"] }
+futures-util = { version = "0.3", default-features = false }
 # libflatpak, as telamon-framework-flatpak uses it (one lock entry).
 libflatpak = "0.7"
 # SHA-1 and SHA-256 for OpenPGP key fingerprints (RustCrypto, no default features).
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# Reads (and, in tests, writes) the squashfs inside an AppImage without
+# running anything: the decompressors for the formats AppImages use, no
+# threads (`parallel`) and no tracing.
+backhand = { version = "0.25", default-features = false, features = ["gzip", "zstd", "xz"] }
 
 [profile.release]
 lto = "thin"

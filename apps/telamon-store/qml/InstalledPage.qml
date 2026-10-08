@@ -12,17 +12,38 @@ TelamonPage {
     id: page
 
     required property var jobs
+    // The AppImages the Store installed (src/appimages.rs).
+    required property var appImages
 
     title: qsTr("Installed")
 
     signal appRequested(string appId)
     signal removeRequested(string appId, string name, string scope, string ref)
+    signal removeAppImageRequested(string id, string name)
 
     readonly property var apps: {
         void page.jobs.installedRevision;
         return JSON.parse(page.jobs.installedJson);
     }
     readonly property bool idle: page.jobs.phase === "idle"
+    readonly property var appImageList: JSON.parse(page.appImages.installedJson)
+    readonly property bool appImagesIdle: page.appImages.phase === "idle"
+
+    // Open asks the window system for an activation token first, then starts
+    // the AppImage; without one Wayland can leave its window behind this one.
+    property string openingId: ""
+
+    Connections {
+        target: ActivationToken
+        function onReady(key, token) {
+            if (page.openingId.length === 0 || key !== "appimage:" + page.openingId) {
+                return;
+            }
+            const id = page.openingId;
+            page.openingId = "";
+            page.appImages.open(id, token);
+        }
+    }
 
     headerTrailing: [
         TelamonButton {
@@ -35,6 +56,26 @@ TelamonPage {
     JobStatus {
         Layout.fillWidth: true
         jobs: page.jobs
+    }
+
+    // What the last AppImage install, removal or Open did, or why not.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: page.appImages.errorText.length > 0 || page.appImages.resultText.length > 0
+        spacing: TelamonStyle.spacingLarge
+        Text {
+            Layout.fillWidth: true
+            text: page.appImages.errorText.length > 0 ? page.appImages.errorText : page.appImages.resultText
+            wrapMode: Text.Wrap
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeBody
+            color: page.appImages.errorText.length > 0 ? TelamonStyle.error : TelamonStyle.success
+            textFormat: Text.PlainText
+        }
+        TelamonButton {
+            text: qsTr("Dismiss")
+            onClicked: page.appImages.clearMessages()
+        }
     }
 
     Text {
@@ -57,7 +98,7 @@ TelamonPage {
     TelamonEmptyState {
         Layout.fillWidth: true
         Layout.preferredHeight: 260
-        visible: page.jobs.installedReady && page.apps.length === 0
+        visible: page.jobs.installedReady && page.apps.length === 0 && page.appImageList.length === 0
         symbol: Symbols.Apps
         title: page.jobs.installedError.length > 0 ? qsTr("Could Not Read Installed Apps") : qsTr("No Apps Installed")
         text: page.jobs.installedError.length > 0 ? qsTr("Try again in a moment.") : qsTr("Apps you install show up here.")
@@ -140,6 +181,113 @@ TelamonPage {
                     variant: TelamonButton.Destructive
                     enabled: page.idle
                     onClicked: page.removeRequested(row.modelData.appId, row.modelData.name, row.modelData.scope, row.modelData.ref)
+                }
+            }
+        }
+    }
+
+    // The AppImages the Store installed, below the Flatpak apps.
+    Text {
+        Layout.fillWidth: true
+        Layout.topMargin: TelamonStyle.spacingLarge
+        visible: page.appImageList.length > 0
+        text: qsTr("AppImages")
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeHeading
+        font.bold: true
+        color: TelamonStyle.text
+        textFormat: Text.PlainText
+        Accessible.role: Accessible.Heading
+    }
+
+    Section {
+        Layout.fillWidth: true
+        visible: page.appImageList.length > 0
+
+        Repeater {
+            model: page.appImageList
+            SectionRow {
+                id: aRow
+                required property var modelData
+                readonly property real iconSide: Math.round(Kirigami.Units.gridUnit * 2.8)
+
+                title: aRow.modelData.name
+                subtitle: aRow.modelData.present ? [aRow.modelData.version, aRow.modelData.size].filter(t => t.length > 0).join(" \u00b7 ") : qsTr("The file is gone. Remove this entry.")
+
+                leading: Rectangle {
+                    width: aRow.iconSide
+                    height: aRow.iconSide
+                    radius: Math.round(aRow.iconSide * 0.225)
+                    color: aIcon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
+                    Accessible.ignored: true
+                    Text {
+                        anchors.centerIn: parent
+                        visible: aIcon.status !== Image.Ready
+                        text: aRow.modelData.name.length > 0 ? aRow.modelData.name.charAt(0).toUpperCase() : ""
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeHeading
+                        font.bold: true
+                        color: TelamonStyle.accent
+                        textFormat: Text.PlainText
+                    }
+                    Image {
+                        id: aIcon
+                        anchors.fill: parent
+                        source: aRow.modelData.iconSource
+                        asynchronous: true
+                        cache: true
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize: Qt.size(aRow.iconSide * Screen.devicePixelRatio, aRow.iconSide * Screen.devicePixelRatio)
+                    }
+                }
+
+                content: ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: TelamonStyle.spacingXSmall
+                    Text {
+                        Layout.fillWidth: true
+                        text: aRow.title
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeBody
+                        font.bold: true
+                        color: TelamonStyle.text
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: aRow.subtitle
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeCaption
+                        color: TelamonStyle.textMuted
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                }
+
+                RowLayout {
+                    spacing: TelamonStyle.spacing
+                    TelamonButton {
+                        text: qsTr("Open")
+                        //: An Open button in a row of the AppImages list; %1 is the app's name
+                        Accessible.name: qsTr("Open %1").arg(aRow.modelData.name)
+                        enabled: page.appImagesIdle && aRow.modelData.present
+                        onClicked: {
+                            page.openingId = aRow.modelData.id;
+                            ActivationToken.request(page.Window.window, "appimage:" + aRow.modelData.id);
+                        }
+                    }
+                    TelamonButton {
+                        text: qsTr("Uninstall")
+                        //: An Uninstall button in a row of the AppImages list; %1 is the app's name
+                        Accessible.name: qsTr("Uninstall %1").arg(aRow.modelData.name)
+                        variant: TelamonButton.Destructive
+                        enabled: page.appImagesIdle
+                        onClicked: page.removeAppImageRequested(aRow.modelData.id, aRow.modelData.name)
+                    }
                 }
             }
         }

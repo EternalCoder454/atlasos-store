@@ -23,6 +23,9 @@ TelamonWindow {
     required property var sources
     required property var updates
     required property var featured
+    // The AppImages the Store installed and the install confirmation for one
+    // (src/appimages.rs).
+    required property var appImages
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -132,6 +135,7 @@ TelamonWindow {
             search: qsTr("Search"),
             ref: qsTr("App from a File"),
             repo: qsTr("Source from a File"),
+            appimage: qsTr("AppImage"),
             bundle: qsTr("App Bundle"),
             rpm: qsTr("RPM Package"),
             refUrl: qsTr("App from a Link")
@@ -196,6 +200,22 @@ TelamonWindow {
                 root.openRemove(value);
                 return;
             }
+            if (kind === "appimage") {
+                // An AppImage: looked inside (never run), then the install
+                // confirmation. The user's answer there is what installs.
+                if (appImageDialog.visible) {
+                    // A new launch never replaces a question being answered.
+                    root.showMessage({
+                        title: qsTr("Not Opened"),
+                        heading: qsTr("Another AppImage is waiting for your answer"),
+                        text: qsTr("Answer that first, then open this file again.")
+                    });
+                    return;
+                }
+                root.openPlace("installed");
+                root.appImages.request(value);
+                return;
+            }
             if (kind === "repo") {
                 // A .flatpakrepo: the Sources place, with Add Source reading it.
                 root.openPlace("sources");
@@ -245,6 +265,16 @@ TelamonWindow {
         }
     }
 
+    Connections {
+        target: root.appImages
+        function onDetailReady() {
+            appImageDialog.show();
+        }
+        function onInstalled() {
+            root.openPlace("installed");
+        }
+    }
+
     // A source was added, removed, turned on or off: the catalog and the
     // installed list are read again.
     Connections {
@@ -291,6 +321,15 @@ TelamonWindow {
     UnusedDialog {
         id: unusedDialog
         jobs: root.jobs
+    }
+    AppImageDialog {
+        id: appImageDialog
+        appImages: root.appImages
+        onFlathubRequested: id => root.openApp(id)
+    }
+    AppImageRemoveDialog {
+        id: appImageRemoveDialog
+        appImages: root.appImages
     }
     AddSourceDialog {
         id: addSourceDialog
@@ -445,6 +484,8 @@ TelamonWindow {
         id: installedPage
         InstalledPage {
             jobs: root.jobs
+            appImages: root.appImages
+            onRemoveAppImageRequested: (id, name) => appImageRemoveDialog.show(id, name)
             onAppRequested: id => root.openApp(id)
             onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
         }

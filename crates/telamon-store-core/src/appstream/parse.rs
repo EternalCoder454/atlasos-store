@@ -496,6 +496,31 @@ pub fn parse_gz_file(path: &Path, opts: &ParseOptions) -> Result<Catalog, ParseE
     parse(flate2::bufread::GzDecoder::new(raw), opts)
 }
 
+/// Parses the metainfo file (`.appdata.xml`, `.metainfo.xml`) of one app,
+/// with the same limits and cleaning as a catalog. The root is `<component>`
+/// and no Flatpak bundle is needed. `None` when the file's component is
+/// invalid (no valid ID or no name).
+pub fn parse_metainfo<R: Read>(
+    reader: R,
+    opts: &ParseOptions,
+) -> Result<Option<Component>, ParseError> {
+    let lim = &opts.limits;
+    let guard = Guard::new(reader, lim);
+    let mut rd = Reader::from_reader(BufReader::with_capacity(64 << 10, guard));
+    let mut st = State::new(opts);
+    st.metainfo = true;
+    match drive(&mut rd, &mut st, lim) {
+        Ok(()) => {}
+        Err(e) => {
+            let id = st.cur_id();
+            return Err(e.in_component(id));
+        }
+    }
+    let id = st.cur_id();
+    let catalog = st.finish().map_err(|e| e.in_component(id))?;
+    Ok(catalog.components.into_iter().next())
+}
+
 /// Parses an uncompressed catalog. An error names the component being read
 /// when its ID was already known.
 pub fn parse<R: Read>(reader: R, opts: &ParseOptions) -> Result<Catalog, ParseError> {
@@ -922,6 +947,9 @@ struct State<'o> {
     stack: Vec<El>,
     pos: u64,
     saw_root: bool,
+    /// Reading one app's metainfo file (a bare `<component>` root, no Flatpak
+    /// bundle needed) rather than a remote's catalog.
+    metainfo: bool,
     /// The index in `comps` of each ID kept.
     seen: HashMap<String, usize>,
     comps: Vec<Component>,
@@ -1029,6 +1057,7 @@ impl<'o> State<'o> {
             stack: Vec::with_capacity(16),
             pos: 0,
             saw_root: false,
+            metainfo: false,
             seen: HashMap::new(),
             comps: Vec::new(),
             skipped: 0,
@@ -1130,10 +1159,14 @@ impl<'o> State<'o> {
         let name = e.name();
         let name = name.as_ref();
         let Some(&parent) = self.stack.last() else {
-            if self.saw_root || name != "components" {
+            let root_ok = name == "components" || (self.metainfo && name == "component");
+            if self.saw_root || !root_ok {
                 return Err(ParseError::NotCatalog);
             }
             self.saw_root = true;
+            if name == "component" {
+                return self.begin_component(e);
+            }
             return Ok(El::Components);
         };
         match parent {
@@ -1762,7 +1795,7 @@ impl<'o> State<'o> {
         self.desc = None;
         self.leaf = None;
         let valid_id = text::valid_id(&c.id);
-        let needs_bundle = needs_bundle(c.kind);
+        let needs_bundle = needs_bundle(c.kind) && !self.metainfo;
         if !valid_id || c.name.s.is_empty() || (needs_bundle && c.bundle.is_none()) {
             self.skipped = self.skipped.saturating_add(1);
             return Ok(());
