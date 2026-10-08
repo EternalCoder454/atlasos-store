@@ -4,7 +4,11 @@ import Telamon.Ui
 
 // Search: a field and a grid of the apps that match, as you type. The query
 // is looked up on a worker (see AppListModel), at most 500 results.
-Item {
+// A FocusScope with the field as its focused child: the navigation stack hands
+// the focus to a page it pushes (and again when its transition ends), and with
+// a plain Item that took the keyboard away from the field after the first
+// letter typed on Home.
+FocusScope {
     id: page
 
     required property var catalog
@@ -68,8 +72,17 @@ Item {
             Layout.fillWidth: true
             placeholderText: qsTr("Search Apps")
             clearable: true
+            focus: true
             Accessible.name: qsTr("Search Apps")
             onTextEdited: debounce.restart()
+            // Escape empties the field and the results; the focus stays.
+            Keys.onEscapePressed: event => {
+                debounce.stop();
+                field.text = "";
+                page.query = "";
+                page.run();
+                event.accepted = true;
+            }
             Keys.onDownPressed: grid.forceActiveFocus()
         }
 
