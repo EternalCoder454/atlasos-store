@@ -182,7 +182,7 @@ pub(crate) fn main_ref_of(r: &FlatpakRef) -> Result<String, Error> {
 
 /// A name no remote has (compared without case, which a case-insensitive
 /// file system would not tell apart), by numbering as flatpak does.
-fn free_name(base: &str, remotes: &[RemoteCfg]) -> Result<String, Error> {
+pub(crate) fn free_name(base: &str, remotes: &[RemoteCfg]) -> Result<String, Error> {
     let taken = |n: &str| remotes.iter().any(|r| r.name.eq_ignore_ascii_case(n));
     if !taken(base) {
         return Ok(base.to_string());
@@ -1145,6 +1145,16 @@ pub(crate) fn add_remote_bytes(
     }
     let remote = libflatpak::Remote::from_file(name, &libflatpak::glib::Bytes::from(bytes))
         .map_err(|e| super::from_glib("read the source's description", &e, cancel))?;
+    // libflatpak leaves a file without a key at the default, "verify
+    // signatures", which could never succeed: an unsigned source (which the
+    // caller let the user accept) is added as one that is not checked. The
+    // bytes are the Store's own rewrite, one `Key=value` per line.
+    if !bytes
+        .split(|b| *b == b'\n')
+        .any(|l| l.starts_with(b"GPGKey="))
+    {
+        remote.set_gpg_verify(false);
+    }
     let inst = super::open_for_change(scope)?;
     inst.add_remote(&remote, false, Some(cancel.cancellable()))
         .map_err(|e| super::from_glib("add the source", &e, cancel))
