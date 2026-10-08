@@ -74,14 +74,17 @@ the Updater's apps lock, and never calls the engine's own `lock::take`. A check
 is `apps::list(refresh)` then `apps::check`; an update is the `apps::unseen`
 guard, `apps::update`, `apphistory::record`, then a fresh list. Updates that
 ask for new permissions show them on their row and are never installed
-unseen. A check starts only when the page is opened with no list this session
+unseen: when any waiting update asks for new permissions, Update All first asks
+in the Store's own dialog (every such app with its full list, Cancel the
+default, input ignored for 0.5 s), which also offers "Update Without These"
+(the engine's `hold_new_permissions`). A check starts only when the page is opened with no list this session
 or one older than 10 minutes, or when the user asks. The engine updates all
 or nothing, so there is no per-app Update, and Cancel works only while waiting
 for the lock (a ref filter and a cancel token in `telamon-framework-flatpak`
 and `apps::update` would add both). "Last checked" is the later of the Store's
 own record (`$XDG_STATE_HOME/telamon-store/updates-checked`) and the Updater's
 `RoundAt`. The settings (background updates on or off) stay in Telamon
-Settings; "Update Settings" starts `/usr/bin/telamon-settings updates apps`.
+Settings; quitting waits up to 10 s for a running update; "Update Settings" starts `/usr/bin/telamon-settings updates apps`.
 
 ## Home and category lists
 
