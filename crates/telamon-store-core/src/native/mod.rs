@@ -68,12 +68,13 @@ pub(crate) fn io_err(what: &str, e: &std::io::Error) -> Error {
     ))
 }
 
-/// A valid app ID: reverse-DNS style (at least one dot), ASCII letters,
+/// A valid app ID: reverse-DNS style (at least three parts, so `org.kde` or
+/// `org.freedesktop` are not IDs), ASCII letters,
 /// digits, `.`, `_` and `-`, at most 128 characters, no empty or leading-dot
 /// parts. It becomes a folder and file names, so nothing else is accepted.
 pub fn valid_app_id(id: &str) -> bool {
     id.len() <= 128
-        && id.contains('.')
+        && id.split('.').count() >= 3
         && id
             .split('.')
             .all(|part| !part.is_empty() && !part.starts_with('-'))
@@ -88,12 +89,14 @@ mod tests {
 
     #[test]
     fn app_ids_are_names_not_paths() {
-        for ok in ["net.eterneon.telamon.gates", "org.example.App-2", "a.b"] {
+        for ok in ["net.eterneon.telamon.gates", "org.example.App-2", "a.b.c"] {
             assert!(valid_app_id(ok), "{ok}");
         }
         for bad in [
             "",
             "gates",
+            "a.b",
+            "org.kde",
             ".hidden.app",
             "a..b",
             "a.b.",

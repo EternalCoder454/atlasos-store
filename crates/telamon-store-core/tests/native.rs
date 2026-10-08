@@ -38,7 +38,14 @@ fn dirs(name: &str) -> (Dirs, PathBuf) {
     let home = root.join("home");
     fs::create_dir_all(&data).unwrap();
     fs::create_dir_all(&home).unwrap();
-    (Dirs { data, home }, root)
+    (
+        Dirs {
+            data,
+            home,
+            system: Vec::new(),
+        },
+        root,
+    )
 }
 
 fn host() -> Host {
@@ -1064,7 +1071,8 @@ fn a_local_bundle_is_looked_at_without_installing() {
     let (d, root) = dirs("local");
     let built = gates("0.1.0").build();
     let f = write_archive(&root, &built);
-    let (m, sha, size) = check::inspect_local(&f, &root.join("work")).unwrap();
+    let (m, sha, size, copy) = check::inspect_local(&f, &root.join("work")).unwrap();
+    assert_eq!(archive::sha256_file(&copy).unwrap().0, sha);
     assert_eq!((m.id.as_str(), m.version.as_str()), (ID, "0.1.0"));
     assert_eq!(sha, built.sha256);
     assert_eq!(size, built.archive.len() as u64);
@@ -1126,7 +1134,7 @@ fn real_bundles_from_the_framework_tool_install() {
             telamon_ui: None,
             arch: "x86_64".into(),
         };
-        let (m, _, _) = check::inspect_local(&p, &_root.join("work")).unwrap();
+        let (m, _, _, _) = check::inspect_local(&p, &_root.join("work")).unwrap();
         // The release's own manifest, when it was kept beside the archive:
         // the archive must match it (hash, size) and say the same.
         let outer_path = PathBuf::from(p.to_string_lossy().replace(".tar.zst", ".manifest.json"));
@@ -1198,4 +1206,77 @@ fn the_repositorys_own_catalog_is_valid() {
     // The file is also what it should look like: the tooling reads it as JSON.
     let v: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(v["schema"], 1);
+}
+
+#[test]
+fn an_app_that_is_already_on_the_computer_is_not_replaced() {
+    let (mut d, root) = dirs("system");
+    let sys = root.join("usr-share");
+    fs::create_dir_all(sys.join("applications")).unwrap();
+    fs::write(
+        sys.join(format!("applications/{ID}.desktop")),
+        b"[Desktop Entry]\nType=Application\nName=x\nExec=true\n",
+    )
+    .unwrap();
+    d.system = vec![sys];
+    let e = install_local(&d, &root, &gates("0.1.0").build()).unwrap_err();
+    assert!(e.contains("already on this computer"), "{e}");
+    assert!(install::list(&d).is_empty());
+}
+
+#[test]
+fn an_update_does_not_overwrite_a_file_the_user_edited() {
+    let (d, root) = dirs("edited");
+    install_local(&d, &root, &gates("0.1.0").build()).unwrap();
+    let desktop = d.data.join(format!("applications/{ID}.desktop"));
+    fs::write(
+        &desktop,
+        b"[Desktop Entry]\nType=Application\nName=Mine\nExec=true\n",
+    )
+    .unwrap();
+    let e = install_local(&d, &root, &gates("0.2.0").build()).unwrap_err();
+    assert!(e.contains("was changed since the Store wrote it"), "{e}");
+    assert_eq!(
+        fs::read(&desktop).unwrap(),
+        b"[Desktop Entry]\nType=Application\nName=Mine\nExec=true\n"
+    );
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.1.0");
+}
+
+#[test]
+fn a_bundle_cannot_take_another_apps_notification_file() {
+    let (d, root) = dirs("notifyrc");
+    let b = gates("1.0.0").file("share/knotifications6/telamon-store.notifyrc", b"x", false);
+    assert!(install_local(&d, &root, &b.build()).is_err());
+    let ok = gates("1.0.0").file("share/knotifications6/telamon-gates.notifyrc", b"x", false);
+    install_local(&d, &root, &ok.build()).unwrap();
+    assert!(
+        d.data
+            .join("knotifications6/telamon-gates.notifyrc")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_local_bundle_is_installed_from_the_copy_that_was_looked_at() {
+    let (d, root) = dirs("local-copy");
+    let built = gates("0.1.0").build();
+    let f = write_archive(&root, &built);
+    let (m, sha, _, copy) = check::inspect_local(&f, &root.join("work")).unwrap();
+    assert_ne!(copy, f);
+    // The original is swapped; the copy is untouched and still what was shown.
+    fs::write(&f, b"something else").unwrap();
+    assert_eq!(archive::sha256_file(&copy).unwrap().0, sha);
+    let h = host();
+    install::install_bundle(
+        &d,
+        &copy,
+        &Options {
+            expect_id: Some(&m.id),
+            outer: None,
+            origin: Origin::local(),
+            host: &h,
+        },
+    )
+    .unwrap();
 }

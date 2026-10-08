@@ -28,6 +28,8 @@ TelamonPage {
     readonly property bool found: info.id !== undefined
     readonly property bool installed: info.installed === true
     readonly property bool idle: page.nativeApps.phase === "idle"
+    // Open and Uninstall need no network: a running check does not stop them.
+    readonly property bool free: page.idle || page.nativeApps.phase === "checking"
     readonly property bool mine: page.nativeApps.busyId === page.appId && !idle
     readonly property bool messageHere: page.nativeApps.busyId.length === 0 || page.nativeApps.busyId === page.appId
 
@@ -38,7 +40,7 @@ TelamonPage {
     property bool opening: false
 
     function openApp() {
-        if (page.opening || !page.idle) {
+        if (page.opening || !page.free) {
             return;
         }
         page.opening = true;
@@ -165,7 +167,7 @@ TelamonPage {
                     visible: page.installed && page.info.present !== false
                     text: qsTr("Open")
                     variant: page.info.state === "update" ? TelamonButton.Default : TelamonButton.Prominent
-                    enabled: page.idle && !page.opening
+                    enabled: page.free && !page.opening
                     onClicked: page.openApp()
                 }
                 TelamonButton {
@@ -179,7 +181,7 @@ TelamonPage {
                     visible: page.installed
                     text: qsTr("Uninstall")
                     variant: TelamonButton.Destructive
-                    enabled: page.idle
+                    enabled: page.free
                     onClicked: page.uninstallRequested(page.appId, page.info.name)
                 }
             }

@@ -81,13 +81,29 @@ pub struct Dirs {
     pub data: PathBuf,
     /// `$HOME`
     pub home: PathBuf,
+    /// The system's data folders (`XDG_DATA_DIRS`, Flatpak's exports): an app
+    /// whose menu entry or D-Bus name is already there is not installed, so a
+    /// bundle cannot replace an app that is not its own.
+    pub system: Vec<PathBuf>,
 }
 
 impl Dirs {
     pub fn from_env() -> Option<Dirs> {
+        let home = fsutil::home()?;
+        let mut system: Vec<PathBuf> = std::env::var("XDG_DATA_DIRS")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "/usr/local/share:/usr/share".into())
+            .split(':')
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .collect();
+        system.push("/var/lib/flatpak/exports/share".into());
+        system.push(home.join(".local/share/flatpak/exports/share"));
         Some(Dirs {
             data: fsutil::data_home()?,
-            home: fsutil::home()?,
+            home,
+            system,
         })
     }
 
@@ -502,15 +518,49 @@ fn install_from(
     let prefix = app_dir.join("current");
     let plan = desktop::plan(staging, &inner, &prefix)?;
 
-    // Copied files: not over anything that is not this app's own.
-    let was = |to: &str| {
+    // Not an app that is already on this computer under that ID.
+    for dir in &dirs.system {
+        if dir
+            .join("applications")
+            .join(format!("{id}.desktop"))
+            .exists()
+            || dir
+                .join("dbus-1/services")
+                .join(format!("{id}.service"))
+                .exists()
+        {
+            return Err(err(format!(
+                "An app with the ID {id} is already on this computer. The Store won't install over it."
+            )));
+        }
+    }
+
+    // Copied files: not over anything that is not this app's own, and not
+    // over one the user changed since the Store wrote it.
+    let recorded = |to: &str| {
         old.as_ref()
-            .is_some_and(|o| o.copied.iter().any(|c| c.to == to))
+            .and_then(|o| o.copied.iter().find(|c| c.to == to))
     };
     for e in &plan.exports {
         let target = dirs.data.join(&e.to);
         match fs::symlink_metadata(&target) {
-            Ok(md) if md.is_file() && was(&e.to) => {}
+            Ok(md) if md.is_file() => match recorded(&e.to) {
+                Some(c) => {
+                    let same = archive::sha256_file(&target).is_ok_and(|(h, _)| h == c.sha256);
+                    if !same {
+                        return Err(err(format!(
+                            "{} was changed since the Store wrote it. Put it back or remove it, then try again.",
+                            target.display()
+                        )));
+                    }
+                }
+                None => {
+                    return Err(err(format!(
+                        "{} is already there and the Store didn't put it there. Remove it first.",
+                        target.display()
+                    )));
+                }
+            },
             Ok(_) => {
                 return Err(err(format!(
                     "{} is already there and the Store didn't put it there. Remove it first.",

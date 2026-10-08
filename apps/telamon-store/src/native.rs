@@ -74,7 +74,7 @@ pub mod qobject {
         /// Downloads, checks and installs (or updates to) the release the
         /// last check found for `id`. The caller has asked the user.
         #[qinvokable]
-        fn install(self: Pin<&mut NativeApps>, id: &QString);
+        fn install(self: Pin<&mut NativeApps>, id: &QString, version: &QString);
 
         /// Removes an app the Store installed.
         #[qinvokable]
@@ -156,8 +156,11 @@ fn fetcher() -> Arc<dyn Fetcher> {
 /// What the confirmation for a local bundle is about.
 #[derive(Clone)]
 struct PendingLocal {
+    /// The private copy that was looked at (not the user's file).
     path: PathBuf,
     manifest: Manifest,
+    /// Its SHA-256 as shown in the confirmation.
+    sha256: String,
 }
 
 pub struct NativeAppsRust {
@@ -374,7 +377,7 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
         Job::Inspect(path) => {
             progress(-1, "Looking inside the bundle…");
             match check::inspect_local(&path, &work_dir(&cache)) {
-                Ok((m, sha, size)) => {
+                Ok((m, sha, size, copy)) => {
                     let installed = install::read_record(&dirs, &m.id);
                     let fits = m.compatible(&host).err().map(|e| e.0).unwrap_or_default();
                     out.detail = Some((
@@ -394,7 +397,11 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
                             "fromCatalog": installed.as_ref().is_some_and(|r| r.origin.kind == "release"),
                             "problem": fits,
                         }),
-                        PendingLocal { path, manifest: m },
+                        PendingLocal {
+                            path: copy,
+                            manifest: m,
+                            sha256: sha,
+                        },
                     ));
                 }
                 Err(e) => out.error = Some(e.0),
@@ -402,16 +409,25 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
         }
         Job::InstallLocal(p) => {
             progress(-1, &format!("Installing {}…", p.manifest.name));
-            let result = install::install_bundle(
-                &dirs,
-                &p.path,
-                &Options {
-                    expect_id: Some(&p.manifest.id),
-                    outer: None,
-                    origin: Origin::local(),
-                    host: &host,
-                },
-            );
+            let same = telamon_store_core::native::archive::sha256_file(&p.path)
+                .is_ok_and(|(h, _)| h == p.sha256);
+            let result = if !same {
+                Err(telamon_store_core::native::Error(
+                    "The file changed after it was looked at. Nothing was installed.".into(),
+                ))
+            } else {
+                install::install_bundle(
+                    &dirs,
+                    &p.path,
+                    &Options {
+                        expect_id: Some(&p.manifest.id),
+                        outer: None,
+                        origin: Origin::local(),
+                        host: &host,
+                    },
+                )
+            };
+            let _ = std::fs::remove_file(&p.path);
             match result {
                 Ok(done) => {
                     out.result = Some(format!("{} {} was installed.", done.name, done.version));
@@ -432,7 +448,9 @@ impl qobject::NativeApps {
     }
 
     fn submit(mut self: Pin<&mut Self>, job: Job, phase: &'static str, busy_id: &str) {
-        let foreground = !matches!(job, Job::Load);
+        // A load and an Open do not take the phase: neither changes what the
+        // others work on, and Open needs no network.
+        let foreground = !matches!(job, Job::Load | Job::Open(..));
         if foreground {
             if !self.idle() {
                 // A check does not make the user's request wait to be refused:
@@ -512,12 +530,13 @@ impl qobject::NativeApps {
             self.as_mut().set_busy_id(QString::default());
             self.as_mut().set_percent(-1);
             self.as_mut().set_status(QString::default());
-            if let Some(e) = &out.error {
-                self.as_mut().set_error_text(QString::from(e.as_str()));
-            }
             if let Some(r) = &out.result {
                 self.as_mut().set_result_text(QString::from(r.as_str()));
             }
+        }
+        // An error (Open's too, which ran beside whatever else was going on).
+        if let Some(e) = &out.error {
+            self.as_mut().set_error_text(QString::from(e.as_str()));
         }
         if let Some((detail, pending)) = out.detail {
             self.as_mut().rust_mut().pending = Some(pending);
@@ -541,13 +560,27 @@ impl qobject::NativeApps {
         self.submit(Job::Check { force }, "checking", "");
     }
 
-    pub fn install(mut self: Pin<&mut Self>, id: &QString) {
+    pub fn install(mut self: Pin<&mut Self>, id: &QString, version: &QString) {
         if !self.idle() {
+            self.as_mut().set_result_text(QString::default());
+            self.as_mut().set_error_text(QString::from(BUSY));
             return;
         }
         let id = id.to_string();
+        let version = version.to_string();
         let found = self.listed.iter().find(|l| l.id == id).cloned();
         match found {
+            // The version the user was shown is the one that installs.
+            Some(l)
+                if l.candidate
+                    .as_ref()
+                    .is_some_and(|c| c.manifest.version != version) =>
+            {
+                self.as_mut().set_result_text(QString::default());
+                self.as_mut().set_error_text(QString::from(
+                    "A different version came out while you were deciding. Look at it again.",
+                ));
+            }
             Some(l)
                 if l.candidate.is_some()
                     && matches!(l.status, Status::Available | Status::Update) =>
@@ -563,7 +596,12 @@ impl qobject::NativeApps {
         }
     }
 
-    pub fn uninstall(self: Pin<&mut Self>, id: &QString) {
+    pub fn uninstall(mut self: Pin<&mut Self>, id: &QString) {
+        if !self.idle() && !self.rust().checking {
+            self.as_mut().set_result_text(QString::default());
+            self.as_mut().set_error_text(QString::from(BUSY));
+            return;
+        }
         let id = id.to_string();
         self.submit(Job::Remove(id.clone()), "removing", &id);
     }
@@ -591,6 +629,8 @@ impl qobject::NativeApps {
 
     pub fn confirm_local(mut self: Pin<&mut Self>) {
         if !self.idle() {
+            self.as_mut().set_result_text(QString::default());
+            self.as_mut().set_error_text(QString::from(BUSY));
             return;
         }
         let Some(p) = self.as_mut().rust_mut().pending.take() else {
@@ -601,7 +641,9 @@ impl qobject::NativeApps {
     }
 
     pub fn cancel_local(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().pending = None;
+        if let Some(p) = self.as_mut().rust_mut().pending.take() {
+            let _ = std::fs::remove_file(&p.path);
+        }
         self.as_mut().set_detail_json(QString::from("{}"));
     }
 
@@ -649,6 +691,7 @@ mod tests {
         let dirs = Dirs {
             data: root.join("data"),
             home: root.join("home"),
+            system: Vec::new(),
         };
         std::fs::create_dir_all(&dirs.data).unwrap();
         let cache = Cache::new(root.join("cache"));

@@ -455,22 +455,69 @@ pub fn install_candidate(
     result
 }
 
-/// A local bundle: the inner manifest, read without installing, for the
-/// confirmation. The file is unpacked into a scratch folder under `work`,
-/// checked, and the folder removed.
-pub fn inspect_local(archive: &Path, work: &Path) -> Result<(Manifest, String, u64), Error> {
+/// A local bundle, looked at for the confirmation. The file is copied into
+/// `work` (a private folder; at most the archive cap is read) while it is
+/// hashed, and the copy is what is unpacked into a scratch folder, checked and
+/// removed. Returns the inner manifest, the copy's SHA-256 and size, and the
+/// copy's path: install from that, after checking it still has that SHA-256,
+/// so what is installed is what the user was shown even if the original file
+/// changes meanwhile. The caller removes the copy.
+pub fn inspect_local(
+    archive: &Path,
+    work: &Path,
+) -> Result<(Manifest, String, u64, std::path::PathBuf), Error> {
+    use std::io::Read;
     crate::appimage::fsutil::private_dir(work).map_err(|e| io_err("make a work folder", &e))?;
-    let (sha, size) =
-        super::archive::sha256_file(archive).map_err(|e| io_err("read the file", &e))?;
-    if size > manifest::MAX_ARCHIVE {
-        return Err(err(
-            "The file is larger than the Store accepts for a bundle.",
-        ));
+    let mut src =
+        crate::appimage::fsutil::open_regular(archive).map_err(|e| io_err("read the file", &e))?;
+    let copy = work.join(format!("local-{}.tar.zst", std::process::id()));
+    let _ = std::fs::remove_file(&copy);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&copy)
+        .map_err(|e| io_err("copy the file", &e))?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    let copied = (|| -> Result<(), Error> {
+        loop {
+            let n = src
+                .read(&mut buf)
+                .map_err(|e| io_err("read the file", &e))?;
+            if n == 0 {
+                return Ok(());
+            }
+            size += n as u64;
+            if size > manifest::MAX_ARCHIVE {
+                return Err(err(
+                    "The file is larger than the Store accepts for a bundle.",
+                ));
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n])
+                .map_err(|e| io_err("copy the file", &e))?;
+        }
+    })();
+    drop(out);
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&copy);
+        return Err(e);
     }
+    let sha = hex(&hasher.finalize());
     let dir = work.join(format!("inspect-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir(&dir).map_err(|e| io_err("make a work folder", &e))?;
-    let result = super::archive::unpack(archive, &dir, None);
+    let result = std::fs::create_dir(&dir)
+        .map_err(|e| io_err("make a work folder", &e))
+        .and_then(|()| super::archive::unpack(&copy, &dir, None));
     let _ = std::fs::remove_dir_all(&dir);
-    result.map(|m| (m, sha, size))
+    match result {
+        Ok(m) => Ok((m, sha, size, copy)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&copy);
+            Err(e)
+        }
+    }
 }

@@ -491,13 +491,16 @@ icons/hicolor/<size>/apps/..    metainfo/..  dbus-1/services/..  knotifications6
 What is copied out of a bundle, and under which names, is fixed in
 `desktop.rs`: a bundle can only ever write files that carry its own app ID
 (`<id>.desktop`, `<id>*.png|svg` icons, `<id>.metainfo.xml`, D-Bus services
-named `<id>` or `<id>.*`, `telamon-*.notifyrc`), because the user's folders
+named `<id>` or `<id>.*`, `telamon-<last part of the ID>.notifyrc`), because the user's folders
 come before `/usr` in every search path and a bundle must not shadow anything
 else. The first word of every `Exec` must be a plain program name that is in
 the bundle's `bin/`; it becomes the absolute path under `current/bin/` (quoted
 by the Desktop Entry rules), `TryExec` and `Path` are dropped, and the Store
 adds `X-Telamon-Native-App` and `-Version`. Nothing is copied over a file that
-the Store did not itself put there, or through a link. The app finds its own
+the Store did not itself put there (or that the user changed since: an update
+stops and says so), or through a link, and an ID that already has a menu entry
+or D-Bus service in the system's folders (`XDG_DATA_DIRS`, Flatpak's exports)
+is refused, as is an ID with fewer than three parts (`org.kde`). The app finds its own
 data relative to its program (`../share/<id>`, the framework's convention);
 the Store sets no environment. The program runs through the `current` link, so
 an update needs no change to the menu entry.

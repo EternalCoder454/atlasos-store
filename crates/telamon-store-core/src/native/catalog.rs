@@ -148,18 +148,18 @@ mod tests {
     #[test]
     fn entries_for_strangers_are_skipped_not_used() {
         let text = r#"{"schema":1,"apps":[
-          {"id":"a.b","repo":"EvilCorp/a","channel":"releases"},
-          {"id":"a.c","repo":"EternalCoder454/a/../../b","channel":"releases"},
-          {"id":"a.d","repo":"EternalCoder454/a","channel":"nightly"},
+          {"id":"a.x.b","repo":"EvilCorp/a","channel":"releases"},
+          {"id":"a.x.c","repo":"EternalCoder454/a/../../b","channel":"releases"},
+          {"id":"a.x.d","repo":"EternalCoder454/a","channel":"nightly"},
           {"id":"bad","repo":"EternalCoder454/a","channel":"releases"},
-          {"id":"a.e","repo":"eternalcoder454/ok.app","channel":"releases"},
-          {"id":"a.e","repo":"EternalCoder454/again","channel":"releases"},
-          {"id":"a.f","repo":"EternalCoder454/x.git","channel":"releases"},
-          {"id":"a.g","repo":"EternalCoder454/..","channel":"releases"},
+          {"id":"a.x.e","repo":"eternalcoder454/ok.app","channel":"releases"},
+          {"id":"a.x.e","repo":"EternalCoder454/again","channel":"releases"},
+          {"id":"a.x.f","repo":"EternalCoder454/x.git","channel":"releases"},
+          {"id":"a.x.g","repo":"EternalCoder454/..","channel":"releases"},
           {"repo":"EternalCoder454/y"}]}"#;
         let c = Catalog::parse(text.as_bytes()).unwrap();
         assert_eq!(c.apps.len(), 1, "{c:?}");
-        assert_eq!(c.apps[0].id, "a.e");
+        assert_eq!(c.apps[0].id, "a.x.e");
         assert_eq!(c.skipped.len(), 8);
     }
 
@@ -174,7 +174,7 @@ mod tests {
     fn at_most_so_many_entries() {
         let entries: Vec<String> = (0..300)
             .map(|i| {
-                format!(r#"{{"id":"a.app{i}","repo":"EternalCoder454/r{i}","channel":"releases"}}"#)
+                format!(r#"{{"id":"a.x.app{i}","repo":"EternalCoder454/r{i}","channel":"releases"}}"#)
             })
             .collect();
         let text = format!(r#"{{"schema":1,"apps":[{}]}}"#, entries.join(","));

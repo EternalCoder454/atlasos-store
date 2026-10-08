@@ -13,7 +13,7 @@
 //! | `share/icons/hicolor/<size>/apps/<icon>` | `icons/hicolor/<size>/apps/` | `.png`/`.svg` named `<id>` or `<id>-...`/`<id>_...` |
 //! | `share/metainfo/<id>.metainfo.xml` | `metainfo/` | `<id>.metainfo.xml` or `<id>.appdata.xml` |
 //! | `share/dbus-1/services/<name>.service` | `dbus-1/services/` | `<name>` is `<id>` or `<id>.<more>` |
-//! | `share/knotifications6/telamon-*.notifyrc` | `knotifications6/` | `telamon-<name>.notifyrc` |
+//! | `share/knotifications6/telamon-<last part of id>[-_...].notifyrc` | `knotifications6/` | `telamon-` and the last part of the ID, as the framework names it |
 //!
 //! The names are the rule that keeps a bundle from replacing something that
 //! is not its own (the user's folder comes before `/usr` in every search
@@ -36,6 +36,8 @@ use crate::keyfile::{KeyFile, Limits};
 const MAX_EXPORT: usize = 1024 * 1024;
 /// Most icons copied.
 const MAX_ICONS: usize = 64;
+/// Most files copied in all (the record holds 256).
+const MAX_EXPORTS: usize = 200;
 /// The marker the Store writes into the desktop entry and the D-Bus service.
 pub const MARKER: &str = "X-Telamon-Native-App";
 pub const MARKER_VERSION: &str = "X-Telamon-Native-Version";
@@ -261,6 +263,22 @@ pub fn rewrite_dbus(
     Ok((text.into_bytes(), name.to_string()))
 }
 
+/// `telamon-<last part of the ID>.notifyrc`, optionally with a `-` or `_`
+/// suffix before the extension: the name the framework gives an app's
+/// notification events, so one app cannot take another's.
+fn notifyrc_name_ok(file: &str, id: &str) -> bool {
+    let Some(stem) = file.strip_suffix(".notifyrc") else {
+        return false;
+    };
+    let last = id.rsplit('.').next().unwrap_or("");
+    let base = format!("telamon-{last}");
+    bare_name_ok(stem)
+        && (stem == base
+            || stem
+                .strip_prefix(&base)
+                .is_some_and(|r| r.starts_with('-') || r.starts_with('_')))
+}
+
 fn icon_name_ok(file: &str, id: &str) -> bool {
     let Some((stem, ext)) = file.rsplit_once('.') else {
         return false;
@@ -390,12 +408,9 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
                 ));
             }
             ["knotifications6", file] => {
-                let ok = file
-                    .strip_suffix(".notifyrc")
-                    .is_some_and(|s| s.starts_with("telamon-") && bare_name_ok(s));
-                if !ok || is_link {
+                if !notifyrc_name_ok(file, id) || is_link {
                     return Err(err(
-                        "The bundle's share/knotifications6 may hold only telamon-<name>.notifyrc files.",
+                        "The bundle's share/knotifications6 may hold only telamon-<app name>.notifyrc files named after the app.",
                     ));
                 }
                 exports.push(Export {
@@ -406,6 +421,9 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
             }
             _ => {}
         }
+    }
+    if exports.len() > MAX_EXPORTS {
+        return Err(err("The bundle shows the desktop too many files."));
     }
     if !desktop {
         return Err(err(
@@ -568,6 +586,22 @@ mod tests {
             p.contains("real") && p.contains("alias") && !p.contains("other"),
             "{p:?}"
         );
+    }
+
+    #[test]
+    fn notification_files_are_named_after_the_app() {
+        assert!(notifyrc_name_ok("telamon-gates.notifyrc", ID));
+        assert!(notifyrc_name_ok("telamon-gates-extra.notifyrc", ID));
+        for bad in [
+            "telamon-store.notifyrc",
+            "telamon-updater.notifyrc",
+            "telamon-gatesx.notifyrc",
+            "plasma.notifyrc",
+            "telamon-gates.txt",
+            "telamon-.notifyrc",
+        ] {
+            assert!(!notifyrc_name_ok(bad, ID), "{bad}");
+        }
     }
 
     #[test]

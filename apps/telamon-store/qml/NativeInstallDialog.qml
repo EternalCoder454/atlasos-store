@@ -66,7 +66,7 @@ ConfirmDialog {
         if (dlg.local) {
             dlg.nativeApps.confirmLocal();
         } else {
-            dlg.nativeApps.install(dlg.app.id);
+            dlg.nativeApps.install(dlg.app.id, dlg.app.availableVersion);
         }
     }
     // Closed any other way: a file that was looked at is dropped.

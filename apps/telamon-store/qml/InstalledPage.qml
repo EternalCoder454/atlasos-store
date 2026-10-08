@@ -33,7 +33,7 @@ TelamonPage {
     readonly property var appImageList: JSON.parse(page.appImages.installedJson)
     readonly property bool appImagesIdle: page.appImages.phase === "idle"
     readonly property var nativeList: telamonApps.all.filter(a => a.installed === true)
-    readonly property bool nativeIdle: page.nativeApps.phase === "idle"
+    readonly property bool nativeIdle: page.nativeApps.phase === "idle" || page.nativeApps.phase === "checking"
 
     NativeAppsList {
         id: telamonApps
