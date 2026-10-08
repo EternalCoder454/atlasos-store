@@ -1,0 +1,4 @@
+[Flatpak Repo]
+Title=Filtered
+Url=https://dl.example.org/filtered/repo/
+Filter=/etc/passwd

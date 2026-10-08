@@ -80,11 +80,14 @@ qt_add_qml_module(telamon-store-app
         cpp/activation_token.cpp
     QML_FILES
         qml/Main.qml
+        qml/AddSourceDialog.qml
         qml/AppPage.qml
         qml/InstallDialog.qml
         qml/InstalledPage.qml
         qml/JobStatus.qml
         qml/RemoveDialog.qml
+        qml/RemoveSourceDialog.qml
+        qml/SourceRow.qml
         qml/UnusedDialog.qml
         qml/AppGrid.qml
         qml/AppShelf.qml
@@ -95,6 +98,7 @@ qt_add_qml_module(telamon-store-app
         qml/HomePage.qml
         qml/SearchPage.qml
         qml/SourcesPage.qml
+        qml/SourcesStatus.qml
         qml/UpdatesPage.qml
         qml/PlaceholderPage.qml
 )
