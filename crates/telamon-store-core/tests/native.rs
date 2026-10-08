@@ -1155,6 +1155,18 @@ fn real_bundles_from_the_framework_tool_install() {
         let desktop =
             fs::read_to_string(d.data.join(format!("applications/{}.desktop", m.id))).unwrap();
         assert!(desktop.contains("/current/bin/"), "{desktop}");
+        // A launcher the desktop's own validator accepts, if it is installed.
+        if let Ok(out) = std::process::Command::new("desktop-file-validate")
+            .arg(d.data.join(format!("applications/{}.desktop", m.id)))
+            .output()
+        {
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         eprintln!("installed {} {}", done.name, done.version);
         assert!(install::uninstall(&d, &m.id).unwrap().left.is_empty());
         assert!(
