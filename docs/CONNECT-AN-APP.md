@@ -25,13 +25,13 @@ jobs:
   bundle:
     permissions:
       contents: write   # attaches the bundle to the release
-    uses: EternalCoder454/atlas-framework/.github/workflows/bundle.yml@FRAMEWORK_SHA # v2.0.3
+    uses: EternalCoder454/atlas-framework/.github/workflows/bundle.yml@FRAMEWORK_SHA # v2.0.4
     with:
-      framework-ref: FRAMEWORK_SHA # v2.0.3
+      framework-ref: FRAMEWORK_SHA # v2.0.4
 ```
 
 `FRAMEWORK_SHA` is the 40-character commit of the framework release:
-`gh api repos/EternalCoder454/atlas-framework/commits/v2.0.3 --jq .sha`. Pin by
+`gh api repos/EternalCoder454/atlas-framework/commits/v2.0.4 --jq .sha`. Pin by
 commit, as the other workflows do.
 
 The app needs a spec (`packaging/<app>.spec`) whose `BuildRequires` build it (the
