@@ -17,6 +17,12 @@ TelamonWindow {
     required property var browseModel
     // The Flatpak jobs and the installed list (src/jobs.rs).
     required property var jobs
+    // The Flatpak sources (src/sources.rs), the app updates through Telamon
+    // Updater's engine (src/updates.rs) and Flathub's curated lists for Home
+    // and the categories (src/featured.rs).
+    required property var sources
+    required property var updates
+    required property var featured
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -190,6 +196,12 @@ TelamonWindow {
                 root.openRemove(value);
                 return;
             }
+            if (kind === "repo") {
+                // A .flatpakrepo: the Sources place, with Add Source reading it.
+                root.openPlace("sources");
+                addSourceDialog.showFile(value);
+                return;
+            }
             root.showMessage({
                 title: qsTr("Not Yet Available"),
                 heading: root.requestHeadings[kind] ?? kind,
@@ -233,12 +245,38 @@ TelamonWindow {
         }
     }
 
+    // A source was added, removed, turned on or off: the catalog and the
+    // installed list are read again.
+    Connections {
+        target: root.sources
+        function onChanged() {
+            root.catalog.reload();
+            root.jobs.refresh();
+        }
+    }
+
     // Icons of installed apps come from the catalog: read the list again
     // when a new library arrives.
     Connections {
         target: root.catalog
         function onRevisionChanged() {
             root.jobs.refresh();
+            root.updates.libraryChanged();
+        }
+    }
+
+    // The installed list shows versions: read it again after an update
+    // installed something. A check that found updates refreshed the sources'
+    // catalogs: read them again, for the release notes of the new versions.
+    Connections {
+        target: root.updates
+        function onRevisionChanged() {
+            root.jobs.refresh();
+        }
+        function onListed(count) {
+            if (count > 0) {
+                root.catalog.reload();
+            }
         }
     }
 
@@ -253,6 +291,14 @@ TelamonWindow {
     UnusedDialog {
         id: unusedDialog
         jobs: root.jobs
+    }
+    AddSourceDialog {
+        id: addSourceDialog
+        sources: root.sources
+    }
+    RemoveSourceDialog {
+        id: removeSourceDialog
+        sources: root.sources
     }
 
     RowLayout {
@@ -340,6 +386,10 @@ TelamonWindow {
                             return homePage;
                         case "installed":
                             return installedPage;
+                        case "updates":
+                            return updatesPage;
+                        case "sources":
+                            return sourcesPage;
                         case "about":
                             return aboutPage;
                         default:
@@ -356,9 +406,11 @@ TelamonWindow {
         HomePage {
             backend: root.backend
             catalog: root.catalog
+            featured: root.featured
             categories: root.categories
             onSearchRequested: text => root.openSearch(text)
             onCategoryRequested: index => root.openCategory(index)
+            onAppRequested: id => root.openApp(id)
             onOpenSources: root.openPlace("sources")
         }
     }
@@ -375,6 +427,7 @@ TelamonWindow {
         id: categoryPage
         CategoryPage {
             catalog: root.catalog
+            featured: root.featured
             model: root.browseModel
             onAppRequested: id => root.openApp(id)
             onOpenSources: root.openPlace("sources")
@@ -394,6 +447,23 @@ TelamonWindow {
             jobs: root.jobs
             onAppRequested: id => root.openApp(id)
             onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
+        }
+    }
+    Component {
+        id: updatesPage
+        UpdatesPage {
+            updates: root.updates
+            jobs: root.jobs
+            onAppRequested: id => root.openApp(id)
+        }
+    }
+    Component {
+        id: sourcesPage
+        SourcesPage {
+            sources: root.sources
+            jobs: root.jobs
+            onAddRequested: addSourceDialog.show()
+            onRemoveRequested: (scope, name) => root.sources.checkRemove(scope, name)
         }
     }
     Component {

@@ -74,6 +74,7 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
 | Tests | `scripts/dev.sh cargo test --workspace --locked` |
 | App build | `scripts/dev.sh bash -c 'cmake -S apps/telamon-store -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
 | Smoke run | `scripts/dev.sh dbus-run-session -- env QT_QPA_PLATFORM=offscreen /work/cmake/dev/telamon-store` |
+| Search smoke | `STORE_OFFLINE=1`-style offline container run: `scripts/dev.sh scripts/smoke-search.sh /work/cmake/dev/telamon-store` (types a whole word into Home's search with xdotool; fails if the field keeps only the first letter) |
 | RPM | `podman run --rm --security-opt label=disable -v "$PWD":/src -v <framework rpms>:/telamon-rpms:ro -e TELAMON_LOCAL_RPMS=/telamon-rpms -v telamon-store-cargo:/root/.cargo/registry -v telamon-store-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
 | Telamon checks | `git -C ~/Documents/Atlas\ Framework archive v2.0.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/telamon-store` and `<dir>/tools/check-app-names.sh apps/telamon-store` |
 

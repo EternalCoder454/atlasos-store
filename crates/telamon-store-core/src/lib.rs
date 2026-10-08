@@ -4,10 +4,12 @@
 
 pub mod appstream;
 pub mod catalog;
+pub mod flathub;
 pub mod flatpak;
 pub mod flatpakref;
 pub mod keyfile;
 pub mod launch;
 pub mod legacy;
+pub mod net;
 pub mod permissions;
 pub mod text;

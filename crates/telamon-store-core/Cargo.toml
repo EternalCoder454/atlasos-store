@@ -15,6 +15,9 @@ libc.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 libflatpak.workspace = true
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [features]
 # The hooks the integration tests use to force a branch that is otherwise a

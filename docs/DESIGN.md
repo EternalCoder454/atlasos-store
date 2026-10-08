@@ -13,8 +13,8 @@ Discover's only backends there are Flatpak and fwupd.
 | Discover today | Who covers it |
 |---|---|
 | Browse, search, app pages (all enabled remotes, Flathub first) | Store |
-| Install, remove, update Flatpaks, system and user, with add-ons | Store |
-| Sources: remotes, enable, priority, add from `.flatpakrepo` | Store |
+| Install, remove, update Flatpaks, system and user, with add-ons | Store (updates run Telamon Updater's engine, see "App updates") |
+| Sources: remotes, enable, add from `.flatpakrepo` (file or link), remove (priority is not editable) | Store |
 | `application/vnd.flatpak.ref`, `.repo`, `vnd.flatpak` bundles | Store |
 | `application/x-rpm` | Store explains that RPMs aren't installed on Telamon OS and points to toolbox |
 | `appstream:` and `flatpak+https:` links (Kicker, KRunner) | Store |
@@ -23,8 +23,9 @@ Discover's only backends there are Flatpak and fwupd.
 | Launcher and menu entries, `mimeapps.list`, removing Discover | The Telamon OS image |
 
 No ratings or reviews (no ODRS). The only extra network service is the Flathub
-API (`flathub.org/api/v2`) for the home page's Popular and Trending, while the
-Store is open, cached 24 h.
+API (`flathub.org/api/v2`) for the lists on Home and the category pages (see
+"Home and category lists"), while the Store is open. A `.flatpakrepo` link the
+user pastes into Add Source is the only other thing the Store fetches itself.
 
 ## Layout
 
@@ -42,6 +43,65 @@ image decoding run on worker threads and hand results back with
 lock (`$XDG_RUNTIME_DIR/telamon-updater-apps.lock`, flock; also `atlas-updater-apps.lock`, see
 "Names before the rename") blocking, on its
 worker, and the Store shows "Another update is running" while it waits.
+
+## Sources
+
+`flatpak/remotes.rs` (core) and `src/sources.rs` (one worker, one job at a time;
+jobs that change something take the `OperationLock`). The list shows both
+installations (reads open with no interaction; an unreadable system
+installation does not hide the user one). A source file comes from
+`fetch_repo` (`net::get`: https, public addresses, 256 KiB, 15 s) or
+`read_repo_file` (the launch path rules, a regular file of at most 256 KiB),
+then `parse_flatpakrepo`. `preview_repo` builds the "Add Source" confirmation
+before anything is added: title, address, key fingerprint or "not signed", the
+free name for each installation, and whether the address is already a source.
+`confirmAdd` adds exactly the previewed file's own rewrite (`add_source`); a
+file without a key is added with signature checking off, only after the
+dialog's extra acknowledgement. It then refreshes the new source's app list; a
+failed refresh keeps the source. `remove_source` refuses, naming them, while any
+app or runtime from that remote is installed; it never forces and needs the URL
+the user saw. Enabling or disabling only flips the remote's disabled flag.
+System changes go through flatpak's polkit helper. After any change the window
+reloads the catalog and the installed list.
+
+## App updates
+
+The Updates place drives Telamon Updater's engine (`telamon-updater-core`,
+pinned to the revision Telamon Settings uses; `apps` and `apphistory`) from
+one worker thread, so the Store, the tray and Settings share the logic, the
+history file and the lock. It holds the Store's `OperationLock`, which includes
+the Updater's apps lock, and never calls the engine's own `lock::take`. A check
+is `apps::list(refresh)` then `apps::check`; an update is the `apps::unseen`
+guard, `apps::update`, `apphistory::record`, then a fresh list. Updates that
+ask for new permissions show them on their row and are never installed
+unseen: when any waiting update asks for new permissions, Update All first asks
+in the Store's own dialog (every such app with its full list, Cancel the
+default, input ignored for 0.5 s), which also offers "Update Without These"
+(the engine's `hold_new_permissions`). A check starts only when the page is opened with no list this session
+or one older than 10 minutes, or when the user asks. The engine updates all
+or nothing, so there is no per-app Update, and Cancel works only while waiting
+for the lock (a ref filter and a cancel token in `telamon-framework-flatpak`
+and `apps::update` would add both). "Last checked" is the later of the Store's
+own record (`$XDG_STATE_HOME/telamon-store/updates-checked`) and the Updater's
+`RoundAt`. The settings (background updates on or off) stay in Telamon
+Settings; quitting waits up to 10 s for a running update; "Update Settings" starts `/usr/bin/telamon-settings updates apps`.
+
+## Home and category lists
+
+Home shows Popular Apps, New & Updated and Editor's Picks; a category page
+shows "Popular in <Category>" (hidden while a filter is on) above its grid.
+They come from `collection/popular`, `collection/recently-updated`,
+`app-picks/apps-of-the-week/<UTC date>` and `collection/category/<name>` of
+the Flathub API. A request carries nothing but the list's path and a page
+size. Each answer is capped at 1 MiB and parsed into app IDs only; IDs are
+validated, deduplicated, capped at 64 and matched against the local AppStream
+library, and the Store shows the local name, summary, developer and icon,
+never API text. Each list is cached as
+`$XDG_CACHE_HOME/telamon-store/flathub/<list>.json` with its fetch time (a 0700
+folder, written atomically, never through a link, re-validated on read). A
+list is refreshed when older than 24 h (recently-updated: 6 h) and only while
+Home or a category page is shown; a failed fetch is not retried for 10
+minutes; an expired file is still shown, so the lists work offline.
 
 ## Single instance
 

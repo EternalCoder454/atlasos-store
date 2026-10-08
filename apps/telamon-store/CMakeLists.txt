@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(telamon-store VERSION 0.2.0 LANGUAGES CXX)
+project(telamon-store VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,19 +80,27 @@ qt_add_qml_module(telamon-store-app
         cpp/activation_token.cpp
     QML_FILES
         qml/Main.qml
+        qml/AddSourceDialog.qml
         qml/AppPage.qml
         qml/InstallDialog.qml
         qml/InstalledPage.qml
         qml/JobStatus.qml
         qml/RemoveDialog.qml
+        qml/RemoveSourceDialog.qml
+        qml/SourceRow.qml
         qml/UnusedDialog.qml
         qml/AppGrid.qml
+        qml/AppShelf.qml
         qml/AppTile.qml
         qml/CatalogState.qml
         qml/CategoryPage.qml
         qml/CategoryTile.qml
         qml/HomePage.qml
         qml/SearchPage.qml
+        qml/SourcesPage.qml
+        qml/SourcesStatus.qml
+        qml/UpdatesPage.qml
+        qml/UpdateReviewDialog.qml
         qml/PlaceholderPage.qml
 )
 

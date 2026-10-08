@@ -176,7 +176,7 @@ fn set_library(library: Arc<Library>) {
 
 /// `$XDG_CACHE_HOME/telamon-store`, else `~/.cache/telamon-store`. The core
 /// creates it (0700) and checks it when it writes an index.
-fn cache_dir() -> Option<PathBuf> {
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     let absolute = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)

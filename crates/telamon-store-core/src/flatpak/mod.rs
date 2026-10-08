@@ -24,6 +24,7 @@
 mod installed;
 pub mod lock;
 mod remote;
+pub mod remotes;
 pub mod running;
 pub mod sources;
 mod supervise;
@@ -44,6 +45,11 @@ pub use installed::{
 };
 pub use lock::{LockError, LockName, OperationLock};
 pub use remote::{RemoteRefInfo, remote_ref_info};
+pub use remotes::{
+    AddOutcome, Placement, RemoteInfo, RemotesError, RemotesOutcome, SourcePreview, SourceUse,
+    add_source, blocked_message, fetch_repo, group_fingerprint, list_remotes, preview_repo,
+    read_repo_file, remove_source, set_enabled, source_users, suggest_name,
+};
 pub use running::{close_app, launch_app, valid_activation_token};
 pub use sources::{
     RefResolution, RefSource, RemoteProposal, SweepOutcome, add_ref_remote, add_remote,

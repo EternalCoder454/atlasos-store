@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-store
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Telamon Store, the app store of Telamon OS
 License:        MIT
@@ -135,6 +135,17 @@ appstream-util validate-relax --nonet \
 %config(noreplace) %{_sysconfdir}/dnf/protected.d/telamon-store.conf
 
 %changelog
+* Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.0-1
+- Sources: list the Flatpak sources of both installations, turn them on and off, add one from a link or a
+  .flatpakrepo file (the title, address and key are shown before anything is added), and remove one (refused,
+  naming the apps, while apps from it are installed).
+- Updates: the app updates through Telamon Updater's engine (its lock, history and "asks for new permissions"
+  check), Update All, progress, plain-word errors and "Last checked"; the settings stay in Telamon Settings.
+- Home: Popular Apps, New & Updated and Editor's Picks from Flathub's API, and Popular in <Category> on each
+  category page; cached, shown offline, matched against the local catalog before they are shown.
+- Category pages: the two filters are now labelled chips (Verified, Free Software), not unlabelled switches.
+- A source without a key is added without signature checking only after an extra confirmation.
+
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.0-1
 - Renamed to Telamon Store (telamon-store, net.eterneon.telamon.store), on telamon-ui 2.0.0. Obsoletes and
   provides atlas-store. For this release /usr/bin/atlas-store, a hidden net.eterneon.atlas.store.desktop and

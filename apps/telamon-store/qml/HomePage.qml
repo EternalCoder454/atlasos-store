@@ -3,13 +3,17 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import Telamon.Ui
 
-// Home: a search field and the categories. Popular, new and updated apps come
-// with the Flathub API item. Typing in the field opens the search page.
+// Home: a search field, Flathub's curated shelves (Popular Apps, New & Updated,
+// Editor's Picks) and the categories. A shelf is shown only when it has apps
+// the local catalog has; with no network and no cache Home is the search
+// field and the categories. Typing in the field opens the search page.
 TelamonPage {
     id: page
 
     required property var backend
     required property var catalog
+    // Flathub's curated lists (src/featured.rs).
+    required property var featured
     // [{ text, symbol }] in the order of Catalog.categoryKey.
     required property var categories
 
@@ -17,7 +21,35 @@ TelamonPage {
 
     signal searchRequested(string text)
     signal categoryRequested(int index)
+    signal appRequested(string appId)
     signal openSources
+
+    // A shelf's apps from the JSON src/featured.rs publishes.
+    function appsOf(json) {
+        try {
+            const apps = JSON.parse(json);
+            return Array.isArray(apps) ? apps : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    // Shows the cached lists and lets the worker refresh the expired ones.
+    // Nothing is asked for when there is no catalog to match against.
+    function ask() {
+        if (page.catalog.ready && page.catalog.appCount > 0) {
+            page.featured.ensureHome();
+        }
+    }
+
+    Component.onCompleted: page.ask()
+
+    Connections {
+        target: page.catalog
+        function onRevisionChanged() {
+            page.ask();
+        }
+    }
 
     TelamonTextField {
         id: field
@@ -58,6 +90,27 @@ TelamonPage {
         Layout.preferredHeight: implicitHeight
         catalog: page.catalog
         onOpenSources: page.openSources()
+    }
+
+    AppShelf {
+        Layout.fillWidth: true
+        title: qsTr("Popular Apps")
+        apps: page.catalog.ready ? page.appsOf(page.featured.popularJson) : []
+        onAppRequested: appId => page.appRequested(appId)
+    }
+
+    AppShelf {
+        Layout.fillWidth: true
+        title: qsTr("New & Updated")
+        apps: page.catalog.ready ? page.appsOf(page.featured.newJson) : []
+        onAppRequested: appId => page.appRequested(appId)
+    }
+
+    AppShelf {
+        Layout.fillWidth: true
+        title: qsTr("Editor's Picks")
+        apps: page.catalog.ready ? page.appsOf(page.featured.picksJson) : []
+        onAppRequested: appId => page.appRequested(appId)
     }
 
     Text {

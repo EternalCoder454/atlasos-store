@@ -7,8 +7,12 @@ unmaintained = "workspace"
 yanked = "deny"
 ignore = []
 
-# Crates come from crates.io and atlas-framework's repository only.
+# Crates come from crates.io, atlas-framework's repository and Telamon
+# Updater's (telamon-updater-core) only.
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/EternalCoder454/atlas-framework"]
+allow-git = [
+    "https://github.com/EternalCoder454/atlas-framework",
+    "https://github.com/EternalCoder454/atlasos-updater",
+]
