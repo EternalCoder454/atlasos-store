@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(telamon-store VERSION 0.3.1 LANGUAGES CXX)
+project(telamon-store VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,8 +26,16 @@ set(WORKSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 # Rust library (CXX-Qt QObjects, atlas-framework, telamon-store-core).
 # cxx-qt-build finds Qt via $QMAKE.
 find_program(QMAKE6 NAMES qmake6 qmake REQUIRED)
+# TELAMON_STORE_FAKE_GITHUB=ON builds the screenshot variant: GitHub requests
+# for the Telamon apps are answered from a folder of recorded answers. Never
+# for a package (the spec does not set it).
+option(TELAMON_STORE_FAKE_GITHUB "Answer GitHub requests from recorded files (screenshots only)" OFF)
+set(STORE_CRATE_FEATURES "")
+if(TELAMON_STORE_FAKE_GITHUB)
+    set(STORE_CRATE_FEATURES FEATURES fake-github)
+endif()
 corrosion_import_crate(MANIFEST_PATH ${WORKSPACE_DIR}/Cargo.toml
-    CRATES telamon-store LOCKED)
+    CRATES telamon-store LOCKED ${STORE_CRATE_FEATURES})
 corrosion_set_env_vars(telamon_store QMAKE=${QMAKE6})
 
 # The framework's C header (telamon/app.h) comes with the crate's sources,
@@ -87,6 +95,11 @@ qt_add_qml_module(telamon-store-app
         qml/InstallDialog.qml
         qml/InstalledPage.qml
         qml/JobStatus.qml
+        qml/NativeAppPage.qml
+        qml/NativeAppsList.qml
+        qml/NativeAppsPage.qml
+        qml/NativeInstallDialog.qml
+        qml/NativeRemoveDialog.qml
         qml/RemoveDialog.qml
         qml/RemoveSourceDialog.qml
         qml/SourceRow.qml

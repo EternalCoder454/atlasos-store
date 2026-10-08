@@ -22,7 +22,7 @@ pub mod qobject {
         fn activate(self: Pin<&mut Backend>, args: &QStringList, cwd: &QString);
 
         /// One request: `kind` is `page`, `app`, `search`, `remove`, `ref`,
-        /// `repo`, `bundle`, `rpm`, `appimage` or `refUrl`; `value` the page name, ID,
+        /// `repo`, `bundle`, `rpm`, `appimage`, `nativeBundle` or `refUrl`; `value` the page name, ID,
         /// text, path or URL.
         #[qsignal]
         fn requested(self: Pin<&mut Backend>, kind: QString, value: QString);
@@ -103,6 +103,7 @@ fn describe(request: &Request) -> (&'static str, String) {
                 FileKind::Bundle => "bundle",
                 FileKind::Rpm => "rpm",
                 FileKind::AppImage => "appimage",
+                FileKind::NativeBundle => "nativeBundle",
             },
             path.to_string_lossy().into_owned(),
         ),

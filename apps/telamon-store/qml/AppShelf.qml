@@ -28,6 +28,7 @@ TelamonShelf {
             developer: tile.modelData.developer
             iconSource: tile.modelData.iconSource
             verified: tile.modelData.verified === true
+            letter: tile.modelData.letter === true
             onClicked: shelf.appRequested(tile.modelData.appId)
         }
     }

@@ -19,20 +19,25 @@ Discover's only backends there are Flatpak and fwupd.
 | `application/x-rpm` | Store explains that RPMs aren't installed on Telamon OS and points to toolbox |
 | `appstream:` and `flatpak+https:` links (Kicker, KRunner) | Store |
 | AppImages (not in Discover): noticed in Downloads, looked into without running, installed for the user after a plain warning | Store (see "AppImages") |
+| Telamon's own apps that are not in the image (Telamon Gates is the first): installed for the user from a GitHub release, updated by the Store | Store (see "Native Telamon apps") |
 | Background update checks, automatic updates, notifications | Telamon Updater (unchanged) |
 | Firmware (fwupd) | Telamon Updater |
 | Launcher and menu entries, `mimeapps.list`, removing Discover | The Telamon OS image |
 
-No ratings or reviews (no ODRS). The only extra network service is the Flathub
+No ratings or reviews (no ODRS). The extra network services are the Flathub
 API (`flathub.org/api/v2`) for the lists on Home and the category pages (see
-"Home and category lists"), while the Store is open. A `.flatpakrepo` link the
-user pastes into Add Source is the only other thing the Store fetches itself.
+"Home and category lists"), and GitHub for the Telamon apps (see "Native
+Telamon apps": the catalog from `raw.githubusercontent.com`, the latest
+release from `api.github.com`, its files from `github.com`), while the Store
+is open. A `.flatpakrepo` link the user pastes into Add Source is the only
+other thing the Store fetches itself.
 
 ## Layout
 
 - `crates/telamon-store-core`: no Qt. Launch arguments, AppStream parsing and
   the on-disk index, search, flatpakref and flatpakrepo parsing, AppStream
-  markup to blocks, the image fetcher and cache, the Flatpak job queue.
+  markup to blocks, the image fetcher and cache, the Flatpak job queue, the
+  AppImage install code and the native Telamon apps (`native/`).
 - `apps/telamon-store`: the CXX-Qt backend (`src/backend.rs`), `cpp/main.cpp`
   (Qt start, single instance) and `qml/`.
 
@@ -119,6 +124,10 @@ QML:
 - `--appimage-install <file>`: the install confirmation for an AppImage (the
   notification's Install and Show in Store buttons; the file's name does not
   matter, its bytes are checked)
+- `--install-bundle <file>.tar.zst`: the install confirmation for a native
+  Telamon app bundle you built yourself, to try it before publishing (see
+  "Native Telamon apps"). Only this option opens a bundle: a `.tar.zst` given
+  as a plain argument is refused.
 - `appstream://<id>`, `appstream:<id>`, `flatpak+https://...`
 - `.flatpakref`, `.flatpakrepo`, `.flatpak`, `.rpm` and `.AppImage` paths or
   `file:` URLs (a file with another name that starts like an AppImage is
@@ -399,6 +408,139 @@ Install and Show in Store both start the Store with the install dialog open
 notification server's activation token when it sends one; the dialog is where
 the user decides. Not Now remembers nothing beyond the de-duplication.
 
+
+## Native Telamon apps
+
+Telamon's own apps that are not part of the OS image (Telamon Gates is the
+first) are installed for the user by the Store from the GitHub release of
+their repository, and updated by it, with no Flatpak. System apps stay in the
+image; an app is "native" when its owner connects it here. Core:
+`crates/telamon-store-core/src/native/`; window: `apps/telamon-store/src/native.rs`
+and the `Native*.qml` pages. The bundle format and the producer side (the tool
+and the reusable workflow) are the framework's, `docs/BUNDLES.md` there; how to
+connect an app is `docs/CONNECT-AN-APP.md`.
+
+**Connecting an app is one line in `catalog/native-apps.json`** of this
+repository (a pull request; no Store release). The Store fetches the file from
+the main branch (`raw.githubusercontent.com`, through `net::get`), caches it for
+6 hours and parses it: `{ "schema": 1, "apps": [ { "id", "repo", "channel" } ] }`.
+`repo` is `Owner/name` with an owner in `native::ALLOWED_OWNERS` (today
+`EternalCoder454`; adding one is a Store release), `channel` is `releases`
+(the latest published release that is not a draft or a prerelease). An entry
+that is malformed, for another owner, with another channel or listed twice is
+skipped and logged, never half-used. At most 200 entries.
+
+**What the Store checks about a release** (`github.rs`, `check.rs`): the
+answer of `api.github.com/repos/<repo>/releases/latest` (1 MiB cap); a release
+file counts only when its address is exactly
+`https://github.com/<repo>/releases/download/<tag>/<name>`, so the files are
+the catalog's repository's own and the same release's; the release has a
+`telamon-bundle.json` (1 MiB cap), the outer manifest, whose `id` must equal
+the catalog entry's, whose archive name must be `<id>-<version>-x86_64.tar.zst`
+and exist in the release with the manifest's size (and GitHub's own `digest`,
+when the API gives one, must equal the manifest's SHA-256), and whose version
+must match the tag (`v<version>` or `<version>`). Anything else is "no bundle
+in this release" or an error shown for that app only; the others still list.
+No release at all (404) is not an error: the app is simply not shown yet.
+Answers are cached under `$XDG_CACHE_HOME/telamon-store/native/` for 6 hours
+(a check by hand ignores the cache); with no network the cache is used however
+old and the page says so.
+
+**What the Store checks about a bundle** (`manifest.rs`, `archive.rs`,
+`desktop.rs`). The download is streamed to a private file (`net::download`,
+https, public addresses only, capped at the size the manifest declares and
+256 MiB), and its size and SHA-256 must equal the manifest's before it is
+opened. Then every tar entry is checked before anything is written, and the
+tar library only reads, it never unpacks: names are relative, plain, UTF-8, with
+no `..`, `.`, empty or hidden-character parts, unique; only folders, regular
+files and symbolic links exist (hard links, devices, FIFOs and anything else
+refuse the bundle); at most 40,000 entries, 512 MiB per file and 1 GiB
+unpacked, with the decompressor cut off at its cap; files are created new
+(`O_EXCL|O_NOFOLLOW`) below folders the Store made, with the mode the manifest
+says (0644, or 0755 when `executable`), never what the archive says; links are
+created last, each must be relative with a target that stays inside the folder
+and, on the real folders, resolve to something inside it. The unpacked tree
+must then be exactly what the inner manifest lists (same files, sizes,
+SHA-256, same links), and the inner manifest must say what the release's outer
+one says. The bundle must fit this system (`min_os_version` against
+`/etc/os-release`, `min_telamon_ui` against `rpm -q telamon-ui`; a minimum that
+cannot be looked up is not held against the app). All of this runs in the
+install worker, so a failure leaves nothing: the private folder is removed.
+
+**Integrity and what it is not.** Today integrity is HTTPS to GitHub, the
+SHA-256 in the manifest of the same release, the catalog naming the one
+repository per app and the owner allowlist. The checksum and the file come from
+the same place, so it detects damage and a mixed-up release, not a hijacked
+repository or release: the install dialog says so. A later step can add
+GitHub artifact attestations or a minisign key per app; the manifest and the
+catalog are versioned (`schema`) for that. Nothing is signed today and the
+dialog never calls an app safe: it says the app is not sandboxed and runs as
+the user, as any program does.
+
+**Where things go** (`install.rs`, all under `$XDG_DATA_HOME`, never a
+system path, no privilege):
+
+```
+telamon-apps/<id>/<version>/    the bundle's tree (bin/, share/...)
+telamon-apps/<id>/current       link to <version>, switched in one rename
+telamon-apps/<id>/install.json  the record: what the Store installed
+applications/<id>.desktop       copied out of the bundle, Exec rewritten
+icons/hicolor/<size>/apps/..    metainfo/..  dbus-1/services/..  knotifications6/..
+```
+
+What is copied out of a bundle, and under which names, is fixed in
+`desktop.rs`: a bundle can only ever write files that carry its own app ID
+(`<id>.desktop`, `<id>*.png|svg` icons, `<id>.metainfo.xml`, D-Bus services
+named `<id>` or `<id>.*`, `telamon-*.notifyrc`), because the user's folders
+come before `/usr` in every search path and a bundle must not shadow anything
+else. The first word of every `Exec` must be a plain program name that is in
+the bundle's `bin/`; it becomes the absolute path under `current/bin/` (quoted
+by the Desktop Entry rules), `TryExec` and `Path` are dropped, and the Store
+adds `X-Telamon-Native-App` and `-Version`. Nothing is copied over a file that
+the Store did not itself put there, or through a link. The app finds its own
+data relative to its program (`../share/<id>`, the framework's convention);
+the Store sets no environment. The program runs through the `current` link, so
+an update needs no change to the menu entry.
+
+**Update** (the same code as install): download the new version, verify it,
+unpack beside the old one, write the copied files (each one remembered so it can
+be put back), switch `current`, write the record, and only then tidy. The old
+version stays until the next update (older ones go), so an app that is running
+keeps every file it may read later; it needs a restart to use the new one. Any
+failure before the record is written is undone in the reverse order: the copied
+files are as they were, `current` still names the old version, the new folder is
+removed (**rollback**; tested with a failure injected after each step).
+**Uninstall** removes the files the record lists, each only if it still has the
+content the Store wrote (an edited file is left and named), and the app's
+folder. The app's own data and settings are never touched. A tampered record
+cannot reach other files: only paths under the five export folders pass, and the
+content must match its recorded SHA-256. One install runs at a time (`flock` on
+`telamon-apps/.lock`).
+
+**Local bundles** (`--install-bundle`): for trying a bundle before it is
+published. The file is looked into without installing (unpacked into a scratch
+folder under the cache, checked, removed), and the dialog says in red that it
+did not come from Telamon's list and was not checked by Telamon, with its
+SHA-256. After the user's answer it installs like any bundle; an app installed
+this way has no source and is updated only if the catalog also lists its ID.
+
+**In the window.** Home shows a "Telamon Apps" shelf (and a Telamon Apps tile
+among the categories, which opens the list of them) when any connected app has
+a release; an app page has Install, Update, Open and Uninstall, each asking in
+the Store's own dialog (Cancel is the default; input is ignored for the first
+half second); Installed lists them below the Flatpak apps with Open and
+Uninstall; Updates shows the ones with a newer release in a "Telamon Apps"
+card with an Update button each. They do not go through Telamon Updater's
+engine (it knows Flatpak only), so "Update All" is the Flatpak engine's. A
+check runs when the window opens (the cache decides whether GitHub is asked),
+when Updates is opened, when Check for Updates is pressed, and once a day while
+the window stays open; nothing runs when the Store is closed. A launch's
+request that comes while a check runs (a local bundle) waits for it.
+
+**Not done yet.** Telamon Updater's tray and Telamon Settings' Updates page do
+not know these apps, so no background notification or Settings entry; they
+would need the engine (`telamon-updater-core`) to learn the catalog. Signatures
+and attestations (above). More than one release channel.
 
 ## Names before the rename (0.2.0)
 

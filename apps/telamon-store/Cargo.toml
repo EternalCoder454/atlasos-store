@@ -29,5 +29,13 @@ zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 
+[features]
+# Answers the native apps' GitHub requests from a folder of recorded answers
+# (TELAMON_STORE_FAKE_GITHUB), for screenshots. Never enabled in a package.
+fake-github = ["telamon-store-core/fake-github"]
+
+[dev-dependencies]
+telamon-store-core = { path = "../../crates/telamon-store-core", features = ["test-hooks"] }
+
 [build-dependencies]
 cxx-qt-build = "0.10"

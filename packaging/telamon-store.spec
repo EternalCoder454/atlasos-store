@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-store
-Version:        0.3.1
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Telamon Store, the app store of Telamon OS
 License:        MIT
@@ -160,6 +160,16 @@ appstream-util validate-relax --nonet \
 %{_datadir}/knotifications6/telamon-store.notifyrc
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.0-1
+- Native Telamon apps: apps that are not in the OS image (Telamon Gates) are
+  installed for the user from the GitHub release of their repository, with no
+  Flatpak, and updated by the Store. An owner connects an app with one line in
+  catalog/native-apps.json (no Store release). Home has a Telamon Apps shelf,
+  Installed and Updates list them, and every install and update asks first.
+  Bundles are checked (SHA-256, file list, no paths or links that leave the
+  folder) and updates roll back if they fail. telamon-store --install-bundle
+  <file>.tar.zst installs a bundle you built, to try it before publishing.
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.1-1
 - AppImages: a downloaded AppImage brings an "Install this app?" notification;
   the install dialog says it is not sandboxed, warns about unsigned files and

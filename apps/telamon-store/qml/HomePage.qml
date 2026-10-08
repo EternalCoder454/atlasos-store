@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -16,6 +17,8 @@ TelamonPage {
     required property var featured
     // [{ text, symbol }] in the order of Catalog.categoryKey.
     required property var categories
+    // The Telamon apps connected to the Store (src/native.rs).
+    required property var nativeApps
 
     title: qsTr("Home")
 
@@ -23,6 +26,7 @@ TelamonPage {
     signal categoryRequested(int index)
     signal appRequested(string appId)
     signal openSources
+    signal nativeListRequested
 
     // A shelf's apps from the JSON src/featured.rs publishes.
     function appsOf(json) {
@@ -43,6 +47,11 @@ TelamonPage {
     }
 
     Component.onCompleted: page.ask()
+
+    NativeAppsList {
+        id: telamonApps
+        json: page.nativeApps.appsJson
+    }
 
     Connections {
         target: page.catalog
@@ -92,6 +101,14 @@ TelamonPage {
         onOpenSources: page.openSources()
     }
 
+    // Apps made for Telamon OS that the Store installs for the user itself.
+    AppShelf {
+        Layout.fillWidth: true
+        title: qsTr("Telamon Apps")
+        apps: telamonApps.tiles
+        onAppRequested: appId => page.appRequested(appId)
+    }
+
     AppShelf {
         Layout.fillWidth: true
         title: qsTr("Popular Apps")
@@ -114,7 +131,7 @@ TelamonPage {
     }
 
     Text {
-        visible: page.catalog.ready && page.catalog.appCount > 0
+        visible: (page.catalog.ready && page.catalog.appCount > 0) || telamonApps.tiles.length > 0
         text: qsTr("Categories")
         font.family: TelamonStyle.fontFamily
         font.pointSize: TelamonStyle.fontSizeHeading
@@ -126,7 +143,7 @@ TelamonPage {
 
     GridLayout {
         Layout.fillWidth: true
-        visible: page.catalog.ready && page.catalog.appCount > 0
+        visible: (page.catalog.ready && page.catalog.appCount > 0) || telamonApps.tiles.length > 0
         columns: Math.max(1, Math.floor(width / (Kirigami.Units.gridUnit * 11)))
         columnSpacing: TelamonStyle.spacingLarge
         rowSpacing: TelamonStyle.spacingLarge
@@ -137,11 +154,22 @@ TelamonPage {
                 required property var modelData
                 required property int index
                 Layout.fillWidth: true
+                visible: page.catalog.ready && page.catalog.appCount > 0
                 text: modelData.text
                 symbol: modelData.symbol
                 count: page.catalog.ready ? page.catalog.categoryCount(index) : -1
                 onClicked: page.categoryRequested(index)
             }
+        }
+
+        // Telamon's own apps, as a place of their own.
+        CategoryTile {
+            Layout.fillWidth: true
+            visible: telamonApps.tiles.length > 0
+            text: qsTr("Telamon Apps")
+            symbol: Symbols.Widgets
+            count: telamonApps.tiles.length
+            onClicked: page.nativeListRequested()
         }
     }
 }

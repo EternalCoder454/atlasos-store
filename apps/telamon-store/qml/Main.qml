@@ -26,6 +26,14 @@ TelamonWindow {
     // The AppImages the Store installed and the install confirmation for one
     // (src/appimages.rs).
     required property var appImages
+    // The Telamon apps connected to the Store: the list, their installs and
+    // updates (src/native.rs).
+    required property var nativeApps
+
+    // At every start the Telamon apps are looked up (GitHub is asked only when
+    // the answers kept are over six hours old), and once a day after that
+    // while the window stays open.
+    Component.onCompleted: root.nativeApps.check(false)
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -86,8 +94,13 @@ TelamonWindow {
         stack.push(categoryPage, { categoryKey: key, title: root.categories[index].text });
     }
 
-    // An app's page; not opened again when it already is the page shown.
+    // An app's page; not opened again when it already is the page shown. A
+    // Telamon app (the connected ones) has a page of its own.
     function openApp(id) {
+        if (root.nativeApps.isNative(id)) {
+            root.openNativeApp(id);
+            return;
+        }
         if (stack.currentItem && stack.currentItem.isApp === true && stack.currentItem.appId === id) {
             return;
         }
@@ -95,6 +108,23 @@ TelamonWindow {
             stack.pop();
         }
         stack.push(appPage, { appId: id });
+    }
+
+    function openNativeApp(id) {
+        if (stack.currentItem && stack.currentItem.isApp === true && stack.currentItem.appId === id) {
+            return;
+        }
+        if (stack.currentItem && stack.currentItem.message === true) {
+            stack.pop();
+        }
+        stack.push(nativeAppPage, { appId: id });
+    }
+
+    function openNativeList() {
+        if (stack.currentItem && stack.currentItem.isNativeList === true) {
+            return;
+        }
+        stack.push(nativeAppsPage);
     }
 
     // The Remove confirmation for an installed app.
@@ -109,6 +139,15 @@ TelamonWindow {
     property string pendingRemove: ""
 
     function openRemove(id) {
+        if (root.nativeApps.isNative(id)) {
+            // A Telamon app: its page, with the Uninstall confirmation open.
+            root.openNativeApp(id);
+            const app = JSON.parse(root.nativeApps.appsJson).find(a => a.id === id);
+            if (app && app.installed) {
+                nativeRemoveDialog.show(id, app.name);
+            }
+            return;
+        }
         root.openApp(id);
         if (root.jobs.installedReady) {
             root.askRemoveInstalled(id);
@@ -136,6 +175,7 @@ TelamonWindow {
             ref: qsTr("App from a File"),
             repo: qsTr("Source from a File"),
             appimage: qsTr("AppImage"),
+            nativeBundle: qsTr("Telamon App Bundle"),
             bundle: qsTr("App Bundle"),
             rpm: qsTr("RPM Package"),
             refUrl: qsTr("App from a Link")
@@ -192,12 +232,18 @@ TelamonWindow {
                 root.openSearch(value);
                 return;
             }
-            if (kind === "app") {
-                root.openApp(value);
-                return;
-            }
-            if (kind === "remove") {
-                root.openRemove(value);
+            if (kind === "app" || kind === "remove") {
+                // Whether a Telamon-looking ID is a connected app is known once
+                // the first check has answered; other IDs need not wait.
+                if (!root.nativeApps.ready && !root.nativeApps.isNative(value) && value.startsWith("net.eterneon.")) {
+                    root.pendingLaunch = { kind: kind, value: value };
+                    return;
+                }
+                if (kind === "app") {
+                    root.openApp(value);
+                } else {
+                    root.openRemove(value);
+                }
                 return;
             }
             if (kind === "appimage") {
@@ -214,6 +260,21 @@ TelamonWindow {
                 }
                 root.openPlace("installed");
                 root.appImages.request(value);
+                return;
+            }
+            if (kind === "nativeBundle") {
+                // A Telamon app bundle from a file (--install-bundle): looked
+                // inside, never run, then the install confirmation.
+                if (nativeInstallDialog.visible) {
+                    root.showMessage({
+                        title: qsTr("Not Opened"),
+                        heading: qsTr("Another app is waiting for your answer"),
+                        text: qsTr("Answer that first, then open this file again.")
+                    });
+                    return;
+                }
+                root.openPlace("installed");
+                root.nativeApps.requestLocal(value);
                 return;
             }
             if (kind === "repo") {
@@ -275,6 +336,34 @@ TelamonWindow {
         }
     }
 
+    property var pendingLaunch: null
+
+    Connections {
+        target: root.nativeApps
+        function onDetailReady() {
+            nativeInstallDialog.showLocal();
+        }
+        function onReadyChanged() {
+            if (root.nativeApps.ready && root.pendingLaunch !== null) {
+                const p = root.pendingLaunch;
+                root.pendingLaunch = null;
+                if (p.kind === "app") {
+                    root.openApp(p.value);
+                } else {
+                    root.openRemove(p.value);
+                }
+            }
+        }
+    }
+
+    // Once a day while the window stays open (nothing runs when it is closed).
+    Timer {
+        interval: 24 * 60 * 60 * 1000
+        repeat: true
+        running: true
+        onTriggered: root.nativeApps.check(false)
+    }
+
     // A source was added, removed, turned on or off: the catalog and the
     // installed list are read again.
     Connections {
@@ -330,6 +419,14 @@ TelamonWindow {
     AppImageRemoveDialog {
         id: appImageRemoveDialog
         appImages: root.appImages
+    }
+    NativeInstallDialog {
+        id: nativeInstallDialog
+        nativeApps: root.nativeApps
+    }
+    NativeRemoveDialog {
+        id: nativeRemoveDialog
+        nativeApps: root.nativeApps
     }
     AddSourceDialog {
         id: addSourceDialog
@@ -447,6 +544,8 @@ TelamonWindow {
             catalog: root.catalog
             featured: root.featured
             categories: root.categories
+            nativeApps: root.nativeApps
+            onNativeListRequested: root.openNativeList()
             onSearchRequested: text => root.openSearch(text)
             onCategoryRequested: index => root.openCategory(index)
             onAppRequested: id => root.openApp(id)
@@ -481,11 +580,30 @@ TelamonWindow {
         }
     }
     Component {
+        id: nativeAppPage
+        NativeAppPage {
+            nativeApps: root.nativeApps
+            onInstallRequested: app => nativeInstallDialog.show(app)
+            onUninstallRequested: (id, name) => nativeRemoveDialog.show(id, name)
+        }
+    }
+    Component {
+        id: nativeAppsPage
+        NativeAppsPage {
+            nativeApps: root.nativeApps
+            readonly property bool isNativeList: true
+            onAppRequested: id => root.openNativeApp(id)
+        }
+    }
+    Component {
         id: installedPage
         InstalledPage {
             jobs: root.jobs
             appImages: root.appImages
+            nativeApps: root.nativeApps
             onRemoveAppImageRequested: (id, name) => appImageRemoveDialog.show(id, name)
+            onRemoveNativeRequested: (id, name) => nativeRemoveDialog.show(id, name)
+            onNativeRequested: id => root.openNativeApp(id)
             onAppRequested: id => root.openApp(id)
             onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
         }
@@ -495,7 +613,9 @@ TelamonWindow {
         UpdatesPage {
             updates: root.updates
             jobs: root.jobs
+            nativeApps: root.nativeApps
             onAppRequested: id => root.openApp(id)
+            onUpdateNativeRequested: app => nativeInstallDialog.show(app)
         }
     }
     Component {

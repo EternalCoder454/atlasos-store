@@ -15,26 +15,42 @@ TelamonPage {
 
     required property var updates
     required property var jobs
+    // The Telamon apps the Store installed and their releases (src/native.rs).
+    required property var nativeApps
 
     title: qsTr("Updates")
 
     signal appRequested(string appId)
+    // Update on a Telamon app's row: Main.qml asks in its dialog first.
+    signal updateNativeRequested(var app)
 
     readonly property var apps: JSON.parse(page.updates.appsJson)
     readonly property var others: JSON.parse(page.updates.othersJson)
     readonly property bool working: page.updates.busy
     readonly property bool hasError: page.updates.errorText.length > 0
-    readonly property bool anyWaiting: page.apps.length > 0 || page.others.length > 0
+    readonly property bool flatpakWaiting: page.apps.length > 0 || page.others.length > 0
+    readonly property var nativeUpdates: telamonApps.all.filter(a => a.state === "update")
+    readonly property bool nativeBusy: page.nativeApps.phase !== "idle"
+    readonly property bool anyWaiting: page.flatpakWaiting || page.nativeUpdates.length > 0
+
+    NativeAppsList {
+        id: telamonApps
+        json: page.nativeApps.appsJson
+    }
     // Nothing is installed at all (the installed list is the Store's, read once).
     readonly property bool noApps: {
         void page.jobs.installedRevision;
-        return page.jobs.installedReady && JSON.parse(page.jobs.installedJson).length === 0;
+        return page.jobs.installedReady && JSON.parse(page.jobs.installedJson).length === 0 && !telamonApps.all.some(a => a.installed === true);
     }
     readonly property string lastText: page.updates.lastChecked > 0 ? qsTr("Last checked: %1").arg(TelamonFormat.date(new Date(page.updates.lastChecked * 1000), "relative")) : ""
 
     // Opening the page checks when no check ended this session or the last
     // one is older than ten minutes; nothing runs while the page is not open.
-    Component.onCompleted: page.updates.pageOpened()
+    Component.onCompleted: {
+        page.updates.pageOpened();
+        // Telamon apps: asks GitHub only when the answers are over six hours old.
+        page.nativeApps.check(false);
+    }
 
     // Open Telamon Settings asks the window system for an activation token
     // first (C++, activation_token.cpp), as an app's Open does, so the
@@ -64,13 +80,16 @@ TelamonPage {
         TelamonButton {
             text: qsTr("Check for Updates")
             symbol: Symbols.Refresh
-            enabled: !page.working
-            onClicked: page.updates.check()
+            enabled: !page.working && !page.nativeBusy
+            onClicked: {
+                page.updates.check();
+                page.nativeApps.check(true);
+            }
         },
         TelamonButton {
             text: qsTr("Update All")
             variant: TelamonButton.Prominent
-            visible: page.updates.loaded && page.anyWaiting
+            visible: page.updates.loaded && page.flatpakWaiting
             enabled: !page.working
             // One press, unless some update asks for new permissions: then
             // the Store's own dialog lists them first.
@@ -150,6 +169,47 @@ TelamonPage {
         TelamonButton {
             text: qsTr("Dismiss")
             onClicked: page.updates.clearMessages()
+        }
+    }
+
+    // What the Telamon apps worker is doing.
+    ColumnLayout {
+        Layout.fillWidth: true
+        visible: page.nativeBusy
+        spacing: TelamonStyle.spacingSmall
+        Text {
+            Layout.fillWidth: true
+            text: page.nativeApps.status.length > 0 ? page.nativeApps.status : qsTr("Working…")
+            wrapMode: Text.Wrap
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeCaption
+            color: TelamonStyle.textMuted
+            textFormat: Text.PlainText
+        }
+        TelamonProgressBar {
+            Layout.fillWidth: true
+            indeterminate: page.nativeApps.percent < 0
+            value: Math.max(0, page.nativeApps.percent) / 100
+        }
+    }
+
+    // What the last Telamon app update did, or why not.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: !page.nativeBusy && (page.nativeApps.errorText.length > 0 || page.nativeApps.resultText.length > 0)
+        spacing: TelamonStyle.spacingLarge
+        Text {
+            Layout.fillWidth: true
+            text: page.nativeApps.errorText.length > 0 ? page.nativeApps.errorText : page.nativeApps.resultText
+            wrapMode: Text.Wrap
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeBody
+            color: page.nativeApps.errorText.length > 0 ? TelamonStyle.error : TelamonStyle.success
+            textFormat: Text.PlainText
+        }
+        TelamonButton {
+            text: qsTr("Dismiss")
+            onClicked: page.nativeApps.clearMessages()
         }
     }
 
@@ -264,7 +324,7 @@ TelamonPage {
     TelamonEmptyState {
         Layout.fillWidth: true
         Layout.preferredHeight: Kirigami.Units.gridUnit * 14
-        visible: page.updates.loaded && !page.anyWaiting && !page.working
+        visible: page.updates.loaded && !page.anyWaiting && !page.working && !page.nativeBusy
         symbol: page.noApps ? Symbols.Apps : Symbols.CheckCircle
         title: page.noApps ? qsTr("No Apps Installed") : qsTr("Up to Date")
         text: page.noApps ? qsTr("Apps you install show up here.") : qsTr("All apps are up to date.")
@@ -279,6 +339,93 @@ TelamonPage {
         font.pointSize: TelamonStyle.fontSizeBody
         color: TelamonStyle.textMuted
         textFormat: Text.PlainText
+    }
+
+    // The Telamon apps with a newer release: a row each, with its own Update
+    // (these do not go through Telamon Updater's engine; each is installed by
+    // the Store, from the release it checked).
+    Section {
+        Layout.fillWidth: true
+        visible: page.nativeUpdates.length > 0
+        title: qsTr("Telamon Apps")
+        footer: page.nativeApps.noteText
+
+        Repeater {
+            model: page.nativeUpdates
+            SectionRow {
+                id: nRow
+                required property var modelData
+                readonly property real iconSide: Math.round(Kirigami.Units.gridUnit * 2.8)
+
+                title: nRow.modelData.name
+                subtitle: (nRow.modelData.size ?? "").length > 0 ? qsTr("%1 to %2 \u00b7 %3 to download").arg(nRow.modelData.installedVersion).arg(nRow.modelData.availableVersion).arg(nRow.modelData.size) : qsTr("%1 to %2").arg(nRow.modelData.installedVersion).arg(nRow.modelData.availableVersion)
+                clickable: true
+                onClicked: page.appRequested(nRow.modelData.id)
+
+                leading: Rectangle {
+                    width: nRow.iconSide
+                    height: nRow.iconSide
+                    radius: Math.round(nRow.iconSide * 0.225)
+                    color: nIcon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
+                    Accessible.ignored: true
+                    Text {
+                        anchors.centerIn: parent
+                        visible: nIcon.status !== Image.Ready
+                        text: nRow.modelData.name.length > 0 ? nRow.modelData.name.charAt(0).toUpperCase() : ""
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeHeading
+                        font.bold: true
+                        color: TelamonStyle.accent
+                        textFormat: Text.PlainText
+                    }
+                    Image {
+                        id: nIcon
+                        anchors.fill: parent
+                        source: nRow.modelData.iconSource
+                        asynchronous: true
+                        cache: true
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize: Qt.size(nRow.iconSide * Screen.devicePixelRatio, nRow.iconSide * Screen.devicePixelRatio)
+                    }
+                }
+
+                content: ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: TelamonStyle.spacingXSmall
+                    Text {
+                        Layout.fillWidth: true
+                        text: nRow.title
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeBody
+                        font.bold: true
+                        color: TelamonStyle.text
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: nRow.subtitle
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeCaption
+                        color: TelamonStyle.textMuted
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                }
+
+                TelamonButton {
+                    text: qsTr("Update")
+                    //: An Update button in a row of the Telamon apps in Updates; %1 is the app's name
+                    Accessible.name: qsTr("Update %1").arg(nRow.modelData.name)
+                    variant: TelamonButton.Prominent
+                    enabled: !page.nativeBusy
+                    onClicked: page.updateNativeRequested(nRow.modelData)
+                }
+            }
+        }
     }
 
     // One grouped card, a row per app: icon, name, branch, who it is for and

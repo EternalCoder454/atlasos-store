@@ -753,7 +753,14 @@ fn open_command(dirs: &Dirs, id: &str) -> Result<Command, InstallError> {
 /// token (checked by the caller) in its environment. An error is reported only
 /// when it stops with a failure in the first moments.
 pub fn launch(dirs: &Dirs, id: &str, token: Option<&str>) -> Result<(), InstallError> {
-    let mut cmd = open_command(dirs, id)?;
+    run_detached(open_command(dirs, id)?, token)
+}
+
+/// Starts `cmd` as [`launch`] does: own process group, no input, output
+/// dropped, the activation token (checked by the caller) or none in its
+/// environment, reaped in the background; an error only when it stops with a
+/// failure in the first moments. Native Telamon apps open the same way.
+pub fn run_detached(mut cmd: Command, token: Option<&str>) -> Result<(), InstallError> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

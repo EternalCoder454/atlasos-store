@@ -8,6 +8,7 @@ mod backend;
 mod catalog;
 mod featured;
 mod jobs;
+mod native;
 mod sources;
 mod updates;
 
@@ -32,6 +33,7 @@ pub struct StoreObjects {
     pub updates: *mut c_void,
     pub featured: *mut c_void,
     pub app_images: *mut c_void,
+    pub native_apps: *mut c_void,
 }
 
 /// Called once from `main.cpp`, after `QApplication` exists. Makes every
@@ -51,10 +53,12 @@ pub extern "C" fn store_objects_new() -> StoreObjects {
     let mut updates = updates::qobject::app_updates_make_unique();
     let mut featured = featured::qobject::featured_make_unique();
     let mut app_images = appimages::qobject::app_images_make_unique();
+    let mut native_apps = native::qobject::native_apps_make_unique();
     sources.pin_mut().start();
     updates.pin_mut().start();
     featured.pin_mut().start();
     app_images.pin_mut().refresh();
+    native_apps.pin_mut().refresh();
     StoreObjects {
         backend: backend.into_raw().cast(),
         catalog: catalog.into_raw().cast(),
@@ -65,5 +69,6 @@ pub extern "C" fn store_objects_new() -> StoreObjects {
         updates: updates.into_raw().cast(),
         featured: featured.into_raw().cast(),
         app_images: app_images.into_raw().cast(),
+        native_apps: native_apps.into_raw().cast(),
     }
 }

@@ -65,6 +65,10 @@ pub enum FileKind {
     /// file manager hands it over by its type, or `--appimage-install`):
     /// the Store looks inside it and asks before installing. It is never run.
     AppImage,
+    /// A native Telamon app bundle (`--install-bundle <file>.tar.zst`), for
+    /// trying a bundle before it is published. Only the option makes one: a
+    /// positional `.tar.zst` is not the Store's to open.
+    NativeBundle,
 }
 
 /// One request.
@@ -145,7 +149,8 @@ pub fn parse_with(args: &[String], cwd: &Path, is_appimage: &dyn Fn(&Path) -> bo
     launch
 }
 
-/// `--app`, `--search`, `--page`, `--remove` or `--appimage-install`, with
+/// `--app`, `--search`, `--page`, `--remove`, `--appimage-install` or
+/// `--install-bundle`, with
 /// its value inline (`--app=ID`) or next. Anything else starting with `-` is
 /// refused, so a link or file name can never become an option.
 fn option<'a>(
@@ -159,7 +164,7 @@ fn option<'a>(
     };
     if !matches!(
         flag,
-        "--app" | "--remove" | "--search" | "--page" | "--appimage-install"
+        "--app" | "--remove" | "--search" | "--page" | "--appimage-install" | "--install-bundle"
     ) {
         return Err("unknown option");
     }
@@ -175,12 +180,18 @@ fn option<'a>(
         "--search" => search_text(&value)
             .map(Request::Search)
             .ok_or("empty search"),
-        "--appimage-install" => {
+        "--appimage-install" | "--install-bundle" => {
             if value.chars().any(hidden) {
                 return Err("has hidden or control characters");
             }
             let path = resolve_path(&value, cwd)?;
             plain_path(&path)?;
+            if flag == "--install-bundle" {
+                if !value.to_ascii_lowercase().ends_with(".tar.zst") {
+                    return Err("not a .tar.zst bundle");
+                }
+                return Ok(Request::File(FileKind::NativeBundle, path));
+            }
             Ok(Request::File(FileKind::AppImage, path))
         }
         _ => Page::parse(&value).map(Request::Page).ok_or("no such page"),
@@ -590,6 +601,45 @@ mod tests {
     fn p(args: &[&str]) -> (Vec<Request>, Vec<Refused>) {
         let l = launch(args, "/home/u");
         (l.requests, l.refused)
+    }
+
+    #[test]
+    fn a_local_bundle_is_asked_for_by_its_option_only() {
+        assert_eq!(
+            p(&["--install-bundle", "/tmp/a/gates-0.1.0-x86_64.tar.zst"]).0,
+            vec![Request::File(
+                FileKind::NativeBundle,
+                "/tmp/a/gates-0.1.0-x86_64.tar.zst".into()
+            )]
+        );
+        // Relative to where the launch happened.
+        assert_eq!(
+            p(&["--install-bundle=out/x.tar.zst"]).0,
+            vec![Request::File(
+                FileKind::NativeBundle,
+                "/home/u/out/x.tar.zst".into()
+            )]
+        );
+        // Not any other kind of file, no traversal, no hidden characters.
+        for bad in [
+            "/tmp/x.tar",
+            "/tmp/x.zip",
+            "/tmp/../etc/x.tar.zst",
+            "/tmp/x\u{202e}.tar.zst",
+        ] {
+            let (requests, refused) = p(&["--install-bundle", bad]);
+            assert!(requests.is_empty(), "{bad}");
+            assert_eq!(refused.len(), 1, "{bad}");
+        }
+        assert!(p(&["--install-bundle"]).0.is_empty());
+        // A file named like a bundle, given plainly, is not opened.
+        assert!(p(&["/tmp/x.tar.zst"]).0.is_empty());
+        // After `--` the option is a file name.
+        assert!(
+            p(&["--", "--install-bundle", "/tmp/x.tar.zst"])
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
