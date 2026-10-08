@@ -95,6 +95,7 @@ qt_add_qml_module(telamon-store-app
         qml/SearchPage.qml
         qml/SourcesPage.qml
         qml/UpdatesPage.qml
+        qml/UpdateReviewDialog.qml
         qml/PlaceholderPage.qml
 )
 

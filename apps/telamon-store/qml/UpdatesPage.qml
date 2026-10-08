@@ -72,9 +72,23 @@ TelamonPage {
             variant: TelamonButton.Prominent
             visible: page.updates.loaded && page.anyWaiting
             enabled: !page.working
-            onClicked: page.updates.updateAll()
+            // One press, unless some update asks for new permissions: then
+            // the Store's own dialog lists them first.
+            onClicked: {
+                if (page.updates.reviewCount > 0) {
+                    reviewDialog.show(page.apps.filter(a => a.review), page.updates.downloadText);
+                } else {
+                    page.updates.updateAll();
+                }
+            }
         }
     ]
+
+    UpdateReviewDialog {
+        id: reviewDialog
+        onUpdateAll: page.updates.updateAll()
+        onUpdateWithout: page.updates.updateWithoutNewPermissions()
+    }
 
     Text {
         Layout.fillWidth: true

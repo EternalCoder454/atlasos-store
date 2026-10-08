@@ -65,6 +65,9 @@ pub mod qobject {
         #[qproperty(QString, others_json, cxx_name = "othersJson")]
         #[qproperty(i32, app_count, cxx_name = "appCount")]
         #[qproperty(i32, other_count, cxx_name = "otherCount")]
+        /// How many waiting updates ask for new permissions: Update All needs
+        /// the user's confirmation, with them listed, while this is not 0.
+        #[qproperty(i32, review_count, cxx_name = "reviewCount")]
         /// What an update downloads in all, or "" when not known.
         #[qproperty(QString, download_text, cxx_name = "downloadText")]
         /// Why the last check or update failed, in plain words, or "".
@@ -105,10 +108,17 @@ pub mod qobject {
         #[qinvokable]
         fn check(self: Pin<&mut AppUpdates>);
 
-        /// Updates every app (and the components they need) that waits.
+        /// Updates every app (and the components they need) that waits. The
+        /// page asks first when any asks for new permissions (`reviewCount`).
         #[qinvokable]
         #[cxx_name = "updateAll"]
         fn update_all(self: Pin<&mut AppUpdates>);
+
+        /// Updates what does not ask for new permissions and leaves the rest
+        /// as it is (the engine's `hold_new_permissions`).
+        #[qinvokable]
+        #[cxx_name = "updateWithoutNewPermissions"]
+        fn update_without_new_permissions(self: Pin<&mut AppUpdates>);
 
         /// Stops waiting for another update to finish.
         #[qinvokable]
@@ -272,8 +282,13 @@ pub fn app_json(r: &Row, held: Option<&HeldApp>, facts: &Facts) -> Value {
         "name": name,
         "iconSource": facts.icon,
         "detail": detail_line(r),
-        // The engine's own words for it, a few, in plain words.
+        // What it asks for that the installed version doesn't have: a few
+        // words for the row, all of them for the confirmation.
         "asks": held.map(|h| apps::asks_text(&h.asks)).unwrap_or_default(),
+        "asksList": held
+            .map(|h| h.asks.iter().take(60).map(|a| clean(a, 200)).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "review": held.is_some(),
         "notes": notes,
     })
 }
@@ -298,7 +313,7 @@ fn version_key(id: &str, branch: &str, system: bool) -> String {
 }
 
 /// What the page holds between the engine's calls. No Qt in it.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Model {
     /// Updates waiting: apps first, then components.
     pub rows: Vec<Row>,
@@ -387,6 +402,94 @@ impl Model {
     pub fn download_text(&self) -> String {
         apps::format_size(self.rows.iter().map(|r| r.size).sum())
     }
+
+    /// How many waiting updates ask for new permissions. Update All needs
+    /// the user's confirmation, with them listed, when this is not 0. Every
+    /// row counts, not only apps, so nothing can slip past the dialog.
+    pub fn review_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| self.held.contains_key(&apps::row_key(r)))
+            .count()
+    }
+}
+
+/// What the page shows of a [`Model`], built off the GUI thread: the
+/// catalog lookups stat icon files.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct View {
+    pub apps_json: String,
+    pub others_json: String,
+    pub app_count: i32,
+    pub other_count: i32,
+    pub download_text: String,
+    pub review_count: i32,
+}
+
+/// Builds the page's lists. `facts` is the catalog's word on an app (its
+/// installed version is the second argument).
+pub fn render(m: &Model, facts: impl Fn(&Row, &str) -> Facts) -> View {
+    let apps_v: Vec<Value> = m
+        .app_rows()
+        .map(|r| app_json(r, m.held.get(&apps::row_key(r)), &facts(r, m.version_of(r))))
+        .collect();
+    let others_v: Vec<Value> = m.other_rows().map(other_json).collect();
+    View {
+        app_count: i32::try_from(apps_v.len()).unwrap_or(i32::MAX),
+        other_count: i32::try_from(others_v.len()).unwrap_or(i32::MAX),
+        apps_json: Value::Array(apps_v).to_string(),
+        others_json: Value::Array(others_v).to_string(),
+        download_text: m.download_text(),
+        review_count: i32::try_from(m.review_count()).unwrap_or(i32::MAX),
+    }
+}
+
+/// What an update run may install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateMode {
+    /// Everything that waits, also what asks for new permissions: only after
+    /// the page showed what they ask for (and the user confirmed it, when
+    /// any does).
+    All,
+    /// Everything that doesn't ask for new permissions; the engine leaves
+    /// the others out and reports them.
+    LeaveOutNewPermissions,
+}
+
+impl UpdateMode {
+    /// `hold` of `apps::update` (the engine's `hold_new_permissions`).
+    pub fn hold(self) -> bool {
+        self == UpdateMode::LeaveOutNewPermissions
+    }
+}
+
+/// The guard before an update, as Settings has it: with everything to be
+/// installed, look again at what the updates ask for and stop if it is more
+/// than the page showed (`apps::unseen`). Leaving out what asks for new
+/// permissions needs no look: the engine does that itself, and says which.
+/// `check` runs only when it is needed.
+pub fn guard_for(
+    mode: UpdateMode,
+    check: impl FnOnce() -> Done,
+    shown: &HashMap<String, HeldApp>,
+) -> Result<(), Box<Done>> {
+    if mode.hold() {
+        return Ok(());
+    }
+    guard_update(check(), shown)
+}
+
+/// Waits for a worker for at most `cap`: `true` when it ended.
+pub fn join_capped(h: std::thread::JoinHandle<()>, cap: Duration) -> bool {
+    let start = Instant::now();
+    while !h.is_finished() {
+        if start.elapsed() > cap {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = h.join();
+    true
 }
 
 /// What the page does with an update request: go on, or stop because the
@@ -445,7 +548,21 @@ pub fn progress_line(raw: &str, names: &[(String, String)]) -> (String, i32) {
 }
 
 /// What the page says about an update run: the apps that were updated.
-pub fn updated_notice(updated: &[apphistory::Entry]) -> String {
+pub fn updated_notice(updated: &[apphistory::Entry], left_out: usize) -> String {
+    let base = updated_names(updated);
+    let out = match left_out {
+        0 => String::new(),
+        1 => "1 app that asks for new permissions was left out.".to_string(),
+        n => format!("{n} apps that ask for new permissions were left out."),
+    };
+    match (base.is_empty(), out.is_empty()) {
+        (_, true) => base,
+        (true, false) => out,
+        (false, false) => format!("{base} {out}"),
+    }
+}
+
+fn updated_names(updated: &[apphistory::Entry]) -> String {
     let names: Vec<String> = updated
         .iter()
         .filter(|u| !u.runtime)
@@ -672,12 +789,15 @@ fn read_info() -> Info {
     }
 }
 
-/// The result of a check.
+/// The result of a check. The model and the page's lists are built on the
+/// worker, so the GUI thread only takes them over.
 struct Checked {
-    rows: Result<Vec<Row>, String>,
-    /// What the waiting updates ask for; `None` when nothing waits.
-    asks: Option<Done>,
-    versions: HashMap<String, String>,
+    /// The new model and what it shows; `None` when the list failed.
+    listed: Option<(Model, View)>,
+    /// Why the list failed (the engine's words).
+    list_error: Option<String>,
+    /// Why what the updates ask for could not be checked.
+    asks_error: Option<String>,
     /// Why the worker did not run (the lock), in plain words.
     refused: Option<Shown>,
     cancelled: bool,
@@ -687,9 +807,10 @@ struct Checked {
 struct Updated {
     /// The check before updating found more than the page showed.
     stopped: bool,
+    mode: UpdateMode,
     done: Done,
-    left: Result<Vec<Row>, String>,
-    versions: HashMap<String, String>,
+    model: Model,
+    view: View,
     refused: Option<Shown>,
     cancelled: bool,
 }
@@ -742,14 +863,24 @@ fn installed_versions() -> HashMap<String, String> {
         .collect()
 }
 
-fn check_job(thread: &CxxQtThread<qobject::AppUpdates>, cancel: &CancelToken) -> Checked {
+/// The catalog's view of the model, as the page shows it.
+fn view_of(m: &Model) -> View {
+    let lib = library();
+    render(m, |r, v| facts_of(lib.as_deref(), r, v))
+}
+
+fn check_job(
+    thread: &CxxQtThread<qobject::AppUpdates>,
+    cancel: &CancelToken,
+    prev: Model,
+) -> Checked {
     let lock = match take_lock(thread, cancel) {
         Ok(l) => l,
         Err(e) => {
             return Checked {
-                rows: Ok(Vec::new()),
-                asks: None,
-                versions: HashMap::new(),
+                listed: None,
+                list_error: None,
+                asks_error: None,
                 cancelled: e == LockError::Cancelled,
                 refused: Some(lock_error(&e)),
             };
@@ -767,14 +898,30 @@ fn check_job(thread: &CxxQtThread<qobject::AppUpdates>, cancel: &CancelToken) ->
     if let Some(e) = asks.as_ref().and_then(|c| c.error.as_ref()) {
         log::warn!("could not check what app updates ask for: {e}");
     }
-    let versions = match &rows {
-        Ok(r) if !r.is_empty() => installed_versions(),
-        _ => HashMap::new(),
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            return Checked {
+                listed: None,
+                list_error: Some(e),
+                asks_error: None,
+                refused: None,
+                cancelled: false,
+            };
+        }
     };
+    let mut model = prev;
+    model.versions = if rows.is_empty() {
+        HashMap::new()
+    } else {
+        installed_versions()
+    };
+    model.listed(rows, asks.as_ref());
+    let view = view_of(&model);
     Checked {
-        rows,
-        asks,
-        versions,
+        listed: Some((model, view)),
+        list_error: None,
+        asks_error: asks.and_then(|c| c.error),
         refused: None,
         cancelled: false,
     }
@@ -783,7 +930,8 @@ fn check_job(thread: &CxxQtThread<qobject::AppUpdates>, cancel: &CancelToken) ->
 fn update_job(
     thread: &CxxQtThread<qobject::AppUpdates>,
     cancel: &CancelToken,
-    shown: HashMap<String, HeldApp>,
+    mode: UpdateMode,
+    prev: Model,
     names: Vec<(String, String)>,
 ) -> Updated {
     let lock = match take_lock(thread, cancel) {
@@ -791,9 +939,10 @@ fn update_job(
         Err(e) => {
             return Updated {
                 stopped: false,
+                mode,
                 done: Done::default(),
-                left: Ok(Vec::new()),
-                versions: HashMap::new(),
+                model: prev,
+                view: View::default(),
                 cancelled: e == LockError::Cancelled,
                 refused: Some(lock_error(&e)),
             };
@@ -802,12 +951,12 @@ fn update_job(
     say(thread, false, "Updating apps\u{2026}");
     // The page's notes may be hours old: look again, and install nothing if
     // something now asks for more than the page showed.
-    let (stopped, done) = match guard_update(apps::check(None), &shown) {
+    let (stopped, done) = match guard_for(mode, || apps::check(None), &prev.held) {
         Err(stop) => (true, *stop),
         Ok(()) => {
             let qt = thread.clone();
             let mut last = String::new();
-            let done = apps::update(None, false, false, move |raw| {
+            let done = apps::update(None, false, mode.hold(), move |raw| {
                 let (line, percent) = progress_line(&raw, &names);
                 if line == last {
                     return;
@@ -826,25 +975,36 @@ fn update_job(
     }
     let left = apps::list(false, false, None);
     drop(lock);
-    let versions = match &left {
+    let mut model = prev;
+    model.versions = match &left {
         Ok(r) if !r.is_empty() => installed_versions(),
         _ => HashMap::new(),
     };
+    model.updated(left, &done);
+    let view = view_of(&model);
     Updated {
         stopped,
+        mode,
         done,
-        left,
-        versions,
+        model,
+        view,
         refused: None,
         cancelled: false,
     }
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
+    spawn_handle(name, f).is_some()
+}
+
+fn spawn_handle(
+    name: &str,
+    f: impl FnOnce() + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(name.to_string())
         .spawn(f)
-        .is_ok()
+        .ok()
 }
 
 // ---- the QObject ----
@@ -869,8 +1029,13 @@ pub struct AppUpdatesRust {
     auto_updates: bool,
     settings_note: QString,
     revision: i32,
+    review_count: i32,
     model: Model,
     cancel: CancelToken,
+    /// The check or update worker, joined when the object goes.
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// Counts the page's lists: a list built from an older model is dropped.
+    render_seq: u64,
     /// When the list was last read this session.
     listed_at: Option<Instant>,
     round_at: Option<i64>,
@@ -899,11 +1064,31 @@ impl Default for AppUpdatesRust {
             auto_updates: false,
             settings_note: QString::default(),
             revision: 0,
+            review_count: 0,
             model: Model::default(),
             cancel: CancelToken::new(),
+            worker: None,
+            render_seq: 0,
             listed_at: None,
             round_at: None,
             store_at: None,
+        }
+    }
+}
+
+/// How long quitting waits for a running check or update.
+const QUIT_WAIT: Duration = Duration::from_secs(10);
+
+impl Drop for AppUpdatesRust {
+    /// Quitting stops a wait for the lock at once. The engine cannot be
+    /// stopped once it runs, so a running update is waited for, up to ten
+    /// seconds, as the other workers are.
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(h) = self.worker.take()
+            && !join_capped(h, QUIT_WAIT)
+        {
+            log::error!("the app update did not finish within 10 s; leaving it");
         }
     }
 }
@@ -1010,18 +1195,20 @@ impl qobject::AppUpdates {
         let cancel = self
             .as_mut()
             .begin("check", "Looking for app updates\u{2026}");
+        let prev = self.rust().model.clone();
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
-        if !spawn("telamon-updates-check", move || {
+        let handle = spawn_handle("telamon-updates-check", move || {
             let info = catch_unwind(read_info).ok();
             let _ = qt.queue(move |mut o| {
                 if let Some(i) = info {
                     o.as_mut().apply_info(i);
                 }
             });
-            let out = catch_unwind(AssertUnwindSafe(|| check_job(&qt, &cancel)));
+            let out = catch_unwind(AssertUnwindSafe(|| check_job(&qt, &cancel, prev)));
             let _ = qt.queue(move |mut o| o.as_mut().finish_check(out.ok()));
-        }) {
+        });
+        if handle.is_none() {
             let _ = qt_fail.queue(|mut o| {
                 o.as_mut().end();
                 o.as_mut().fail(&Shown {
@@ -1030,6 +1217,7 @@ impl qobject::AppUpdates {
                 });
             });
         }
+        self.as_mut().rust_mut().worker = handle;
     }
 
     fn finish_check(mut self: Pin<&mut Self>, out: Option<Checked>) {
@@ -1050,61 +1238,64 @@ impl qobject::AppUpdates {
             self.fail(&s);
             return;
         }
-        match out.rows {
-            Ok(rows) => {
-                self.as_mut().rust_mut().model.versions = out.versions;
-                self.as_mut()
-                    .rust_mut()
-                    .model
-                    .listed(rows, out.asks.as_ref());
-                self.as_mut().rust_mut().listed_at = Some(Instant::now());
-                self.as_mut().set_loaded(true);
-                // Only a check that listed counts as one, also when the
-                // question what the updates ask for failed (said below).
-                let now = now_unix();
-                self.as_mut().rust_mut().store_at = Some(now);
-                if let Some(base) = state_base() {
-                    spawn("telamon-updates-time", move || {
-                        if let Err(e) = write_checked_in(&base, now) {
-                            log::warn!("could not save the time of the update check: {e}");
-                        }
-                    });
+        let Some((model, view)) = out.listed else {
+            let e = out.list_error.unwrap_or_default();
+            self.fail(&plain_error(Ctx::Check, &e));
+            return;
+        };
+        self.as_mut().rust_mut().model = model;
+        self.as_mut().rust_mut().listed_at = Some(Instant::now());
+        self.as_mut().set_loaded(true);
+        // Only a check that listed counts as one, also when the question
+        // what the updates ask for failed (said below).
+        let now = now_unix();
+        self.as_mut().rust_mut().store_at = Some(now);
+        if let Some(base) = state_base() {
+            spawn("telamon-updates-time", move || {
+                if let Err(e) = write_checked_in(&base, now) {
+                    log::warn!("could not save the time of the update check: {e}");
                 }
-                self.as_mut().show_last_checked();
-                self.as_mut().publish();
-                if let Some(e) = out.asks.and_then(|c| c.error) {
-                    let mut s = plain_error(Ctx::Check, &e);
-                    s.text = "Couldn't check which updates ask for new permissions. They can't be installed from here until that works.".into();
-                    self.as_mut().fail(&s);
-                }
-                let n = *self.app_count();
-                self.listed(n);
-            }
-            Err(e) => {
-                self.fail(&plain_error(Ctx::Check, &e));
-            }
+            });
         }
+        self.as_mut().show_last_checked();
+        self.as_mut().show_view(&view);
+        if let Some(e) = out.asks_error {
+            let mut s = plain_error(Ctx::Check, &e);
+            s.text = "Couldn't check which updates ask for new permissions. They can't be installed from here until that works.".into();
+            self.as_mut().fail(&s);
+        }
+        let n = *self.app_count();
+        self.listed(n);
     }
 
-    pub fn update_all(mut self: Pin<&mut Self>) {
+    pub fn update_all(self: Pin<&mut Self>) {
+        self.start_update(UpdateMode::All);
+    }
+
+    pub fn update_without_new_permissions(self: Pin<&mut Self>) {
+        self.start_update(UpdateMode::LeaveOutNewPermissions);
+    }
+
+    fn start_update(mut self: Pin<&mut Self>, mode: UpdateMode) {
         if *self.busy() || self.rust().model.rows.is_empty() {
             return;
         }
         let cancel = self.as_mut().begin("update", "Updating apps\u{2026}");
-        let shown = self.rust().model.held.clone();
-        let names: Vec<(String, String)> = self
-            .rust()
-            .model
+        let prev = self.rust().model.clone();
+        let names: Vec<(String, String)> = prev
             .rows
             .iter()
             .map(|r| (r.id.clone(), clean(&r.name, 80)))
             .collect();
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
-        if !spawn("telamon-updates-update", move || {
-            let out = catch_unwind(AssertUnwindSafe(|| update_job(&qt, &cancel, shown, names)));
+        let handle = spawn_handle("telamon-updates-update", move || {
+            let out = catch_unwind(AssertUnwindSafe(|| {
+                update_job(&qt, &cancel, mode, prev, names)
+            }));
             let _ = qt.queue(move |mut o| o.as_mut().finish_update(out.ok()));
-        }) {
+        });
+        if handle.is_none() {
             let _ = qt_fail.queue(|mut o| {
                 o.as_mut().end();
                 o.as_mut().fail(&Shown {
@@ -1113,6 +1304,7 @@ impl qobject::AppUpdates {
                 });
             });
         }
+        self.as_mut().rust_mut().worker = handle;
     }
 
     fn finish_update(mut self: Pin<&mut Self>, out: Option<Updated>) {
@@ -1135,17 +1327,23 @@ impl qobject::AppUpdates {
         }
         let done = out.done;
         let installed = !done.updated.is_empty();
-        self.as_mut().rust_mut().model.versions = out.versions;
-        self.as_mut().rust_mut().model.updated(out.left, &done);
+        self.as_mut().rust_mut().model = out.model;
         self.as_mut().rust_mut().listed_at = Some(Instant::now());
-        self.as_mut().publish();
+        self.as_mut().show_view(&out.view);
         if out.stopped && done.error.is_none() {
             self.as_mut().set_notice(QString::from(
                 "Some updates ask for new permissions. Look at them below, then press Update All again.",
             ));
-        } else if installed {
-            self.as_mut()
-                .set_notice(QString::from(updated_notice(&done.updated).as_str()));
+        } else {
+            let left_out = if out.mode.hold() {
+                done.held_back.len()
+            } else {
+                0
+            };
+            let text = updated_notice(&done.updated, left_out);
+            if !text.is_empty() {
+                self.as_mut().set_notice(QString::from(text.as_str()));
+            }
         }
         if let Some(e) = &done.error {
             self.as_mut().fail(&plain_error(Ctx::Update, e));
@@ -1168,43 +1366,47 @@ impl qobject::AppUpdates {
         self.as_mut().set_notice(QString::default());
     }
 
-    pub fn library_changed(self: Pin<&mut Self>) {
-        if *self.loaded() {
-            self.publish();
+    /// The catalog changed: names, icons and release notes are looked up
+    /// again, on a worker (the lookups stat icon files). Not while a check or
+    /// an update runs: it ends with fresh lists of its own.
+    pub fn library_changed(mut self: Pin<&mut Self>) {
+        if !*self.loaded() || *self.busy() {
+            return;
         }
+        let seq = self.rust().render_seq.wrapping_add(1);
+        self.as_mut().rust_mut().render_seq = seq;
+        let model = self.rust().model.clone();
+        let qt = self.qt_thread();
+        spawn("telamon-updates-view", move || {
+            if let Ok(view) = catch_unwind(AssertUnwindSafe(|| view_of(&model))) {
+                let _ = qt.queue(move |mut o| {
+                    // Dropped when a newer list came meanwhile.
+                    if o.rust().render_seq == seq {
+                        o.as_mut().show_view_only(&view);
+                    }
+                });
+            }
+        });
     }
 
-    /// Builds the page's JSON from the model and the catalog.
-    fn publish(mut self: Pin<&mut Self>) {
-        let lib = library();
-        let (apps_v, others_v, n_apps, n_others, download) = {
-            let m = &self.rust().model;
-            let apps_v: Vec<Value> = m
-                .app_rows()
-                .map(|r| {
-                    let facts = facts_of(lib.as_deref(), r, m.version_of(r));
-                    app_json(r, m.held.get(&apps::row_key(r)), &facts)
-                })
-                .collect();
-            let others_v: Vec<Value> = m.other_rows().map(other_json).collect();
-            (
-                apps_v.clone(),
-                others_v.clone(),
-                apps_v.len(),
-                others_v.len(),
-                m.download_text(),
-            )
-        };
+    /// Takes over lists a worker built; any list still being built from an
+    /// older model is dropped.
+    fn show_view(mut self: Pin<&mut Self>, view: &View) {
+        let seq = self.rust().render_seq.wrapping_add(1);
+        self.as_mut().rust_mut().render_seq = seq;
+        self.show_view_only(view);
+    }
+
+    fn show_view_only(mut self: Pin<&mut Self>, v: &View) {
         self.as_mut()
-            .set_apps_json(QString::from(Value::Array(apps_v).to_string().as_str()));
+            .set_apps_json(QString::from(v.apps_json.as_str()));
         self.as_mut()
-            .set_others_json(QString::from(Value::Array(others_v).to_string().as_str()));
+            .set_others_json(QString::from(v.others_json.as_str()));
+        self.as_mut().set_app_count(v.app_count);
+        self.as_mut().set_other_count(v.other_count);
+        self.as_mut().set_review_count(v.review_count);
         self.as_mut()
-            .set_app_count(i32::try_from(n_apps).unwrap_or(0));
-        self.as_mut()
-            .set_other_count(i32::try_from(n_others).unwrap_or(0));
-        self.as_mut()
-            .set_download_text(QString::from(download.as_str()));
+            .set_download_text(QString::from(v.download_text.as_str()));
     }
 
     pub fn open_settings(self: Pin<&mut Self>) {
@@ -1526,21 +1728,21 @@ mod tests {
 
     #[test]
     fn what_was_updated_is_said_briefly() {
-        assert_eq!(updated_notice(&[]), "");
+        assert_eq!(updated_notice(&[], 0), "");
         assert_eq!(
-            updated_notice(&[entry("a.A", "A", false), entry("p.P", "P", true)]),
+            updated_notice(&[entry("a.A", "A", false), entry("p.P", "P", true)], 0),
             "Updated A."
         );
         assert_eq!(
-            updated_notice(&[entry("p.P", "P", true)]),
+            updated_notice(&[entry("p.P", "P", true)], 0),
             "Components were updated."
         );
         let many: Vec<_> = ["A", "B", "C", "D", "E"]
             .iter()
             .map(|n| entry(&format!("a.{n}"), n, false))
             .collect();
-        assert_eq!(updated_notice(&many[..3]), "Updated A, B and C.");
-        assert_eq!(updated_notice(&many), "Updated A, B and 3 more apps.");
+        assert_eq!(updated_notice(&many[..3], 0), "Updated A, B and C.");
+        assert_eq!(updated_notice(&many, 0), "Updated A, B and 3 more apps.");
     }
 
     #[test]
@@ -1728,5 +1930,172 @@ mod tests {
             "Telamon Settings isn't installed on this computer."
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_was_left_out_is_said_after_what_was_updated() {
+        let a = [entry("a.A", "A", false)];
+        assert_eq!(
+            updated_notice(&a, 1),
+            "Updated A. 1 app that asks for new permissions was left out."
+        );
+        assert_eq!(
+            updated_notice(&[], 2),
+            "2 apps that ask for new permissions were left out."
+        );
+        assert_eq!(updated_notice(&a, 0), "Updated A.");
+    }
+
+    fn kate_asking() -> (Model, Row) {
+        let kate = row("org.k.Kate", "Kate", false, false, 5_000_000);
+        let okular = row("org.o.Okular", "Okular", false, false, 7_000_000);
+        let mut m = Model::default();
+        let found = Done {
+            held_back: vec![held(
+                &kate,
+                &[
+                    "your home folder",
+                    "the network",
+                    "all devices, such as cameras and USB",
+                    "a",
+                    "b",
+                    "c",
+                    "d",
+                ],
+            )],
+            ..Default::default()
+        };
+        m.listed(vec![kate.clone(), okular], Some(&found));
+        (m, kate)
+    }
+
+    #[test]
+    fn update_all_needs_the_confirmation_exactly_when_something_asks() {
+        let (m, _) = kate_asking();
+        assert_eq!(m.review_count(), 1);
+        let v = render(&m, |_, _| Facts::default());
+        assert_eq!(v.review_count, 1);
+        // Nothing asks: one press.
+        let mut quiet = Model::default();
+        quiet.listed(vec![row("org.o.Okular", "Okular", false, false, 1)], None);
+        assert_eq!(quiet.review_count(), 0);
+        assert_eq!(render(&quiet, |_, _| Facts::default()).review_count, 0);
+        // A component that asks counts too: nothing slips past the dialog.
+        let rt = row("org.p.Platform", "Platform", true, true, 1);
+        let mut m2 = Model::default();
+        m2.listed(
+            vec![rt.clone()],
+            Some(&Done {
+                held_back: vec![held(&rt, &["x"])],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(m2.review_count(), 1);
+    }
+
+    #[test]
+    fn the_confirmation_gets_every_permission_not_five() {
+        let (m, _) = kate_asking();
+        let v = render(&m, |_, _| Facts::default());
+        let apps_v: Vec<Value> = serde_json::from_str(&v.apps_json).unwrap();
+        let kate = apps_v.iter().find(|a| a["name"] == "Kate").unwrap();
+        assert_eq!(kate["review"], true);
+        assert_eq!(kate["asksList"].as_array().unwrap().len(), 7);
+        // The row's own line stays short.
+        assert!(kate["asks"].as_str().unwrap().ends_with(", more"));
+        let okular = apps_v.iter().find(|a| a["name"] == "Okular").unwrap();
+        assert_eq!(okular["review"], false);
+        assert_eq!(okular["asksList"].as_array().unwrap().len(), 0);
+        assert_eq!(v.download_text, "12.0 MB");
+    }
+
+    #[test]
+    fn leaving_out_new_permissions_is_the_engines_hold() {
+        assert!(!UpdateMode::All.hold());
+        assert!(UpdateMode::LeaveOutNewPermissions.hold());
+    }
+
+    #[test]
+    fn the_guard_runs_for_everything_and_not_when_the_engine_holds() {
+        let kate = row("org.k.Kate", "Kate", true, false, 5);
+        let asks = held(&kate, &["Session Bus Policy: org.x=talk"]);
+        let shown = HashMap::new();
+        let found = || Done {
+            held_back: vec![asks.clone()],
+            ..Default::default()
+        };
+        // Everything: the check runs, and what the page did not show stops it.
+        let mut ran = false;
+        let stop = guard_for(
+            UpdateMode::All,
+            || {
+                ran = true;
+                found()
+            },
+            &shown,
+        );
+        assert!(ran);
+        assert!(stop.is_err());
+        // Leaving them out: no look is needed, the engine holds them.
+        let mut ran = false;
+        let go = guard_for(
+            UpdateMode::LeaveOutNewPermissions,
+            || {
+                ran = true;
+                found()
+            },
+            &shown,
+        );
+        assert!(!ran);
+        assert!(go.is_ok());
+    }
+
+    #[test]
+    fn what_the_engine_held_back_keeps_its_note_and_the_confirmation() {
+        let (mut m, kate) = kate_asking();
+        // The run left Kate out: she is still listed, still asking.
+        let done = Done {
+            held_back: vec![held(&kate, &["your home folder"])],
+            ..Default::default()
+        };
+        let okular = row("org.o.Okular", "Okular", false, false, 0);
+        m.updated(Ok(vec![kate.clone(), okular]), &done);
+        assert_eq!(m.review_count(), 1);
+        assert!(m.held.contains_key(&apps::row_key(&kate)));
+    }
+
+    #[test]
+    fn quitting_waits_for_a_worker_but_not_for_ever() {
+        // A worker that ends on its own is joined.
+        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(60)));
+        assert!(join_capped(h, Duration::from_secs(5)));
+        // One that does not is left after the cap.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let h = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        let start = Instant::now();
+        assert!(!join_capped(h, Duration::from_millis(100)));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        drop(tx);
+    }
+
+    #[test]
+    fn dropping_the_object_cancels_a_wait_and_joins_the_worker() {
+        let mut obj = AppUpdatesRust::default();
+        let token = obj.cancel.clone();
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ended.clone();
+        // A worker that waits for the lock until it is cancelled.
+        obj.worker = Some(std::thread::spawn(move || {
+            while !token.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        drop(obj);
+        // Drop returned only after the worker ended.
+        assert!(ended.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
