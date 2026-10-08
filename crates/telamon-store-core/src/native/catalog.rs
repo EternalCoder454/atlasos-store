@@ -174,7 +174,9 @@ mod tests {
     fn at_most_so_many_entries() {
         let entries: Vec<String> = (0..300)
             .map(|i| {
-                format!(r#"{{"id":"a.x.app{i}","repo":"EternalCoder454/r{i}","channel":"releases"}}"#)
+                format!(
+                    r#"{{"id":"a.x.app{i}","repo":"EternalCoder454/r{i}","channel":"releases"}}"#
+                )
             })
             .collect();
         let text = format!(r#"{{"schema":1,"apps":[{}]}}"#, entries.join(","));
