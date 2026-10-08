@@ -9,6 +9,8 @@ Item {
     id: page
 
     required property var catalog
+    // Flathub's curated lists (src/featured.rs).
+    required property var featured
     required property var model
     // The category's key from Catalog.categoryKey, "" for every app.
     required property string categoryKey

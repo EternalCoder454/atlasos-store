@@ -17,6 +17,12 @@ TelamonWindow {
     required property var browseModel
     // The Flatpak jobs and the installed list (src/jobs.rs).
     required property var jobs
+    // The Flatpak sources (src/sources.rs), the app updates through Telamon
+    // Updater's engine (src/updates.rs) and Flathub's curated lists for Home
+    // and the categories (src/featured.rs).
+    required property var sources
+    required property var updates
+    required property var featured
 
     // The place shown: "home", "installed", "updates" or "sources".
     property string place: "home"
@@ -340,6 +346,10 @@ TelamonWindow {
                             return homePage;
                         case "installed":
                             return installedPage;
+                        case "updates":
+                            return updatesPage;
+                        case "sources":
+                            return sourcesPage;
                         case "about":
                             return aboutPage;
                         default:
@@ -356,6 +366,7 @@ TelamonWindow {
         HomePage {
             backend: root.backend
             catalog: root.catalog
+            featured: root.featured
             categories: root.categories
             onSearchRequested: text => root.openSearch(text)
             onCategoryRequested: index => root.openCategory(index)
@@ -375,6 +386,7 @@ TelamonWindow {
         id: categoryPage
         CategoryPage {
             catalog: root.catalog
+            featured: root.featured
             model: root.browseModel
             onAppRequested: id => root.openApp(id)
             onOpenSources: root.openPlace("sources")
@@ -394,6 +406,22 @@ TelamonWindow {
             jobs: root.jobs
             onAppRequested: id => root.openApp(id)
             onRemoveRequested: (id, name, scope, ref) => root.askRemove(id, name, scope, ref)
+        }
+    }
+    Component {
+        id: updatesPage
+        UpdatesPage {
+            updates: root.updates
+            jobs: root.jobs
+            onAppRequested: id => root.openApp(id)
+            onOpenSettings: root.updates.openSettings()
+        }
+    }
+    Component {
+        id: sourcesPage
+        SourcesPage {
+            sources: root.sources
+            jobs: root.jobs
         }
     }
     Component {

@@ -15,6 +15,14 @@ rust-version = "1.89"
 # the installed telamon-ui package.
 telamon-framework-ui = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
 telamon-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+# Telamon Updater's Qt-free code (the app update engine Settings' Updates page and
+# the tray's workers use), pinned to the revision Telamon Settings uses.
+telamon-updater-core = { git = "https://github.com/EternalCoder454/atlasos-updater", rev = "b481cf123ee314baad66f52b3f5414b34b92ebbb" }
+# The one HTTPS client (Flathub's API, .flatpakrepo files from a link), the
+# same build and features as telamon-updater-core's.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 log = { version = "0.4", features = ["std"] }
 # AppStream XML (streaming reader, no serde) and the gzip it comes in.
 quick-xml = { version = "0.42", default-features = false }

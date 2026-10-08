@@ -93,6 +93,8 @@ qt_add_qml_module(telamon-store-app
         qml/CategoryTile.qml
         qml/HomePage.qml
         qml/SearchPage.qml
+        qml/SourcesPage.qml
+        qml/UpdatesPage.qml
         qml/PlaceholderPage.qml
 )
 

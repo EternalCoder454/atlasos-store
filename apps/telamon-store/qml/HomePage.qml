@@ -10,6 +10,8 @@ TelamonPage {
 
     required property var backend
     required property var catalog
+    // Flathub's curated lists (src/featured.rs).
+    required property var featured
     // [{ text, symbol }] in the order of Catalog.categoryKey.
     required property var categories
 

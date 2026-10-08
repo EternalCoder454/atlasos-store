@@ -4,7 +4,10 @@
 
 mod backend;
 mod catalog;
+mod featured;
 mod jobs;
+mod sources;
+mod updates;
 
 telamon_framework_ui::app! {
     name: "Telamon Store",
@@ -23,6 +26,9 @@ pub struct StoreObjects {
     pub search: *mut c_void,
     pub browse: *mut c_void,
     pub jobs: *mut c_void,
+    pub sources: *mut c_void,
+    pub updates: *mut c_void,
+    pub featured: *mut c_void,
 }
 
 /// Called once from `main.cpp`, after `QApplication` exists. Makes every
@@ -38,11 +44,20 @@ pub extern "C" fn store_objects_new() -> StoreObjects {
     let mut jobs = jobs::qobject::jobs_make_unique();
     catalog.pin_mut().start();
     jobs.pin_mut().start();
+    let mut sources = sources::qobject::sources_make_unique();
+    let mut updates = updates::qobject::app_updates_make_unique();
+    let mut featured = featured::qobject::featured_make_unique();
+    sources.pin_mut().start();
+    updates.pin_mut().start();
+    featured.pin_mut().start();
     StoreObjects {
         backend: backend.into_raw().cast(),
         catalog: catalog.into_raw().cast(),
         search: search.into_raw().cast(),
         browse: browse.into_raw().cast(),
         jobs: jobs.into_raw().cast(),
+        sources: sources.into_raw().cast(),
+        updates: updates.into_raw().cast(),
+        featured: featured.into_raw().cast(),
     }
 }

@@ -6,6 +6,9 @@ fn main() {
     CxxQtBuilder::new()
         .file("src/backend.rs")
         .file("src/catalog.rs")
+        .file("src/featured.rs")
         .file("src/jobs.rs")
+        .file("src/sources.rs")
+        .file("src/updates.rs")
         .build();
 }

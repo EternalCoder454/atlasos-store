@@ -24,6 +24,9 @@ struct StoreObjects {
     void *search;
     void *browse;
     void *jobs;
+    void *sources;
+    void *updates;
+    void *featured;
 };
 extern "C" StoreObjects store_objects_new();
 
@@ -97,6 +100,9 @@ int main(int argc, char *argv[])
     std::unique_ptr<QObject> searchModel(static_cast<QObject *>(made.search));
     std::unique_ptr<QObject> browseModel(static_cast<QObject *>(made.browse));
     std::unique_ptr<QObject> jobs(static_cast<QObject *>(made.jobs));
+    std::unique_ptr<QObject> sources(static_cast<QObject *>(made.sources));
+    std::unique_ptr<QObject> updates(static_cast<QObject *>(made.updates));
+    std::unique_ptr<QObject> featured(static_cast<QObject *>(made.featured));
     auto engine = std::make_unique<QQmlApplicationEngine>();
     QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine->setInitialProperties({
@@ -105,6 +111,9 @@ int main(int argc, char *argv[])
         {QStringLiteral("searchModel"), QVariant::fromValue(searchModel.get())},
         {QStringLiteral("browseModel"), QVariant::fromValue(browseModel.get())},
         {QStringLiteral("jobs"), QVariant::fromValue(jobs.get())},
+        {QStringLiteral("sources"), QVariant::fromValue(sources.get())},
+        {QStringLiteral("updates"), QVariant::fromValue(updates.get())},
+        {QStringLiteral("featured"), QVariant::fromValue(featured.get())},
     });
     engine->loadFromModule("net.eterneon.telamon.store", "Main");
     if (engine->rootObjects().isEmpty()) {
