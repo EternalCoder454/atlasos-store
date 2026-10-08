@@ -1269,6 +1269,7 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "libc",
  "libflatpak",
  "log",
  "serde_json",
