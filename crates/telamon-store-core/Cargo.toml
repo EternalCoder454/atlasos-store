@@ -18,6 +18,7 @@ libflatpak.workspace = true
 ureq.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+backhand.workspace = true
 
 [features]
 # The hooks the integration tests use to force a branch that is otherwise a

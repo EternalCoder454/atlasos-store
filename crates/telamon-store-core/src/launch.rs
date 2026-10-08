@@ -61,6 +61,10 @@ pub enum FileKind {
     Bundle,
     /// `.rpm`: can't be installed on Telamon OS; the Store explains why.
     Rpm,
+    /// An AppImage (`.AppImage`, or any file that starts like one when the
+    /// file manager hands it over by its type, or `--appimage-install`):
+    /// the Store looks inside it and asks before installing. It is never run.
+    AppImage,
 }
 
 /// One request.
@@ -101,6 +105,14 @@ pub struct Launch {
 /// forwarded launch that sent none), relative paths are refused. With no
 /// argument at all the answer is the home page. `--` ends the options.
 pub fn parse(args: &[String], cwd: &Path) -> Launch {
+    parse_with(args, cwd, &|_| false)
+}
+
+/// [`parse`], where `is_appimage` says whether a file with a name the Store
+/// does not know starts like an AppImage (the file manager opens those by
+/// their type, whatever their name). It is asked only for plain absolute
+/// paths, and only reads a few bytes.
+pub fn parse_with(args: &[String], cwd: &Path, is_appimage: &dyn Fn(&Path) -> bool) -> Launch {
     let mut launch = Launch {
         dropped: args.len().saturating_sub(MAX_ARGS),
         ..Launch::default()
@@ -114,9 +126,9 @@ pub fn parse(args: &[String], cwd: &Path) -> Launch {
             options = false;
             continue;
         } else if options && arg.starts_with('-') {
-            option(arg, &mut it)
+            option(arg, &mut it, cwd)
         } else {
-            positional(arg, cwd)
+            positional(arg, cwd, is_appimage)
         };
         match result {
             Ok(r) if launch.requests.len() < MAX_REQUESTS => launch.requests.push(r),
@@ -133,18 +145,22 @@ pub fn parse(args: &[String], cwd: &Path) -> Launch {
     launch
 }
 
-/// `--app`, `--search`, `--page` or `--remove`, with its value inline
-/// (`--app=ID`) or next. Anything else starting with `-` is refused, so a
-/// link or file name can never become an option.
+/// `--app`, `--search`, `--page`, `--remove` or `--appimage-install`, with
+/// its value inline (`--app=ID`) or next. Anything else starting with `-` is
+/// refused, so a link or file name can never become an option.
 fn option<'a>(
     arg: &str,
     rest: &mut impl Iterator<Item = &'a String>,
+    cwd: &Path,
 ) -> Result<Request, &'static str> {
     let (flag, inline) = match arg.split_once('=') {
         Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
         _ => (arg, None),
     };
-    if !matches!(flag, "--app" | "--remove" | "--search" | "--page") {
+    if !matches!(
+        flag,
+        "--app" | "--remove" | "--search" | "--page" | "--appimage-install"
+    ) {
         return Err("unknown option");
     }
     let value = inline
@@ -159,12 +175,24 @@ fn option<'a>(
         "--search" => search_text(&value)
             .map(Request::Search)
             .ok_or("empty search"),
+        "--appimage-install" => {
+            if value.chars().any(hidden) {
+                return Err("has hidden or control characters");
+            }
+            let path = resolve_path(&value, cwd)?;
+            plain_path(&path)?;
+            Ok(Request::File(FileKind::AppImage, path))
+        }
         _ => Page::parse(&value).map(Request::Page).ok_or("no such page"),
     }
 }
 
 /// A URL or a file.
-fn positional(arg: &str, cwd: &Path) -> Result<Request, &'static str> {
+fn positional(
+    arg: &str,
+    cwd: &Path,
+    is_appimage: &dyn Fn(&Path) -> bool,
+) -> Result<Request, &'static str> {
     if arg.chars().any(hidden) {
         return Err("has hidden or control characters");
     }
@@ -181,32 +209,38 @@ fn positional(arg: &str, cwd: &Path) -> Result<Request, &'static str> {
                     .map(Request::RefUrl)
                     .ok_or("not a usable link");
             }
-            "file" => return file(&file_url_path(rest)?),
+            "file" => return file(&file_url_path(rest)?, is_appimage),
             // Any other link. Without `//` it may be a file name with a
             // colon in it (`notes:v2.flatpakref`), read as a path below.
             _ if rest.starts_with("//") => return Err("unsupported link"),
             _ => {}
         }
     }
+    file(&resolve_path(arg, cwd)?, is_appimage)
+}
+
+/// A path argument made absolute against `cwd`: `./a.flatpakref` and
+/// `Downloads//a.flatpakref` are how people type paths, and a forwarded
+/// folder may end in `/`: written plainly before the check. A trailing `/` or
+/// `/.` still means a folder.
+fn resolve_path(arg: &str, cwd: &Path) -> Result<PathBuf, &'static str> {
     let path = Path::new(arg);
     if path.is_absolute() {
-        file(path)
+        Ok(path.to_path_buf())
     } else if cwd.is_absolute() {
-        // `./a.flatpakref` and `Downloads//a.flatpakref` are how people type
-        // paths, and a forwarded folder may end in `/`: written plainly
-        // before the check. A trailing `/` or `/.` still means a folder.
         if arg.ends_with('/') || arg.ends_with("/.") || arg == "." {
             return Err("is a folder");
         }
-        file(&cwd.join(path).components().collect::<PathBuf>())
+        Ok(cwd.join(path).components().collect::<PathBuf>())
     } else {
         Err("relative path with no folder to find it in")
     }
 }
 
-/// A file the Store opens, by its name: an absolute path to a file (not a
-/// folder: no trailing `/`) with no `..` in it, at most `MAX_ARG` bytes.
-fn file(path: &Path) -> Result<Request, &'static str> {
+/// Checks that `path` is a file name the Store may look at: an absolute path
+/// to a file (not a folder: no trailing `/`) with no `..` in it, at most
+/// `MAX_ARG` bytes, written plainly.
+fn plain_path(path: &Path) -> Result<(), &'static str> {
     if !path.is_absolute() || path.as_os_str().len() > MAX_ARG {
         return Err("not a file");
     }
@@ -224,6 +258,15 @@ fn file(path: &Path) -> Result<Request, &'static str> {
     if path.to_string_lossy().chars().any(hidden) {
         return Err("has hidden or control characters");
     }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("not a file")?;
+    Ok(())
+}
+
+/// A file the Store opens, by its name.
+fn file(path: &Path, is_appimage: &dyn Fn(&Path) -> bool) -> Result<Request, &'static str> {
+    plain_path(path)?;
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -237,6 +280,8 @@ fn file(path: &Path) -> Result<Request, &'static str> {
         FileKind::Bundle
     } else if lower.ends_with(".rpm") {
         FileKind::Rpm
+    } else if lower.ends_with(".appimage") || is_appimage(path) {
+        FileKind::AppImage
     } else {
         return Err("not a file the Store opens");
     };
@@ -507,6 +552,30 @@ fn without_userinfo(link: &str) -> String {
         Some(at) => format!("{}//{}", &link[..=colon], &rest[at + 1..]),
         None => link.to_string(),
     }
+}
+
+/// The folder or file after `--appimage-check` or `--appimage-inspect`, when
+/// `args` (the process's arguments without the program name) is exactly that
+/// option and one path. `None`: it is neither option (a normal launch);
+/// `Some(Err(reason))`: it is, but the path is refused. The path must be
+/// absolute and plain, as for any file request; systemd gives `%h/Downloads`
+/// already expanded.
+pub fn internal_path(option: &str, args: &[String]) -> Option<Result<PathBuf, &'static str>> {
+    let first = args.first()?;
+    let inline = first.strip_prefix(option).and_then(|r| r.strip_prefix('='));
+    if first.as_str() != option && inline.is_none() {
+        return None;
+    }
+    let value = match (inline, args) {
+        (None, [_, v]) => v.as_str(),
+        (Some(v), [_]) => v,
+        _ => return Some(Err("needs one path")),
+    };
+    if value.len() > MAX_ARG || value.chars().any(hidden) {
+        return Some(Err("has hidden or control characters"));
+    }
+    let path = Path::new(value);
+    Some(plain_path(path).map(|()| path.to_path_buf()))
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ pub mod lang;
 pub mod parse;
 
 pub use index::{IndexError, IndexKey};
-pub use parse::{Limits, ParseError, ParseOptions, parse, parse_gz_file};
+pub use parse::{Limits, ParseError, ParseOptions, parse, parse_gz_file, parse_metainfo};
 
 /// The components of one remote.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
