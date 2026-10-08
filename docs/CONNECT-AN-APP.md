@@ -11,7 +11,7 @@ Three steps, in this order. Nothing in the Store itself changes.
 Create `.github/workflows/bundle.yml` in the app's repository:
 
 ```yaml
-name: Bundle
+name: Telamon bundle
 
 on:
   push:
@@ -34,7 +34,10 @@ jobs:
 `gh api repos/EternalCoder454/atlas-framework/commits/v2.0.3 --jq .sha`. Pin by
 commit, as the other workflows do.
 
-The workflow builds the app in the same `fedora:44` container its CI uses,
+The app needs a spec (`packaging/<app>.spec`) whose `BuildRequires` build it (the
+workflow installs them, and its `telamon-ui >=` becomes the bundle's minimum)
+and a `project(<name> VERSION x.y.z)` in its CMake. The workflow builds the app
+in a `fedora:44` container like the one its CI uses,
 against `telamon-ui` from that framework release, and makes
 `<app-id>-<version>-x86_64.tar.zst` and `telamon-bundle.json`. Your app needs
 only what any Telamon app has: the CMake project under `apps/<name>`, its
@@ -44,8 +47,8 @@ of it; the rules are in the framework's `docs/BUNDLES.md`.) If the app reads
 files at run time, it finds them next to its program, at `../share/<app-id>/`:
 nothing sets an environment for it.
 
-Try it before publishing: run the workflow by hand (Actions, Bundle, Run
-workflow), download the artifact, and install it with
+Try it before publishing: run the workflow by hand (Actions, Telamon bundle,
+Run workflow; run it once on the default branch so its cache is shared), download the artifact, and install it with
 `telamon-store --install-bundle <file>.tar.zst`. The Store looks inside without
 running anything, says in red that the file is not from Telamon's list, and
 installs it after you answer.
