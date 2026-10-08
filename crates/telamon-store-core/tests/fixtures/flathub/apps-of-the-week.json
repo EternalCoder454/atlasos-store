@@ -1,0 +1,29 @@
+{
+ "apps": [
+  {
+   "app_id": "page.codeberg.foolish.Flipbook",
+   "position": 1,
+   "isFullscreen": false
+  },
+  {
+   "app_id": "io.github.redddfoxxyy.samaya",
+   "position": 2,
+   "isFullscreen": false
+  },
+  {
+   "app_id": "com.cassidyjames.butler",
+   "position": 3,
+   "isFullscreen": false
+  },
+  {
+   "app_id": "org.gnome.Solanum",
+   "position": 4,
+   "isFullscreen": false
+  },
+  {
+   "app_id": "im.bernard.Parolu",
+   "position": 5,
+   "isFullscreen": false
+  }
+ ]
+}

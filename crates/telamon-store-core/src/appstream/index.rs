@@ -685,7 +685,7 @@ fn is_temp_of(origin: &str, name: &str) -> bool {
 /// is set to 0700 with a warning when `repair` is set (a write), and refused
 /// otherwise (a read never changes anything). A directory that doesn't exist
 /// yet is fine.
-fn check_dir(dir: &Path, repair: bool) -> io::Result<()> {
+pub(crate) fn check_dir(dir: &Path, repair: bool) -> io::Result<()> {
     // Checked and repaired through one descriptor opened without following
     // a link, so the folder can't be swapped between the check and the chmod.
     let opened = fs::OpenOptions::new()
