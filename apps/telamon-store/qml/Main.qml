@@ -245,6 +245,22 @@ TelamonWindow {
         target: root.catalog
         function onRevisionChanged() {
             root.jobs.refresh();
+            root.updates.libraryChanged();
+        }
+    }
+
+    // The installed list shows versions: read it again after an update
+    // installed something. A check that found updates refreshed the sources'
+    // catalogs: read them again, for the release notes of the new versions.
+    Connections {
+        target: root.updates
+        function onRevisionChanged() {
+            root.jobs.refresh();
+        }
+        function onListed(count) {
+            if (count > 0) {
+                root.catalog.reload();
+            }
         }
     }
 
@@ -414,7 +430,6 @@ TelamonWindow {
             updates: root.updates
             jobs: root.jobs
             onAppRequested: id => root.openApp(id)
-            onOpenSettings: root.updates.openSettings()
         }
     }
     Component {
