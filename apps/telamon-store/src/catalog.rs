@@ -416,7 +416,7 @@ fn parse_sort(key: &str) -> Sort {
 
 /// A `file:` URL for an absolute local path: everything but unreserved
 /// characters and `/` is percent-encoded.
-fn file_url(path: &std::path::Path) -> String {
+pub(crate) fn file_url(path: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut url = String::from("file://");
     for &b in path.as_os_str().as_bytes() {

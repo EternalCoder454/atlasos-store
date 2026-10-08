@@ -1,0 +1,10 @@
+[Global]
+IconName=net.eterneon.telamon.store
+Comment=Telamon Store
+Name=Telamon Store
+DesktopEntry=net.eterneon.telamon.store
+
+[Event/appimageFound]
+Name=AppImage Downloaded
+Comment=An AppImage arrived in Downloads and can be installed
+Action=Popup

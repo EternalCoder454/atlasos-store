@@ -1,0 +1,21 @@
+# Started by telamon-store-appimage.path. Looks for AppImages that just
+# arrived in Downloads, tells the user once ("Install <App>?") and exits. It
+# never runs an AppImage and never opens the network; the Store itself is
+# started only when the user presses a button on the notification.
+[Unit]
+Description=Tell the user about a downloaded AppImage
+Documentation=https://github.com/EternalCoder454/atlasos-store
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/telamon-store --appimage-check %h/Downloads
+# Waits for a download to finish (up to 2 minutes) and for an answer (1 minute).
+TimeoutStartSec=6min
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+MemoryMax=2G

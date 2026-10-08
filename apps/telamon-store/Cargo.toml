@@ -25,6 +25,9 @@ libflatpak.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 telamon-updater-core.workspace = true
+zbus.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
 
 [build-dependencies]
 cxx-qt-build = "0.10"

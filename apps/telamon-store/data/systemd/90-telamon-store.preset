@@ -1,0 +1,2 @@
+# Telamon Store: tell the user about AppImages they download.
+enable telamon-store-appimage.path

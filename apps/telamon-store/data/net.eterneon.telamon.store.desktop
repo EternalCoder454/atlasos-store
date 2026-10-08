@@ -9,9 +9,10 @@ Terminal=false
 Categories=Qt;KDE;System;PackageManager;
 Keywords=software;apps;install;flatpak;flathub;store;updates;discover;
 # Flatpak's files, its links, AppStream links (Plasma's "Uninstall or Manage
-# Add-Ons" and KRunner) and RPM files, which the Store explains instead of
-# installing.
-MimeType=application/vnd.flatpak.ref;application/vnd.flatpak.repo;application/vnd.flatpak;application/x-rpm;x-scheme-handler/appstream;x-scheme-handler/flatpak+https;
+# Add-Ons" and KRunner), RPM files, which the Store explains instead of
+# installing, and AppImages, which it looks inside (never runs) and asks
+# about before installing.
+MimeType=application/vnd.flatpak.ref;application/vnd.flatpak.repo;application/vnd.flatpak;application/x-rpm;application/vnd.appimage;application/x-iso9660-appimage;x-scheme-handler/appstream;x-scheme-handler/flatpak+https;
 StartupNotify=true
 SingleMainWindow=true
 X-KDE-StartupNotify=true
