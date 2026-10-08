@@ -196,6 +196,12 @@ TelamonWindow {
                 root.openRemove(value);
                 return;
             }
+            if (kind === "repo") {
+                // A .flatpakrepo: the Sources place, with Add Source reading it.
+                root.openPlace("sources");
+                addSourceDialog.showFile(value);
+                return;
+            }
             root.showMessage({
                 title: qsTr("Not Yet Available"),
                 heading: root.requestHeadings[kind] ?? kind,
@@ -239,6 +245,16 @@ TelamonWindow {
         }
     }
 
+    // A source was added, removed, turned on or off: the catalog and the
+    // installed list are read again.
+    Connections {
+        target: root.sources
+        function onChanged() {
+            root.catalog.reload();
+            root.jobs.refresh();
+        }
+    }
+
     // Icons of installed apps come from the catalog: read the list again
     // when a new library arrives.
     Connections {
@@ -259,6 +275,14 @@ TelamonWindow {
     UnusedDialog {
         id: unusedDialog
         jobs: root.jobs
+    }
+    AddSourceDialog {
+        id: addSourceDialog
+        sources: root.sources
+    }
+    RemoveSourceDialog {
+        id: removeSourceDialog
+        sources: root.sources
     }
 
     RowLayout {
@@ -422,6 +446,8 @@ TelamonWindow {
         SourcesPage {
             sources: root.sources
             jobs: root.jobs
+            onAddRequested: addSourceDialog.show()
+            onRemoveRequested: (scope, name) => root.sources.checkRemove(scope, name)
         }
     }
     Component {
