@@ -11,6 +11,10 @@ sources, and replaces KDE Discover.
   removing unused runtimes.
 - Opens `appstream:` and `flatpak+https:` links and `.flatpakref`,
   `.flatpakrepo` and `.flatpak` files, always asking first.
+- Installs Telamon's own apps that are not in the OS image (Telamon Gates)
+  for you from their GitHub releases, with no Flatpak, and updates them. An
+  owner connects an app with one line in `catalog/native-apps.json`:
+  `docs/CONNECT-AN-APP.md`.
 
 Nothing runs when the Store is closed: Telamon Updater checks for updates in the
 background.

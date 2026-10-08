@@ -30,6 +30,11 @@
     <control>touch</control>
   </supports>
   <releases>
+    <release version="0.4.0" date="2026-10-08">
+      <description>
+        <p>Telamon's own apps that are not part of the system, such as Telamon Gates, install for you from their GitHub releases, with no Flatpak, and update from the Updates page. Every install asks first and says the app is not sandboxed.</p>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-08">
       <description>
         <p>AppImages: the Store notices one you download and offers to install it, with a clear warning that it is not sandboxed, and the Flathub version when there is one.</p>

@@ -9,6 +9,7 @@ fn main() {
         .file("src/catalog.rs")
         .file("src/featured.rs")
         .file("src/jobs.rs")
+        .file("src/native.rs")
         .file("src/sources.rs")
         .file("src/updates.rs")
         .build();

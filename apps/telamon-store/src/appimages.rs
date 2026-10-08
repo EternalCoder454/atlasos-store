@@ -159,7 +159,7 @@ struct Outcome {
     installed: bool,
 }
 
-fn human_size(n: u64) -> String {
+pub(crate) fn human_size(n: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
     if n < 1000 {
         return format!("{n} B");

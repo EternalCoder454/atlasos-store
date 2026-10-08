@@ -14,12 +14,16 @@ TelamonPage {
     required property var jobs
     // The AppImages the Store installed (src/appimages.rs).
     required property var appImages
+    // The Telamon apps the Store installed (src/native.rs).
+    required property var nativeApps
 
     title: qsTr("Installed")
 
     signal appRequested(string appId)
     signal removeRequested(string appId, string name, string scope, string ref)
     signal removeAppImageRequested(string id, string name)
+    signal removeNativeRequested(string id, string name)
+    signal nativeRequested(string appId)
 
     readonly property var apps: {
         void page.jobs.installedRevision;
@@ -28,6 +32,13 @@ TelamonPage {
     readonly property bool idle: page.jobs.phase === "idle"
     readonly property var appImageList: JSON.parse(page.appImages.installedJson)
     readonly property bool appImagesIdle: page.appImages.phase === "idle"
+    readonly property var nativeList: telamonApps.all.filter(a => a.installed === true)
+    readonly property bool nativeIdle: page.nativeApps.phase === "idle" || page.nativeApps.phase === "checking"
+
+    NativeAppsList {
+        id: telamonApps
+        json: page.nativeApps.appsJson
+    }
 
     // Open asks the window system for an activation token first, then starts
     // the AppImage; without one Wayland can leave its window behind this one.
@@ -42,6 +53,21 @@ TelamonPage {
             const id = page.openingId;
             page.openingId = "";
             page.appImages.open(id, token);
+        }
+    }
+
+    // Open for a Telamon app, the same way.
+    property string openingNative: ""
+
+    Connections {
+        target: ActivationToken
+        function onReady(key, token) {
+            if (page.openingNative.length === 0 || key !== "native:" + page.openingNative) {
+                return;
+            }
+            const id = page.openingNative;
+            page.openingNative = "";
+            page.nativeApps.open(id, token);
         }
     }
 
@@ -78,6 +104,26 @@ TelamonPage {
         }
     }
 
+    // What the last Telamon app install, update, removal or Open did.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: page.nativeApps.errorText.length > 0 || page.nativeApps.resultText.length > 0
+        spacing: TelamonStyle.spacingLarge
+        Text {
+            Layout.fillWidth: true
+            text: page.nativeApps.errorText.length > 0 ? page.nativeApps.errorText : page.nativeApps.resultText
+            wrapMode: Text.Wrap
+            font.family: TelamonStyle.fontFamily
+            font.pointSize: TelamonStyle.fontSizeBody
+            color: page.nativeApps.errorText.length > 0 ? TelamonStyle.error : TelamonStyle.success
+            textFormat: Text.PlainText
+        }
+        TelamonButton {
+            text: qsTr("Dismiss")
+            onClicked: page.nativeApps.clearMessages()
+        }
+    }
+
     Text {
         Layout.fillWidth: true
         visible: page.jobs.installedError.length > 0
@@ -98,7 +144,7 @@ TelamonPage {
     TelamonEmptyState {
         Layout.fillWidth: true
         Layout.preferredHeight: 260
-        visible: page.jobs.installedReady && page.apps.length === 0 && page.appImageList.length === 0
+        visible: page.jobs.installedReady && page.apps.length === 0 && page.appImageList.length === 0 && page.nativeList.length === 0
         symbol: Symbols.Apps
         title: page.jobs.installedError.length > 0 ? qsTr("Could Not Read Installed Apps") : qsTr("No Apps Installed")
         text: page.jobs.installedError.length > 0 ? qsTr("Try again in a moment.") : qsTr("Apps you install show up here.")
@@ -181,6 +227,115 @@ TelamonPage {
                     variant: TelamonButton.Destructive
                     enabled: page.idle
                     onClicked: page.removeRequested(row.modelData.appId, row.modelData.name, row.modelData.scope, row.modelData.ref)
+                }
+            }
+        }
+    }
+
+    // The Telamon apps the Store installed, below the Flatpak apps.
+    Text {
+        Layout.fillWidth: true
+        Layout.topMargin: TelamonStyle.spacingLarge
+        visible: page.nativeList.length > 0
+        text: qsTr("Telamon Apps")
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeHeading
+        font.bold: true
+        color: TelamonStyle.text
+        textFormat: Text.PlainText
+        Accessible.role: Accessible.Heading
+    }
+
+    Section {
+        Layout.fillWidth: true
+        visible: page.nativeList.length > 0
+
+        Repeater {
+            model: page.nativeList
+            SectionRow {
+                id: nRow
+                required property var modelData
+                readonly property real iconSide: Math.round(Kirigami.Units.gridUnit * 2.8)
+
+                title: nRow.modelData.name
+                subtitle: nRow.modelData.present ? [nRow.modelData.state === "update" ? qsTr("%1, update to %2 available").arg(nRow.modelData.installedVersion).arg(nRow.modelData.availableVersion) : nRow.modelData.installedVersion, nRow.modelData.installedSize].filter(t => t.length > 0).join(" \u00b7 ") : qsTr("The app's files are missing. Uninstall it and install it again.")
+                clickable: true
+                onClicked: page.nativeRequested(nRow.modelData.id)
+
+                leading: Rectangle {
+                    width: nRow.iconSide
+                    height: nRow.iconSide
+                    radius: Math.round(nRow.iconSide * 0.225)
+                    color: nIcon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
+                    Accessible.ignored: true
+                    Text {
+                        anchors.centerIn: parent
+                        visible: nIcon.status !== Image.Ready
+                        text: nRow.modelData.name.length > 0 ? nRow.modelData.name.charAt(0).toUpperCase() : ""
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeHeading
+                        font.bold: true
+                        color: TelamonStyle.accent
+                        textFormat: Text.PlainText
+                    }
+                    Image {
+                        id: nIcon
+                        anchors.fill: parent
+                        source: nRow.modelData.iconSource
+                        asynchronous: true
+                        cache: true
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize: Qt.size(nRow.iconSide * Screen.devicePixelRatio, nRow.iconSide * Screen.devicePixelRatio)
+                    }
+                }
+
+                content: ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: TelamonStyle.spacingXSmall
+                    Text {
+                        Layout.fillWidth: true
+                        text: nRow.title
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeBody
+                        font.bold: true
+                        color: TelamonStyle.text
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: nRow.subtitle
+                        font.family: TelamonStyle.fontFamily
+                        font.pointSize: TelamonStyle.fontSizeCaption
+                        color: TelamonStyle.textMuted
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Accessible.ignored: true
+                    }
+                }
+
+                RowLayout {
+                    spacing: TelamonStyle.spacing
+                    TelamonButton {
+                        text: qsTr("Open")
+                        //: An Open button in a row of the Telamon apps list; %1 is the app's name
+                        Accessible.name: qsTr("Open %1").arg(nRow.modelData.name)
+                        enabled: page.nativeIdle && nRow.modelData.present
+                        onClicked: {
+                            page.openingNative = nRow.modelData.id;
+                            ActivationToken.request(page.Window.window, "native:" + nRow.modelData.id);
+                        }
+                    }
+                    TelamonButton {
+                        text: qsTr("Uninstall")
+                        //: An Uninstall button in a row of the Telamon apps list; %1 is the app's name
+                        Accessible.name: qsTr("Uninstall %1").arg(nRow.modelData.name)
+                        variant: TelamonButton.Destructive
+                        enabled: page.nativeIdle
+                        onClicked: page.removeNativeRequested(nRow.modelData.id, nRow.modelData.name)
+                    }
                 }
             }
         }

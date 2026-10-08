@@ -51,6 +51,14 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
   (`$XDG_RUNTIME_DIR/telamon-updater-apps.lock`, and for this release
   `atlas-updater-apps.lock`) from a worker before changing
   installations.
+- **Native Telamon apps** (`crates/telamon-store-core/src/native/`,
+  `docs/DESIGN.md`, "Native Telamon apps"): everything from GitHub and every
+  bundle is untrusted. Nothing is unpacked by the tar library; a bundle may
+  write only files that carry its own app ID; the catalog
+  (`catalog/native-apps.json`) is fetched at run time, so a line in it is live
+  when merged: keep `docs/CONNECT-AN-APP.md` right. Tests use the fake GitHub
+  (`native::fake`), never the real one. Screenshots:
+  `scripts/dev.sh scripts/native-shots.sh`.
 - **Telamon.Ui is the installed `telamon-ui` package** from atlas-framework
   (`~/Documents/Atlas Framework`, read-only from here).
   Never fork Telamon.Ui components into this repo: ask the "AtlasOS Framework"
@@ -79,6 +87,7 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
 | Smoke run | `scripts/dev.sh dbus-run-session -- env QT_QPA_PLATFORM=offscreen /work/cmake/dev/telamon-store` |
 | Search smoke | `STORE_OFFLINE=1`-style offline container run: `scripts/dev.sh scripts/smoke-search.sh /work/cmake/dev/telamon-store` (types a whole word into Home's search with xdotool; fails if the field keeps only the first letter) |
 | RPM | `podman run --rm --security-opt label=disable -v "$PWD":/src -v <framework rpms>:/telamon-rpms:ro -e TELAMON_LOCAL_RPMS=/telamon-rpms -v telamon-store-cargo:/root/.cargo/registry -v telamon-store-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
+| Native app screenshots | `scripts/dev.sh scripts/native-shots.sh` (builds with `-DTELAMON_STORE_FAKE_GITHUB=ON`, answers GitHub from recorded files, writes `/work/shots/native`) |
 | Telamon checks | `git -C ~/Documents/Atlas\ Framework archive v2.0.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/telamon-store` and `<dir>/tools/check-app-names.sh apps/telamon-store` |
 
 `<framework rpms>` is the out dir of atlas-framework's `packaging/build-rpm.sh`:

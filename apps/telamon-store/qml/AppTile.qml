@@ -21,6 +21,9 @@ T.AbstractButton {
     property string iconSource
     property bool verified: false
     property string sourceTitle
+    // Show the name's first letter on the empty icon (for apps with no icon
+    // yet, such as a Telamon app that is not installed).
+    property bool letter: false
 
     readonly property real iconSide: Math.round(Kirigami.Units.gridUnit * 3.4)
 
@@ -69,6 +72,17 @@ T.AbstractButton {
             Layout.alignment: Qt.AlignVCenter
             radius: Math.round(control.iconSide * 0.225)
             color: icon.status === Image.Ready ? "transparent" : Qt.alpha(TelamonStyle.accent, 0.14)
+            Text {
+                anchors.centerIn: parent
+                visible: control.letter && icon.status !== Image.Ready
+                text: control.name.length > 0 ? control.name.charAt(0).toUpperCase() : ""
+                font.family: TelamonStyle.fontFamily
+                font.pointSize: TelamonStyle.fontSizeHeading
+                font.bold: true
+                color: TelamonStyle.accent
+                textFormat: Text.PlainText
+                Accessible.ignored: true
+            }
             Image {
                 id: icon
                 anchors.fill: parent

@@ -28,6 +28,7 @@ struct StoreObjects {
     void *updates;
     void *featured;
     void *app_images;
+    void *native_apps;
 };
 extern "C" StoreObjects store_objects_new();
 // Defined in src/appimage_cli.rs: the two options that run without a window
@@ -91,6 +92,9 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("search"), QStringLiteral("Search for <text>."), QStringLiteral("text")});
     parser.addOption({QStringLiteral("page"), QStringLiteral("Open home, installed, updates or sources."), QStringLiteral("page")});
     parser.addOption({QStringLiteral("appimage-install"), QStringLiteral("Look at the AppImage <file> and ask before installing it."), QStringLiteral("file")});
+    parser.addOption({QStringLiteral("install-bundle"),
+                      QStringLiteral("Look at the Telamon app bundle <file> (.tar.zst) and ask before installing it, to try an app before it is published."),
+                      QStringLiteral("file")});
     parser.addOption({QStringLiteral("appimage-check"),
                       QStringLiteral("Tell the user about AppImages that just arrived in <folder>, then exit (run by the systemd user unit that watches Downloads)."),
                       QStringLiteral("folder")});
@@ -123,6 +127,7 @@ int main(int argc, char *argv[])
     std::unique_ptr<QObject> updates(static_cast<QObject *>(made.updates));
     std::unique_ptr<QObject> featured(static_cast<QObject *>(made.featured));
     std::unique_ptr<QObject> appImages(static_cast<QObject *>(made.app_images));
+    std::unique_ptr<QObject> nativeApps(static_cast<QObject *>(made.native_apps));
     auto engine = std::make_unique<QQmlApplicationEngine>();
     QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine->setInitialProperties({
@@ -135,6 +140,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("updates"), QVariant::fromValue(updates.get())},
         {QStringLiteral("featured"), QVariant::fromValue(featured.get())},
         {QStringLiteral("appImages"), QVariant::fromValue(appImages.get())},
+        {QStringLiteral("nativeApps"), QVariant::fromValue(nativeApps.get())},
     });
     engine->loadFromModule("net.eterneon.telamon.store", "Main");
     if (engine->rootObjects().isEmpty()) {

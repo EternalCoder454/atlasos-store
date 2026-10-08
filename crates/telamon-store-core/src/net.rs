@@ -1,5 +1,7 @@
 //! The Store's one HTTPS client, for the few things it fetches itself: the
-//! Flathub API, and a `.flatpakrepo` from a link. Everything it returns is
+//! Flathub API, a `.flatpakrepo` from a link, and the Telamon apps' catalog,
+//! releases and bundles from GitHub (`native`; bundles stream through
+//! [`download`]). Everything it returns is
 //! untrusted bytes; the caller parses them with limits.
 //!
 //! Rules, from docs/DESIGN.md (Trust):
@@ -186,11 +188,9 @@ fn agent() -> ureq::Agent {
     ureq::Agent::with_parts(config, DefaultConnector::default(), PublicOnly::default())
 }
 
-/// Fetches `url` and returns the body.
-///
-/// Blocking, up to `request.timeout` plus a little for the redirects (each
-/// one gets what is left of the time).
-pub fn get(url: &str, request: &Request<'_>) -> Result<Vec<u8>, NetError> {
+/// Sends the request and follows redirects (each one through the same
+/// checks); returns the final successful response, body unread.
+fn open(url: &str, request: &Request<'_>) -> Result<ureq::http::Response<ureq::Body>, NetError> {
     let agent = agent();
     let deadline = std::time::Instant::now() + request.timeout;
     let mut url = crate::launch::https_url(url).ok_or(NetError::BadUrl)?;
@@ -199,7 +199,7 @@ pub fn get(url: &str, request: &Request<'_>) -> Result<Vec<u8>, NetError> {
             .checked_duration_since(std::time::Instant::now())
             .filter(|d| !d.is_zero())
             .ok_or(NetError::TimedOut)?;
-        let mut response = agent
+        let response = agent
             .get(&url)
             .config()
             .timeout_global(Some(left))
@@ -220,17 +220,62 @@ pub fn get(url: &str, request: &Request<'_>) -> Result<Vec<u8>, NetError> {
         if !(200..300).contains(&status) {
             return Err(NetError::Status(status));
         }
-        return response
-            .body_mut()
-            .with_config()
-            .limit(request.max_bytes)
-            .read_to_vec()
-            .map_err(|e| match e {
-                ureq::Error::BodyExceedsLimit(_) => NetError::TooLarge,
-                other => map_error(other),
-            });
+        return Ok(response);
     }
     Err(NetError::Redirect)
+}
+
+/// Fetches `url` and returns the body.
+///
+/// Blocking, up to `request.timeout` plus a little for the redirects (each
+/// one gets what is left of the time).
+pub fn get(url: &str, request: &Request<'_>) -> Result<Vec<u8>, NetError> {
+    let mut response = open(url, request)?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(request.max_bytes)
+        .read_to_vec()
+        .map_err(|e| match e {
+            ureq::Error::BodyExceedsLimit(_) => NetError::TooLarge,
+            other => map_error(other),
+        })
+}
+
+/// Fetches `url` and hands the body to `sink` in pieces, never more than
+/// `request.max_bytes` in all (more is [`NetError::TooLarge`], and the
+/// pieces already given stay given). A `sink` error stops the download.
+/// Returns the number of bytes delivered. For bodies too large to hold in
+/// memory; `request.timeout` covers the whole transfer.
+pub fn download(
+    url: &str,
+    request: &Request<'_>,
+    sink: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<u64, NetError> {
+    use std::io::Read;
+    let mut response = open(url, request)?;
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(request.max_bytes.saturating_add(1))
+        .reader();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return Ok(total),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(NetError::TimedOut),
+            Err(e) => {
+                return Err(NetError::Failed(crate::text::clean(&e.to_string(), 200)));
+            }
+        };
+        total += n as u64;
+        if total > request.max_bytes {
+            return Err(NetError::TooLarge);
+        }
+        sink(&buf[..n]).map_err(|e| NetError::Failed(crate::text::clean(&e.to_string(), 200)))?;
+    }
 }
 
 fn map_error(e: ureq::Error) -> NetError {
