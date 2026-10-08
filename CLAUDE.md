@@ -43,7 +43,10 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
   (permissions, size, the remote and its key). System-wide changes go through
   flatpak's polkit actions; nothing else asks for privilege.
 - **No background work when closed**: no timer, autostart, D-Bus activation
-  or notification. Telamon Updater owns background checks, auto-updates,
+  or notification. One exception, in docs/DESIGN.md (AppImages): a systemd
+  user path unit on `~/Downloads` starts a short-lived `telamon-store
+  --appimage-check` that may send one notification per new AppImage and
+  exits; it never runs the file. Telamon Updater owns background checks, auto-updates,
   update notifications and firmware. The Store takes Updater's lock
   (`$XDG_RUNTIME_DIR/telamon-updater-apps.lock`, and for this release
   `atlas-updater-apps.lock`) from a worker before changing
