@@ -173,6 +173,8 @@ use telamon_store_core::text::clean;
 
 /// How long a job waits for the Updater's lock before it gives up.
 const LOCK_GIVE_UP: Duration = Duration::from_secs(600);
+/// What the add dialog says when another change is still running.
+const BUSY: &str = "The Store is busy with another change. Try again in a moment.";
 /// Apps named in a row of the list.
 const APPS_SHOWN: usize = 5;
 
@@ -182,7 +184,10 @@ struct Known {
     scope: Scope,
     name: String,
     title: String,
+    /// For display (masked, cut short).
     url: String,
+    /// What a removal compares: never shown, never sent to QML.
+    identity: String,
 }
 
 /// The removal the dialog is asking about.
@@ -191,7 +196,10 @@ struct PendingRemoval {
     scope: Scope,
     name: String,
     title: String,
+    /// For display (masked, cut short).
     url: String,
+    /// What the removal compares: never shown, never sent to QML.
+    identity: String,
 }
 
 enum Job {
@@ -588,7 +596,7 @@ fn run_job(thread: &CxxQtThread<qobject::Sources>, job: Job, cancel: &CancelToke
             match take_lock(thread, cancel) {
                 Err(e) => fail(&mut out, &e, &p.title),
                 Ok(lock) => {
-                    match remove_source(p.scope, &p.name, &p.url, &lock, cancel) {
+                    match remove_source(p.scope, &p.name, &p.identity, &lock, cancel) {
                         Ok(()) => {
                             out.changed = true;
                             out.result = Some(format!("Removed {}.", p.title));
@@ -725,6 +733,7 @@ impl qobject::Sources {
                 name: r.name.clone(),
                 title: r.title.clone(),
                 url: r.url.clone(),
+                identity: r.identity.clone(),
             })
             .collect();
         self.as_mut().rust_mut().known = known;
@@ -850,6 +859,7 @@ impl qobject::Sources {
 
     pub fn prepare_add_from_url(mut self: Pin<&mut Self>, url: &QString) {
         if !self.idle() {
+            self.set_add_message(BUSY);
             return;
         }
         self.as_mut().rust_mut().preview = None;
@@ -858,6 +868,7 @@ impl qobject::Sources {
 
     pub fn prepare_add_from_file(mut self: Pin<&mut Self>, path: &QString) {
         if !self.idle() {
+            self.set_add_message(BUSY);
             return;
         }
         self.as_mut().rust_mut().preview = None;
@@ -866,6 +877,7 @@ impl qobject::Sources {
 
     pub fn confirm_add(self: Pin<&mut Self>, scope: &QString, acknowledge_unsigned: bool) {
         if !self.idle() {
+            self.set_add_message(BUSY);
             return;
         }
         let Some(scope) = parse_scope(&scope.to_string()) else {
@@ -934,6 +946,7 @@ impl qobject::Sources {
                 name: k.name,
                 title: k.title,
                 url: k.url,
+                identity: k.identity,
             }),
             "removing",
         );
@@ -1013,7 +1026,8 @@ mod tests {
             scope: Scope::System,
             name: name.into(),
             title: format!("Title of {name}"),
-            url: "https://dl.example.org/repo".into(),
+            url: "https://dl.example.org/repo?token=***".into(),
+            identity: "https://dl.example.org/repo?token=SECRET".into(),
             enabled,
             signed,
             registry: false,
@@ -1032,6 +1046,8 @@ mod tests {
             r("b", false, false, true),
         ]))
         .unwrap();
+        // The real address (it may hold a secret) never goes to QML.
+        assert!(!v.to_string().contains("SECRET"));
         assert_eq!(v[0]["scope"], "system");
         assert_eq!(v[0]["unsigned"], false);
         assert_eq!(v[1]["unsigned"], true);
@@ -1049,8 +1065,10 @@ mod tests {
             name: "flathub".into(),
             title: "Flathub".into(),
             url: "https://dl.flathub.org/repo".into(),
+            identity: "https://dl.flathub.org/repo?token=SECRET".into(),
         };
         let v: Value = serde_json::from_str(&remove_json(&p, &[])).unwrap();
+        assert!(!v.to_string().contains("SECRET"));
         assert_eq!(v["blocked"], false);
         assert!(v["note"].as_str().unwrap().contains("Flathub is where"));
         let labels = vec!["Hello".to_string()];

@@ -27,6 +27,10 @@ TelamonDialog {
     // The scope chosen: "user" or "system".
     property string scope: "user"
 
+    // The dialog was opened while another change was running: that job is
+    // not ours, so closing the dialog does not stop it.
+    property bool foreign: false
+
     readonly property bool busy: dlg.sources.phase !== "idle"
     readonly property var chosen: dlg.scope === "system" ? (dlg.preview.system ?? ({})) : (dlg.preview.user ?? ({}))
     readonly property bool canAdd: dlg.step === 2 && dlg.armed && !dlg.busy && dlg.chosen.state === "free" && (!dlg.preview.unsigned || acknowledge.checked)
@@ -54,11 +58,15 @@ TelamonDialog {
         dlg.scope = "user";
         urlField.text = "";
         acknowledge.checked = false;
-        dlg.sources.cancelAdd();
+        dlg.foreign = dlg.busy;
+        if (!dlg.busy) {
+            dlg.sources.cancelAdd();
+        }
     }
 
     function lookUp() {
         if (urlField.text.trim().length > 0 && !dlg.busy) {
+            dlg.foreign = false;
             dlg.sources.prepareAddFromUrl(urlField.text.trim());
         }
     }
@@ -91,7 +99,9 @@ TelamonDialog {
     // add that still runs is stopped.
     onClosed: {
         armTimer.stop();
-        dlg.sources.cancelAdd();
+        if (!dlg.foreign || !dlg.busy) {
+            dlg.sources.cancelAdd();
+        }
     }
 
     footerContent: [
@@ -111,7 +121,10 @@ TelamonDialog {
             text: qsTr("Add Source")
             busy: dlg.busy
             enabled: dlg.canAdd
-            onClicked: dlg.sources.confirmAdd(dlg.scope, acknowledge.checked)
+            onClicked: {
+                dlg.foreign = false;
+                dlg.sources.confirmAdd(dlg.scope, acknowledge.checked);
+            }
         }
     ]
 
@@ -185,7 +198,10 @@ TelamonDialog {
         id: fileDialog
         title: qsTr("Choose a Source File")
         nameFilters: [qsTr("Flatpak sources (*.flatpakrepo)"), qsTr("All files (*)")]
-        onAccepted: dlg.sources.prepareAddFromFile(fileDialog.selectedFile.toString())
+        onAccepted: {
+            dlg.foreign = false;
+            dlg.sources.prepareAddFromFile(fileDialog.selectedFile.toString());
+        }
     }
 
     // ---- step 2 ----

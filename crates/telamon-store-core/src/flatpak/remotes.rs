@@ -86,8 +86,13 @@ pub struct RemoteInfo {
     pub name: String,
     /// The remote's title, else its name.
     pub title: String,
-    /// For display. Compare with [`RemoteInfo::same_url`], not `==`.
+    /// For display only: secret-looking query values and user names are
+    /// masked and it is cut at 300 characters, so it can differ from the
+    /// remote's real address. Never compare or pass it back: use `identity`.
     pub url: String,
+    /// The remote's address as [`remove_source`] compares it (normalized,
+    /// not masked, not cut short). It may hold a secret: never show it.
+    pub identity: String,
     pub enabled: bool,
     /// Whether apps from it are checked against a GPG key.
     pub signed: bool,
@@ -111,7 +116,7 @@ impl RemoteInfo {
 
     /// Whether this remote's URL is `url`, compared as flatpak remotes are.
     pub fn same_url(&self, url: &str) -> bool {
-        norm_url(&self.url) == norm_url(url)
+        self.identity == norm_url(url)
     }
 
     /// The apps installed from it, by name.
@@ -244,6 +249,8 @@ fn read_scope(
                 title
             },
             url: super::scrub(&raw_url),
+            // As `remote_configs` reads it, which `remove_source` compares.
+            identity: norm_url(&text::clean(&raw_url, 500)),
             enabled: !r.is_disabled(),
             signed: r.is_gpg_verify(),
             registry: raw_url.starts_with("oci+"),
@@ -424,6 +431,8 @@ pub fn blocked_message(title: &str, labels: &[String]) -> String {
 }
 
 /// Removes the remote `name`, which must still have the URL `expected_url`
+/// (a [`RemoteInfo::identity`], or an address spelled differently, such as
+/// without a trailing slash; never the masked display copy)
 /// (a source that was changed or replaced since the user saw it is left
 /// alone). Refused with [`Error::InUse`] (the labels of what is installed
 /// from it, see [`blocked_message`]) while an app or runtime is installed
@@ -449,7 +458,7 @@ pub fn remove_source(
             "that source is not in the list any more".into(),
         ));
     };
-    if cfg.url != norm_url(expected_url) {
+    if cfg.url != expected_url && cfg.url != norm_url(expected_url) {
         return Err(Error::Invalid(
             "that source has changed since it was shown, so it was not removed".into(),
         ));

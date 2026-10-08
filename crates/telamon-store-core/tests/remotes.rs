@@ -488,3 +488,39 @@ fn an_unsigned_source_is_refused_without_the_acknowledgement_and_nothing_is_adde
     let names: Vec<&str> = out.remotes.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, vec!["test"], "{names:?}");
 }
+
+#[test]
+fn a_source_with_a_secret_or_a_long_address_is_removed_by_its_real_address() {
+    let Some((dir, _g)) = remote() else { return };
+    reset(&dir);
+    let c = CancelToken::new();
+    let lock = OperationLock::try_acquire().unwrap();
+    let long = format!("https://dl.example.org/{}/repo", "a".repeat(400));
+    for (name, url) in [
+        (
+            "secret",
+            "https://dl.example.org/repo?token=abc123".to_string(),
+        ),
+        ("longone", long),
+    ] {
+        let _clean = RemoteCleanup(Box::leak(name.to_string().into_boxed_str()));
+        must(&["remote-add", "--no-gpg-verify", name, &url]);
+        let out = list_remotes(&c);
+        let r = find(&out.remotes, Scope::User, name).clone();
+        // The display copy is masked or cut, the identity is the address.
+        assert!(!r.url.contains("abc123"), "{}", r.url);
+        assert!(r.url.chars().count() <= 300, "{}", r.url.len());
+        assert_ne!(r.url, r.identity);
+        assert!(r.identity.contains("dl.example.org"));
+        assert!(r.same_url(&url));
+        // Removing with what was displayed is refused, with the identity it works.
+        let e = remove_source(Scope::User, name, &r.url, &lock, &c).unwrap_err();
+        assert!(
+            matches!(e, Error::Invalid(ref s) if s.contains("changed")),
+            "{e:?}"
+        );
+        assert!(list_remotes(&c).remotes.iter().any(|x| x.name == name));
+        remove_source(Scope::User, name, &r.identity, &lock, &c).unwrap();
+        assert!(!list_remotes(&c).remotes.iter().any(|x| x.name == name));
+    }
+}

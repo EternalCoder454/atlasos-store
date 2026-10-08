@@ -11,7 +11,7 @@ SectionRow {
 
     // The source (one element of Sources.sourcesJson).
     required property var source
-    // False while a job runs: the switch and Remove do nothing then.
+    // False while a job runs: the row (its switch and Remove) is disabled then.
     property bool idle: true
 
     signal toggled(bool enabled)
@@ -25,11 +25,10 @@ SectionRow {
     subtitle: [row.scopeText, row.source.enabled ? "" : qsTr("Off"), row.installedText, row.source.url, row.source.unsigned ? qsTr("Not signed") : ""].filter(s => s.length > 0).join(" · ")
     showSwitch: true
     switchChecked: row.source.enabled
-    onSwitchToggled: checked => {
-        if (row.idle) {
-            row.toggled(checked);
-        }
-    }
+    // The whole row is off while a job runs, so the switch never moves
+    // without the change happening.
+    enabled: row.idle
+    onSwitchToggled: checked => row.toggled(checked)
 
     content: ColumnLayout {
         Layout.fillWidth: true
