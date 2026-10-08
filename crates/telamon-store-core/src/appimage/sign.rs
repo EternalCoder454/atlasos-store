@@ -127,16 +127,10 @@ pub fn dearmor(input: &[u8]) -> Option<Vec<u8>> {
     (!out.is_empty()).then_some(out)
 }
 
-/// `gpgv` from the usual places or the `PATH`.
+/// `gpgv` from the system's folders only: the `PATH` of a user session holds
+/// folders the user (and any program running as them) can write to, and a
+/// planted `gpgv` there could say "signed" about anything.
 pub fn find_gpgv() -> Option<PathBuf> {
-    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
-        if dir.starts_with('/') {
-            let p = Path::new(dir).join("gpgv");
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
     ["/usr/bin/gpgv", "/bin/gpgv"]
         .iter()
         .map(PathBuf::from)

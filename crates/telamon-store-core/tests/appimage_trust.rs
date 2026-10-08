@@ -375,6 +375,31 @@ fn header(json: &str, icon: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn svg_icons_may_refer_inside_themselves_only() {
+    use telamon_store_core::appimage::meta::icon_kind;
+    let svg = |body: &str| {
+        format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>{body}</svg>"
+        )
+    };
+    assert_eq!(icon_kind(svg("<defs><linearGradient id='a'/></defs><rect fill='url(#a)'/><metadata>image/svg+xml</metadata>").as_bytes()), Some(IconKind::Svg));
+    assert_eq!(
+        icon_kind(svg("<linearGradient xlink:href=\"#a\"/>").as_bytes()),
+        Some(IconKind::Svg)
+    );
+    for bad in [
+        "<svg:image xlink:href='/home/u/x.png'/>",
+        "<linearGradient xlink:href='file:///etc/passwd'/>",
+        "<linearGradient href='x.svg'/>",
+        "<feImage href='x.png'/>",
+        "<style>@import url(x.css)</style>",
+        "<svg:use href='x.svg#a'/>",
+    ] {
+        assert_eq!(icon_kind(svg(bad).as_bytes()), None, "{bad}");
+    }
+}
+
+#[test]
 fn the_helpers_answer_round_trips() {
     let i = sample();
     let back = Inspection::decode(&i.encode()).unwrap();

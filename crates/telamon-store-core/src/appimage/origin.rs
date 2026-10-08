@@ -83,13 +83,34 @@ fn http_host(url: &str) -> Option<String> {
     ok.then_some(host)
 }
 
+/// `https://host:8443/x` as `https://host/x`.
+fn strip_port(url: &str) -> String {
+    let Some(rest) = url
+        .get(..8)
+        .filter(|s| s.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{}{host}{tail}", &url[..8])
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// Classifies a recorded address.
 pub fn classify(url: &str) -> Origin {
     let url = url.trim();
     if url.is_empty() || url.len() > MAX_XATTR || url.chars().any(|c| c.is_control()) {
         return Origin::Other;
     }
-    if let Some(https) = crate::launch::https_url(url) {
+    // A port other than 443 does not change who the host is.
+    let without_port = strip_port(url);
+    if let Some(https) = crate::launch::https_url(&without_port) {
         let host = https
             .strip_prefix("https://")
             .and_then(|r| r.split(['/', '?', '#']).next())

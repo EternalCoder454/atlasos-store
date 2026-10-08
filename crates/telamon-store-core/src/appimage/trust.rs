@@ -86,9 +86,10 @@ pub fn assess(insp: &Inspection) -> Trust {
     }
 
     match &insp.origin {
-        Origin::Https { host } => {
-            lines.push(line(Severity::Info, format!("Downloaded from {host}.")))
-        }
+        Origin::Https { host } => lines.push(line(
+            Severity::Info,
+            format!("The browser recorded {host} as where it came from."),
+        )),
         Origin::Http { host } => lines.push(line(
             Severity::Danger,
             format!(

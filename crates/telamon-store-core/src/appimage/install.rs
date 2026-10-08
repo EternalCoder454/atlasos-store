@@ -117,10 +117,13 @@ pub fn safe_part(s: &str, max: usize) -> String {
             out.push(c);
         }
     }
-    let out = out
-        .trim_matches(|c| c == '.' || c == '-' || c == '_')
-        .to_string();
-    out.replace("..", ".")
+    // Runs of dots become one, however long (so the result is its own
+    // `safe_part`: install and the listing both compare names this way).
+    while out.contains("..") {
+        out = out.replace("..", ".");
+    }
+    out.trim_matches(|c| c == '.' || c == '-' || c == '_')
+        .to_string()
 }
 
 /// What an install will do, decided before the user is asked.
@@ -266,15 +269,6 @@ pub fn plan(dirs: &Dirs, insp: &Inspection) -> Result<Plan, InstallError> {
         let b = safe_part(&insp.name, 60);
         if b.is_empty() { "App".to_string() } else { b }
     };
-    let first_id = format!("{ID_PREFIX}{base}");
-    if let Some(r) = read_record(dirs, &first_id) {
-        return Ok(Plan {
-            target: r.path,
-            id: first_id,
-            replaces: true,
-            renamed: false,
-        });
-    }
     for n in 1..=MAX_NUMBERED {
         let suffix = if n == 1 {
             String::new()
@@ -282,6 +276,16 @@ pub fn plan(dirs: &Dirs, insp: &Inspection) -> Result<Plan, InstallError> {
             format!("-{n}")
         };
         let id = format!("{ID_PREFIX}{base}{suffix}");
+        // The Store's own earlier install of this app, under whichever
+        // number it got, is the one to replace.
+        if let Some(r) = read_record(dirs, &id) {
+            return Ok(Plan {
+                target: r.path,
+                id,
+                replaces: true,
+                renamed: n > 1,
+            });
+        }
         let target = dirs
             .applications
             .join(format!("{file_base}{suffix}.AppImage"));
@@ -546,6 +550,16 @@ pub fn install(
             "There is nothing to install: the file was not looked at.",
         ));
     }
+    let old = if plan.replaces {
+        // The plan was made when the dialog opened: it must still be the
+        // Store's own install, at the same place.
+        let r = read_record(dirs, &plan.id).filter(|r| r.path == plan.target);
+        Some(r.ok_or_else(|| {
+            err("The installed copy changed since you were asked. Open the file again.")
+        })?)
+    } else {
+        None
+    };
     applications_dir(dirs)?;
     let exec = exec_line(&plan.target, !dirs.fuse_available());
     let tmp = copy_checked(source, &plan.target, insp)?;
@@ -603,6 +617,11 @@ pub fn install(
     // The desktop entry, last: the app shows up only when all is in place.
     let entry = dirs.entries().join(format!("{}.desktop", plan.id));
     let text = entry_text(plan, insp, &exec, icon_rel.as_deref());
+    // A menu entry that is not ours, appeared meanwhile, is never replaced.
+    if !plan.replaces && exists(&entry) {
+        rollback(&created);
+        return Err(err("A menu entry with this name appeared. Try again."));
+    }
     let wrote = fs::create_dir_all(dirs.entries())
         .and_then(|()| fsutil::write_atomic(&entry, text.as_bytes(), 0o644));
     if let Err(e) = wrote {
@@ -610,6 +629,14 @@ pub fn install(
             rollback(&created);
         }
         return Err(io_err("write the menu entry", &e));
+    }
+    // The earlier install's icon, when this one has another (a different
+    // size or kind, or none): it was the Store's own, and is not recorded now.
+    if let Some(old_rel) = old.as_ref().and_then(|r| r.icon_rel.as_ref())
+        && icon_rel.as_ref() != Some(old_rel)
+    {
+        let (mut removed, mut left) = (Vec::new(), Vec::new());
+        remove_regular(&dirs.icons().join(old_rel), &mut removed, &mut left);
     }
     Ok(Installed {
         id: plan.id.clone(),

@@ -288,8 +288,8 @@ resolved inside the image only. From the desktop entry (parsed with the
 Store's key file reader), the AppStream metainfo (parsed by the Store's own
 AppStream parser, `parse_metainfo`: same limits and cleaning as a catalog) and
 the icon the Store takes name, version, publisher, summary, an app ID and an
-icon (a PNG up to 2048 px, or a small SVG without scripts, entities, `<use>`
-or `<image>`). Texts go through `text::clean`; the embedded `Exec=` is never
+icon (a PNG up to 2048 px, or a small SVG without scripts, entities, `<use>`,
+`<image>`, styles or any `href` that leaves the document). Texts go through `text::clean`; the embedded `Exec=` is never
 used (the Store writes its own). All of it is shown as `Text.PlainText`.
 
 **The helper process.** Inspection runs in `telamon-store --appimage-inspect
@@ -313,14 +313,16 @@ red and the Install button the red kind:
   file was changed)" (danger); present but not checkable (no `gpgv`, an
   unreadable key), danger. The check is what `appimagetool --sign` makes: a
   detached armored OpenPGP signature of the 64-character lowercase hex
-  SHA-256 of the file with both sections zeroed. It runs `gpgv` by argv with
-  an empty environment, a keyring made of the embedded key alone in a 0700
+  SHA-256 of the file with both sections zeroed. It runs `gpgv` (only `/usr/bin/gpgv` or `/bin/gpgv`: a `PATH` in a
+  user session holds folders the user can write to) by argv with an empty
+  environment, a keyring made of the embedded key alone in a 0700
   temporary folder that is removed after, and a 10 s timeout. The user's
   keyring is never read or changed and the key is trusted nowhere.
 - Where it came from (`origin.rs`): the browser's `user.xdg.origin.url`
   (or `referrer.url` when the origin is not a web address) read with
   `fgetxattr` from the file that was inspected, at most 2 KiB. `https` from a
-  public host: "Downloaded from <host>" (info). `http`: danger, naming the
+  public host (any port): "The browser recorded <host> as where it came
+  from" (info). `http`: danger, naming the
   host. None, or anything else: danger, "We can't tell where this file came
   from". Any program can write these attributes; they are a hint, not proof.
 - A file that cannot be looked into (type 1, damaged, over a limit): danger.
@@ -361,7 +363,7 @@ entry that is not the Store's, or whose path or icon reference does not check
 out, removes nothing.
 
 **The Downloads watcher** (`check.rs`, `appimage_cli.rs`, `data/systemd`).
-`telamon-store-appimage.path` (`PathChanged=%h/Downloads`; a path unit cannot
+`telamon-store-appimage.path` (`PathChanged=%h/Downloads`, no trigger or start limit so a busy folder does not stop the watch; a path unit cannot
 expand the XDG download folder, so another download folder is not watched)
 starts `telamon-store-appimage.service` (oneshot: `telamon-store
 --appimage-check %h/Downloads`, `NoNewPrivileges`, `AF_UNIX` only,
@@ -373,7 +375,8 @@ says what `systemctl preset` should do: the image must run `systemctl
 image build when the package is installed there) for it to start at every
 login. The check looks one level deep at regular files (not links, not
 hidden, not `.part`, `.crdownload`, `.download`, `.partial`, `.opdownload`,
-`.tmp`) that arrived in the last 15 minutes and are named `*.AppImage` or
+`.tmp`) that arrived in the last 15 minutes (at most 8 are waited for and
+inspected per run) and are named `*.AppImage` or
 start like one, waits until a file has not changed for 3 s (at most 2
 minutes), inspects it through the helper, and remembers path, size,
 modification time and SHA-256 in

@@ -5,6 +5,9 @@
 [Unit]
 Description=Tell the user about a downloaded AppImage
 Documentation=https://github.com/EternalCoder454/atlasos-store
+# A burst of changes in Downloads (an unpack, a torrent) starts it many times in
+# a few seconds; it must not be given up on, so no start limit.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

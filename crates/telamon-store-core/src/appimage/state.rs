@@ -127,7 +127,7 @@ impl SeenState {
         self.entries.retain(|e| e.path != entry.path);
         self.entries.push(entry);
         if self.entries.len() > MAX_ENTRIES {
-            self.entries.sort_by_key(|e| e.at);
+            // Oldest first, as they were added.
             let over = self.entries.len() - MAX_ENTRIES;
             self.entries.drain(..over);
         }

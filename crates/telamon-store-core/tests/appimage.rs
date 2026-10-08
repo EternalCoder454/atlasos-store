@@ -642,7 +642,7 @@ fn elf_sections_are_read_in_both_widths_and_byte_orders() {
     }
     // Not ELF at all, and a bad class.
     let dir = scratch("elf-bad");
-    let p = build::write(&dir, "x", &vec![b'x'; 200]);
+    let p = build::write(&dir, "x", &[b'x'; 200]);
     let f = std::fs::File::open(&p).unwrap();
     assert_eq!(read_elf(&f, 200).unwrap_err(), ElfError::NotElf);
     let mut b = elf32(false);

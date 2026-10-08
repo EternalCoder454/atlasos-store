@@ -160,6 +160,7 @@ fn fast() -> Config {
         recent: Duration::from_secs(600),
         max_entries: 100,
         max_notices: 2,
+        max_files: 8,
     }
 }
 
@@ -824,4 +825,90 @@ fn open_runs_the_recorded_file_with_extract_and_run_when_fuse_is_missing() {
     assert!(install::launch(&d, "../x", None).is_err());
     std::fs::remove_file(&plan.target).unwrap();
     assert!(install::launch(&d, &plan.id, None).is_err());
+}
+
+#[test]
+fn file_names_made_from_untrusted_names_are_stable_and_listed() {
+    for name in ["Foo...Bar", "a....b", "..x..", "My App (beta) 1.2", "-_-"] {
+        let once = install::safe_part(name, 60);
+        assert_eq!(install::safe_part(&once, 60), once, "{name:?}");
+        assert!(!once.contains(".."));
+    }
+    // An app with dots in its name installs, lists and uninstalls.
+    let d = dirs("dots");
+    let sq = build::Squash::default().file(
+        "/a.desktop",
+        "[Desktop Entry]\nType=Application\nName=Foo...Bar\nExec=x\n",
+    );
+    let (src, insp) = fixture("dots-src", &build::type2(&sq.build(), &[], &[]));
+    let plan = install::plan(&d, &insp).unwrap();
+    install::install(&d, &src, &insp, &plan).unwrap();
+    let listed = install::list(&d);
+    assert_eq!(listed.len(), 1, "{plan:?}");
+    assert!(
+        install::uninstall(&d, &listed[0].id)
+            .unwrap()
+            .left
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_numbered_install_of_the_stores_own_is_replaced_not_duplicated() {
+    let d = dirs("numbered");
+    std::fs::create_dir_all(&d.applications).unwrap();
+    // Someone else's file takes the plain name, so the first install is -2.
+    std::fs::write(d.applications.join("Sample-Draw.AppImage"), b"x").unwrap();
+    let (src, insp) = fixture("numbered-src", &build::normal());
+    let p1 = install::plan(&d, &insp).unwrap();
+    assert_eq!(p1.id, "appimage-org.example.sample-2");
+    install::install(&d, &src, &insp, &p1).unwrap();
+    let p2 = install::plan(&d, &insp).unwrap();
+    assert!(p2.replaces, "{p2:?}");
+    assert_eq!(p2.id, p1.id);
+    assert_eq!(p2.target, p1.target);
+}
+
+#[test]
+fn replacing_removes_the_old_icon_when_the_new_one_differs_and_checks_the_old_install() {
+    let d = dirs("icons");
+    let (src, insp) = fixture("icons-src", &build::normal());
+    let p = install::plan(&d, &insp).unwrap();
+    install::install(&d, &src, &insp, &p).unwrap();
+    let old_icon = d
+        .data
+        .join("icons/hicolor/256x256/apps/appimage-org.example.sample.png");
+    assert!(old_icon.exists());
+    // The next version has a 128 px icon.
+    let sq = build::Squash::default()
+        .file(
+            "/s.desktop",
+            "[Desktop Entry]\nType=Application\nName=Sample Draw\nIcon=s\nExec=x\n",
+        )
+        .file("/s.png", build::fake_png(128, 128))
+        .file(
+            "/usr/share/metainfo/org.example.Sample.appdata.xml",
+            build::APPSTREAM,
+        );
+    let (src2, insp2) = fixture("icons-src2", &build::type2(&sq.build(), &[], &[]));
+    let p2 = install::plan(&d, &insp2).unwrap();
+    assert!(p2.replaces);
+    // The entry is removed meanwhile: the plan is stale and is refused.
+    let entry = d
+        .data
+        .join("applications/appimage-org.example.sample.desktop");
+    let saved = std::fs::read(&entry).unwrap();
+    std::fs::remove_file(&entry).unwrap();
+    assert!(install::install(&d, &src2, &insp2, &p2).is_err());
+    std::fs::write(&entry, saved).unwrap();
+    install::install(&d, &src2, &insp2, &p2).unwrap();
+    assert!(
+        !old_icon.exists(),
+        "the old icon is the Store's and is no longer recorded"
+    );
+    assert!(
+        d.data
+            .join("icons/hicolor/128x128/apps/appimage-org.example.sample.png")
+            .exists()
+    );
 }

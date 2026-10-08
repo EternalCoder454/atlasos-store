@@ -43,6 +43,8 @@ pub struct Config {
     pub max_entries: usize,
     /// Most notifications in one run.
     pub max_notices: usize,
+    /// Most files waited for and inspected in one run, announced or not.
+    pub max_files: usize,
 }
 
 impl Default for Config {
@@ -54,6 +56,7 @@ impl Default for Config {
             recent: Duration::from_secs(15 * 60),
             max_entries: 2000,
             max_notices: 2,
+            max_files: 8,
         }
     }
 }
@@ -273,8 +276,9 @@ pub fn run(
     let mut report = Report::default();
     let now = SystemTime::now();
     let at = ns(now) / 1_000_000_000;
+    let mut looked_at = 0;
     for c in candidates(target, cfg, now) {
-        if report.notified.len() >= cfg.max_notices {
+        if report.notified.len() >= cfg.max_notices || looked_at >= cfg.max_files {
             break;
         }
         let path = c.path.to_string_lossy().into_owned();
@@ -282,6 +286,7 @@ pub fn run(
             report.skipped += 1;
             continue;
         }
+        looked_at += 1;
         let Some(stable) = wait_stable(&c.path, cfg, SystemTime::now()) else {
             report.skipped += 1;
             continue;
@@ -310,6 +315,13 @@ pub fn run(
                 continue;
             }
         };
+        // A file that changed while it was looked at is left for the next
+        // change event: its size and time would not match its hash.
+        let after = plain_file(&c.path).map(|m| (m.len(), mtime_ns(&m)));
+        if after != Some((stable.size, stable.mtime_ns)) {
+            report.skipped += 1;
+            continue;
+        }
         entry.sha256 = insp.sha256.clone();
         let duplicate = state.seen(&path, stable.size, stable.mtime_ns, &insp.sha256);
         // Remembered before the user is told: if it can't be, nobody is.

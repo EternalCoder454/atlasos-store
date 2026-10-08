@@ -11,6 +11,8 @@ Documentation=https://github.com/EternalCoder454/atlasos-store
 [Path]
 PathChanged=%h/Downloads
 Unit=telamon-store-appimage.service
+# No trigger limit: a busy folder must not stop the watch.
+TriggerLimitIntervalSec=0
 
 [Install]
 WantedBy=default.target

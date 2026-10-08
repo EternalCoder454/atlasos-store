@@ -75,19 +75,47 @@ pub fn icon_kind(bytes: &[u8]) -> Option<IconKind> {
     {
         return None;
     }
-    const REFUSED: [&str; 7] = [
+    // Anything that can pull in another file or run: scripts, entities,
+    // external references (`href` in any form, `<use>`, `<image>`, with or
+    // without a namespace prefix), styles that can import, embedded HTML.
+    const REFUSED: [&str; 15] = [
         "<script",
         "<!entity",
         "<!doctype",
         "<image",
-        "<foreignobject",
+        ":image",
+        "feimage",
         "<use",
-        "xlink:href=\"http",
+        ":use",
+        "foreignobject",
+        "<style",
+        "@import",
+        "<a ",
+        ":a ",
+        "javascript:",
+        "<iframe",
     ];
-    if REFUSED.iter().any(|r| lower.contains(r)) {
+    if REFUSED.iter().any(|r| lower.contains(r)) || external_href(&lower) {
         return None;
     }
     Some(IconKind::Svg)
+}
+
+/// Whether some `href` points anywhere but inside the document (`#id`):
+/// gradients and clips refer that way, a file or a URL is not allowed.
+fn external_href(lower: &str) -> bool {
+    let mut rest = lower;
+    while let Some(i) = rest.find("href") {
+        let after = rest[i + 4..].trim_start();
+        let Some(value) = after.strip_prefix('=').map(str::trim_start) else {
+            return true;
+        };
+        if !(value.starts_with("\"#") || value.starts_with("'#")) {
+            return true;
+        }
+        rest = &rest[i + 4..];
+    }
+    false
 }
 
 /// A name that may be looked up as an icon inside the image.
