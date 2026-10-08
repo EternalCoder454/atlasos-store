@@ -370,6 +370,7 @@ TelamonWindow {
             categories: root.categories
             onSearchRequested: text => root.openSearch(text)
             onCategoryRequested: index => root.openCategory(index)
+            onAppRequested: id => root.openApp(id)
             onOpenSources: root.openPlace("sources")
         }
     }

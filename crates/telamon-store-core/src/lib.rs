@@ -4,6 +4,7 @@
 
 pub mod appstream;
 pub mod catalog;
+pub mod flathub;
 pub mod flatpak;
 pub mod flatpakref;
 pub mod keyfile;

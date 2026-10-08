@@ -87,6 +87,7 @@ qt_add_qml_module(telamon-store-app
         qml/RemoveDialog.qml
         qml/UnusedDialog.qml
         qml/AppGrid.qml
+        qml/AppShelf.qml
         qml/AppTile.qml
         qml/CatalogState.qml
         qml/CategoryPage.qml
