@@ -30,6 +30,11 @@
     <control>touch</control>
   </supports>
   <releases>
+    <release version="0.3.0" date="2026-10-07">
+      <description>
+        <p>The Sources and Updates pages work, Home shows popular and new apps, and the category filters are labelled.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-07">
       <description>
         <p>Renamed to Telamon Store.</p>
