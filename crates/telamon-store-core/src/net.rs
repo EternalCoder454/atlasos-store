@@ -164,8 +164,13 @@ fn public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfec0
         // 2001:db8::/32 documentation
         || (s[0] == 0x2001 && s[1] == 0x0db8)
-        // 2001::/32 Teredo and 2001:10::/28 ORCHID: tunnels, not hosts
-        || (s[0] == 0x2001 && s[1] == 0)
+        // 2001::/32 Teredo (a tunnel), 2001:10::/28 ORCHID and 2001:20::/28
+        // ORCHIDv2 (hashes, not hosts)
+        || (s[0] == 0x2001 && (s[1] == 0 || (s[1] & 0xfff0) == 0x0010 || (s[1] & 0xfff0) == 0x0020))
+        // ::/96, the deprecated IPv4-compatible form
+        || s[..6].iter().all(|&x| x == 0)
+        // 64:ff9b:1::/48, local-use NAT64
+        || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
         // 100::/64 discard-only
         || (s[0] == 0x0100 && s[1..4].iter().all(|&x| x == 0)))
 }
@@ -306,6 +311,12 @@ mod tests {
             "64:ff9b::a00:1",
             "2002:7f00:1::1",
             "2002:c0a8:101::1",
+            "::10.0.0.1",
+            "::8.8.8.8",
+            "64:ff9b:1::1",
+            "2001:10::1",
+            "2001:2f::1",
+            "2001::1",
         ] {
             assert!(!is_public(ip(bad)), "{bad}");
         }
