@@ -150,6 +150,16 @@ enum Msg {
     Fetched(List, Result<Vec<String>, flathub::RefreshError>),
 }
 
+/// The QML property a list is published in: the categories share one.
+fn slot(list: List) -> u8 {
+    match list {
+        List::Popular => 0,
+        List::RecentlyUpdated => 1,
+        List::Picks => 2,
+        List::Category(_) => 3,
+    }
+}
+
 /// The worker's memory: where the cache is, which fetches failed, the IDs of
 /// each list, what was last published for it and which fetches are to come.
 ///
@@ -162,7 +172,11 @@ struct Worker {
     dir: Option<PathBuf>,
     gate: RetryGate,
     ids: HashMap<List, Vec<String>>,
-    published: HashMap<List, String>,
+    /// What was last handed over for each QML property (see [`slot`]).
+    published: HashMap<u8, String>,
+    /// The category a page last asked for: the only one whose list is
+    /// published, since all categories share one property.
+    category: Option<Category>,
     /// Lists to fetch, the next first.
     wanted: VecDeque<List>,
     /// The list being fetched.
@@ -178,6 +192,7 @@ impl Worker {
             gate: RetryGate::default(),
             ids: HashMap::new(),
             published: HashMap::new(),
+            category: None,
             wanted: VecDeque::new(),
             busy: None,
         }
@@ -191,11 +206,18 @@ impl Worker {
         let (Some(library), Some(ids)) = (library, self.ids.get(&list)) else {
             return true;
         };
-        let json = list_json(library, list, ids);
-        if self.published.get(&list) == Some(&json) {
+        // A category's list that is no longer the one on the screen (a late
+        // fetch) must not replace the one that is.
+        if let List::Category(c) = list
+            && self.category != Some(c)
+        {
             return true;
         }
-        self.published.insert(list, json.clone());
+        let json = list_json(library, list, ids);
+        if self.published.get(&slot(list)) == Some(&json) {
+            return true;
+        }
+        self.published.insert(slot(list), json.clone());
         emit(list, json)
     }
 
@@ -207,14 +229,23 @@ impl Worker {
         let Some(dir) = self.dir.clone() else {
             return true;
         };
+        if let Job::Category(c) = job
+            && self.category != Some(c)
+        {
+            // Another category: what was handed over is not this one's.
+            self.category = Some(c);
+            self.published.remove(&slot(List::Category(c)));
+        }
         for list in job.lists() {
             let mut fresh = false;
             if let Some(cached) = flathub::read_cache(&dir, list) {
                 fresh = cached.is_fresh(list, now);
                 self.ids.insert(list, cached.ids);
-                if !self.publish(list, library, emit) {
-                    return false;
-                }
+            }
+            // Also what an earlier fetch left in memory when the cache file
+            // could not be written or read.
+            if !self.publish(list, library, emit) {
+                return false;
             }
             let queued = self.busy == Some(list) || self.wanted.contains(&list);
             if !fresh && !queued && self.gate.allowed(list, now) {
@@ -688,5 +719,101 @@ mod tests {
         )
         .unwrap();
         assert!(!worker.ask(Job::Home, NOW, Some(&lib), &mut emit));
+    }
+
+    #[test]
+    fn coming_back_to_a_category_publishes_it_again() {
+        let dir = scratch("switch");
+        let lib = library();
+        let (games, edu) = (Category::Games, Category::Education);
+        flathub::write_cache(
+            &dir,
+            List::Category(games),
+            &["org.example.GameOne".to_string()],
+            NOW,
+        )
+        .unwrap();
+        flathub::write_cache(
+            &dir,
+            List::Category(edu),
+            &["org.example.GameOne".to_string()],
+            NOW,
+        )
+        .unwrap();
+        let mut worker = Worker::new(Some(dir));
+        let fetch =
+            |_: &str| -> Result<Vec<u8>, NetError> { panic!("fresh lists are not fetched") };
+        let published: Published = RefCell::new(Vec::new());
+        let keys = || -> Vec<String> {
+            published
+                .borrow()
+                .iter()
+                .map(|(_, j)| {
+                    let v: serde_json::Value = serde_json::from_str(j).unwrap();
+                    v["key"].as_str().unwrap().to_string()
+                })
+                .collect()
+        };
+        for c in [games, edu, games] {
+            drive(
+                &mut worker,
+                Job::Category(c),
+                NOW,
+                Some(&lib),
+                &fetch,
+                &published,
+            );
+        }
+        assert_eq!(keys(), ["games", "education", "games"]);
+        // Asked again and nothing changed: not published twice.
+        drive(
+            &mut worker,
+            Job::Category(games),
+            NOW,
+            Some(&lib),
+            &fetch,
+            &published,
+        );
+        assert_eq!(published.borrow().len(), 3);
+    }
+
+    #[test]
+    fn a_late_result_for_another_category_is_not_published() {
+        let dir = scratch("late");
+        let lib = library();
+        let (games, edu) = (Category::Games, Category::Education);
+        let mut worker = Worker::new(Some(dir));
+        let published: Published = RefCell::new(Vec::new());
+        let mut emit = |l: List, j: String| {
+            published.borrow_mut().push((l, j));
+            true
+        };
+        // Games is asked and its fetch starts; the user moves to Education.
+        assert!(worker.ask(Job::Category(games), NOW, Some(&lib), &mut emit));
+        assert_eq!(worker.next_fetch(NOW).unwrap().1, List::Category(games));
+        assert!(worker.ask(Job::Category(edu), NOW, Some(&lib), &mut emit));
+        assert!(worker.fetched(
+            List::Category(games),
+            Ok(vec!["org.example.GameOne".into()]),
+            NOW,
+            Some(&lib),
+            &mut emit
+        ));
+        assert!(published.borrow().is_empty());
+        // Education's own result is published.
+        assert_eq!(worker.next_fetch(NOW).unwrap().1, List::Category(edu));
+        assert!(worker.fetched(
+            List::Category(edu),
+            Ok(vec!["org.example.GameOne".into()]),
+            NOW,
+            Some(&lib),
+            &mut emit
+        ));
+        assert_eq!(published.borrow().len(), 1);
+        assert!(published.borrow()[0].1.contains(r#""key":"education""#));
+        // Back to Games: its ids are in memory, so it is published at once.
+        assert!(worker.ask(Job::Category(games), NOW, Some(&lib), &mut emit));
+        assert_eq!(published.borrow().len(), 2);
+        assert!(published.borrow()[1].1.contains(r#""key":"games""#));
     }
 }
