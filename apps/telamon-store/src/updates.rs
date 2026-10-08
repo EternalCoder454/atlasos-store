@@ -523,7 +523,10 @@ pub fn plain_error(ctx: Ctx, raw: &str) -> Shown {
     } else if has(&["cancelled", "canceled"]) {
         Some("It was cancelled.")
     } else {
-        None
+        Some(match ctx {
+            Ctx::Check => "Something went wrong. Try again in a moment.",
+            Ctx::Update => "Something went wrong. Look at what is installed, then try again.",
+        })
     };
     Shown {
         text: match reason {
@@ -1428,7 +1431,7 @@ mod tests {
         );
         assert_eq!(
             plain_error(Ctx::Update, "something odd\nhappened").text,
-            "The update didn't finish."
+            "The update didn't finish. Something went wrong. Look at what is installed, then try again."
         );
         assert_eq!(
             plain_error(Ctx::Update, "something odd\nhappened").detail,

@@ -107,11 +107,12 @@ TelamonPage {
             }
             TelamonProgressBar {
                 Layout.fillWidth: true
-                indeterminate: page.updates.percent < 0
+                indeterminate: page.updates.percent <= 0
                 value: Math.max(0, page.updates.percent) / 100
             }
         }
         TelamonButton {
+            Layout.alignment: Qt.AlignVCenter
             text: qsTr("Cancel")
             visible: page.updates.waiting
             onClicked: page.updates.cancelWait()
@@ -253,9 +254,6 @@ TelamonPage {
         symbol: page.noApps ? Symbols.Apps : Symbols.CheckCircle
         title: page.noApps ? qsTr("No Apps Installed") : qsTr("Up to Date")
         text: page.noApps ? qsTr("Apps you install show up here.") : qsTr("All apps are up to date.")
-        actionText: qsTr("Check for Updates")
-        actionSymbol: Symbols.Refresh
-        onTriggered: page.updates.check()
     }
 
     // Only components wait: no app does.
