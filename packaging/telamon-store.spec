@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-store
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Telamon Store, the app store of Telamon OS
 License:        MIT
@@ -160,6 +160,11 @@ appstream-util validate-relax --nonet \
 %{_datadir}/knotifications6/telamon-store.notifyrc
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.1-1
+- AppImages: a downloaded AppImage brings an "Install this app?" notification;
+  the install dialog says it is not sandboxed, warns about unsigned files and
+  unknown sites, and offers the Flathub version when there is one.
+
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.0-1
 - Sources: list the Flatpak sources of both installations, turn them on and off, add one from a link or a
   .flatpakrepo file (the title, address and key are shown before anything is added), and remove one (refused,
