@@ -43,9 +43,21 @@ pub struct Config {
     pub max_entries: usize,
     /// Most notifications in one run.
     pub max_notices: usize,
-    /// Most files waited for and inspected in one run, announced or not.
+    /// Most files waited for and inspected in one round, announced or not.
     pub max_files: usize,
+    /// Most rounds in one run. A round looks at the folder again, so files
+    /// that arrived while the last one ran (the path unit does not start a
+    /// service that is still running) and files past `max_files` are found.
+    pub max_rounds: usize,
+    /// No new file is started after this long; the process's own alarm and the
+    /// unit's timeout are longer (see `DEADLINE`).
+    pub budget: Duration,
 }
+
+/// How long a check may run at most: the process ends itself after this
+/// (SIGALRM), and the unit's `TimeoutStartSec` is a minute more. The work
+/// budget (`Config::budget`) ends first, so the alarm is only a backstop.
+pub const DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 impl Default for Config {
     fn default() -> Config {
@@ -55,8 +67,10 @@ impl Default for Config {
             max_wait: Duration::from_secs(120),
             recent: Duration::from_secs(15 * 60),
             max_entries: 2000,
-            max_notices: 2,
+            max_notices: 4,
             max_files: 8,
+            max_rounds: 4,
+            budget: Duration::from_secs(8 * 60),
         }
     }
 }
@@ -264,7 +278,8 @@ pub fn notice(path: &Path, insp: &Inspection) -> Notice {
     }
 }
 
-/// Runs one check of `target`.
+/// Runs one check of `target`: rounds over the folder until a round finds
+/// nothing new to look at (or the caps and the budget are reached).
 pub fn run(
     target: &Path,
     cfg: &Config,
@@ -274,16 +289,53 @@ pub fn run(
     launcher: &mut dyn Launcher,
 ) -> Report {
     let mut report = Report::default();
+    let started = Instant::now();
+    for _ in 0..cfg.max_rounds.max(1) {
+        if report.notified.len() >= cfg.max_notices || started.elapsed() >= cfg.budget {
+            break;
+        }
+        if !round(
+            target,
+            cfg,
+            state,
+            inspector,
+            notifier,
+            launcher,
+            &mut report,
+            started,
+        ) {
+            break;
+        }
+    }
+    report
+}
+
+/// One look at the folder. True when it did something a later round could
+/// change the picture of (looked at a file); false when there was nothing new.
+#[allow(clippy::too_many_arguments)]
+fn round(
+    target: &Path,
+    cfg: &Config,
+    state: &mut SeenState,
+    inspector: &dyn Inspector,
+    notifier: &mut dyn Notifier,
+    launcher: &mut dyn Launcher,
+    report: &mut Report,
+    started: Instant,
+) -> bool {
     let now = SystemTime::now();
     let at = ns(now) / 1_000_000_000;
     let mut looked_at = 0;
+    let mut state_failed = false;
     for c in candidates(target, cfg, now) {
-        if report.notified.len() >= cfg.max_notices || looked_at >= cfg.max_files {
+        if report.notified.len() >= cfg.max_notices
+            || looked_at >= cfg.max_files
+            || started.elapsed() >= cfg.budget
+        {
             break;
         }
         let path = c.path.to_string_lossy().into_owned();
         if state.seen(&path, c.size, c.mtime_ns, "") {
-            report.skipped += 1;
             continue;
         }
         looked_at += 1;
@@ -311,12 +363,13 @@ pub fn run(
                 report.errors.push(format!("{}: {e}", c.path.display()));
                 if let Err(e) = state.remember(entry) {
                     report.errors.push(e.to_string());
+                    state_failed = true;
                 }
                 continue;
             }
         };
         // A file that changed while it was looked at is left for the next
-        // change event: its size and time would not match its hash.
+        // round: its size and time would not match its hash.
         let after = plain_file(&c.path).map(|m| (m.len(), mtime_ns(&m)));
         if after != Some((stable.size, stable.mtime_ns)) {
             report.skipped += 1;
@@ -329,6 +382,7 @@ pub fn run(
             report
                 .errors
                 .push(format!("not announced, the state can't be kept: {e}"));
+            state_failed = true;
             continue;
         }
         if duplicate {
@@ -349,5 +403,5 @@ pub fn run(
             Err(e) => report.errors.push(format!("notification: {e}")),
         }
     }
-    report
+    looked_at > 0 && !state_failed
 }

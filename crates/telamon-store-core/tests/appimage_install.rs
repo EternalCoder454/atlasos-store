@@ -161,6 +161,8 @@ fn fast() -> Config {
         max_entries: 100,
         max_notices: 2,
         max_files: 8,
+        max_rounds: 4,
+        budget: Duration::from_secs(60),
     }
 }
 
@@ -709,13 +711,23 @@ fn uninstall_does_not_follow_a_link_where_the_app_should_be() {
     let r = install::uninstall(&d, &plan.id).unwrap();
     assert_eq!(std::fs::read(&precious).unwrap(), b"precious");
     assert!(!r.left.is_empty(), "the link is left and said so");
-    // The entry stays so the user can see what is left.
+    assert_eq!(r.left[0].0, plan.target);
+    // The entry and the icon are still the Store's to remove; the foreign
+    // link stays where it is.
     assert!(
-        d.data
+        !d.data
             .join("applications")
             .join(format!("{}.desktop", plan.id))
             .exists()
     );
+    assert!(
+        !d.data
+            .join("icons/hicolor/256x256/apps")
+            .join(format!("{}.png", plan.id))
+            .exists()
+    );
+    assert!(install::list(&d).is_empty());
+    assert!(plan.target.symlink_metadata().is_ok());
 }
 
 #[test]
@@ -911,4 +923,57 @@ fn replacing_removes_the_old_icon_when_the_new_one_differs_and_checks_the_old_in
             .join("icons/hicolor/128x128/apps/appimage-org.example.sample.png")
             .exists()
     );
+}
+
+#[test]
+fn files_past_the_per_round_cap_are_found_by_the_next_round() {
+    let dl = scratch("dl-rounds");
+    let state = scratch("dl-rounds-state").join("seen.json");
+    for n in 0..3 {
+        build::write(
+            &dl,
+            &format!("R{n}.AppImage"),
+            &build::type2(
+                &build::normal_squash().file("/n", format!("{n}")).build(),
+                &[],
+                &[],
+            ),
+        );
+    }
+    let cfg = Config {
+        max_files: 1,
+        max_notices: 4,
+        ..fast()
+    };
+    let mut n = Notices::default();
+    let r = run_check(&dl, &state, &cfg, &mut n, &mut Opened::default());
+    assert_eq!(r.notified.len(), 3, "{r:?}");
+    // And a file that arrives after a run is picked up by the next one only
+    // when it is new: nothing is announced twice.
+    let r = run_check(
+        &dl,
+        &state,
+        &cfg,
+        &mut Notices::default(),
+        &mut Opened::default(),
+    );
+    assert!(r.notified.is_empty());
+    // The budget stops new work.
+    build::write(
+        &dl,
+        "Late.AppImage",
+        &build::type2(&build::normal_squash().file("/late", "x").build(), &[], &[]),
+    );
+    let none = Config {
+        budget: Duration::ZERO,
+        ..fast()
+    };
+    let r = run_check(
+        &dl,
+        &state,
+        &none,
+        &mut Notices::default(),
+        &mut Opened::default(),
+    );
+    assert!(r.notified.is_empty());
 }

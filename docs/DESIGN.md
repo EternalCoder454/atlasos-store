@@ -239,7 +239,7 @@ notification. AppStream is refreshed only while it is open (when older than
 The one exception is the AppImage notice (see "AppImages"): a systemd user path
 unit holds an inotify watch on `~/Downloads`, and when that folder changes
 starts a short-lived `telamon-store --appimage-check` that exits when it has
-told the user (or after at most 6 minutes). No daemon, no timer, no polling
+told the user (or after at most 10 minutes). No daemon, no timer, no polling
 while nothing changes, no network.
 
 ## Budgets
@@ -376,7 +376,7 @@ image build when the package is installed there) for it to start at every
 login. The check looks one level deep at regular files (not links, not
 hidden, not `.part`, `.crdownload`, `.download`, `.partial`, `.opdownload`,
 `.tmp`) that arrived in the last 15 minutes (at most 8 are waited for and
-inspected per run) and are named `*.AppImage` or
+inspected per round) and are named `*.AppImage` or
 start like one, waits until a file has not changed for 3 s (at most 2
 minutes), inspects it through the helper, and remembers path, size,
 modification time and SHA-256 in
@@ -385,7 +385,10 @@ atomic, at most 256 entries, a damaged file reads as empty, a link or another
 user's file is refused) before it tells the user: if that cannot be saved,
 nobody is told. The same file is never announced twice (same path, size and
 time; or the same size, time and content under another name); a changed file
-is. At most 2 notices per run. The notification
+is. A run looks at the folder again after each round (at most 4 rounds, so files that
+arrived while it ran, or past the 8, are found; the path unit does not start a
+service that is still running), announces at most 4 files, starts no new file
+after 8 minutes and ends itself after 10 (the unit's timeout is 11). The notification
 (`org.freedesktop.Notifications` through `telamon-updater-core`'s notifier, event
 `appimageFound` in `telamon-store.notifyrc`, so Plasma's settings apply) says
 "Install <name>?" with plain text only (cleaned fields, markup escaped),

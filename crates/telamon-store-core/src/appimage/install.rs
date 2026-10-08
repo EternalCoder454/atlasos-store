@@ -718,10 +718,10 @@ pub fn uninstall(dirs: &Dirs, id: &str) -> Result<Removed, InstallError> {
     if let Some(rel) = &r.icon_rel {
         remove_regular(&dirs.icons().join(rel), &mut removed, &mut left);
     }
-    if left.is_empty() {
-        let entry = dirs.entries().join(format!("{id}.desktop"));
-        remove_regular(&entry, &mut removed, &mut left);
-    }
+    // The menu entry goes whatever happened to the app's file (a foreign
+    // file or a link put in its place is left alone and reported).
+    let entry = dirs.entries().join(format!("{id}.desktop"));
+    remove_regular(&entry, &mut removed, &mut left);
     Ok(Removed {
         name: r.name,
         removed,

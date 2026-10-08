@@ -64,6 +64,7 @@ Requires:       flatpak
 Recommends:     gnupg2
 Requires:       shared-mime-info
 Requires:       systemd
+%{?systemd_ordering}
 
 %description
 Telamon Store is the app store of Telamon OS. Browse and search the apps on Flathub

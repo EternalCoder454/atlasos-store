@@ -12,8 +12,10 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/telamon-store --appimage-check %h/Downloads
-# Waits for a download to finish (up to 2 minutes) and for an answer (1 minute).
-TimeoutStartSec=6min
+# Waits for downloads to finish and for answers. The check stops starting work
+# after 8 minutes and ends itself after 10 (check::DEADLINE); this is a minute
+# more than that.
+TimeoutStartSec=11min
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

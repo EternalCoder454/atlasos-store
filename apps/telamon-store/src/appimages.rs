@@ -182,6 +182,22 @@ fn preview_dir() -> Option<PathBuf> {
     )
 }
 
+/// What the page says when a request is ignored because a job is running.
+const BUSY: &str = "The Store is busy with another AppImage. Try again in a moment.";
+
+/// Removes the icons written for the dialog (`save_preview`): they are the
+/// file's, shown only while the question is open.
+fn remove_previews() {
+    let Some(dir) = preview_dir() else { return };
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten().take(64) {
+            if e.file_name().to_string_lossy().starts_with("preview-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 /// Writes the icon of the file being asked about where QML can read it,
 /// under a new name each time (the image cache is keyed by URL), and removes
 /// the earlier ones. `""` for none.
@@ -244,14 +260,9 @@ fn inspect_job(path: &Path) -> Outcome {
         out.error = Some("There is no home folder to install to.".into());
         return out;
     };
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => {
-            out.error = Some("Telamon couldn't find itself to look at the file.".into());
-            return out;
-        }
-    };
-    let insp = match helper::run(&exe, path, helper::TIMEOUT) {
+    // The running program itself: it survives a package upgrade that
+    // replaced the file under a running Store.
+    let insp = match helper::run(Path::new(helper::SELF), path, helper::TIMEOUT) {
         Ok(i) => i,
         Err(e) => {
             out.error = Some(e.to_string());
@@ -351,6 +362,7 @@ fn run_job(job: Job) -> Outcome {
                 Err(e) => out.error = Some(e.to_string()),
             }
             out.listing = Some(install::list(&dirs));
+            remove_previews();
             out
         }
         Job::Remove(id) => {
@@ -431,6 +443,9 @@ impl qobject::AppImages {
         }
         if foreground {
             self.as_mut().set_phase(QString::from("idle"));
+            // A second request that was turned away while this one ran must
+            // not stay on the page once this one is done.
+            self.as_mut().clear_busy();
             if let Some(e) = &out.error {
                 self.as_mut().set_error_text(QString::from(e.as_str()));
             }
@@ -449,6 +464,18 @@ impl qobject::AppImages {
         }
     }
 
+    fn clear_busy(mut self: Pin<&mut Self>) {
+        if self.error_text().to_string() == BUSY {
+            self.as_mut().set_error_text(QString::default());
+        }
+    }
+
+    /// Says on the page that a request was ignored because a job runs.
+    fn say_busy(mut self: Pin<&mut Self>) {
+        self.as_mut().set_result_text(QString::default());
+        self.as_mut().set_error_text(QString::from(BUSY));
+    }
+
     fn idle(&self) -> bool {
         let p = self.phase().to_string();
         p.is_empty() || p == "idle"
@@ -460,9 +487,7 @@ impl qobject::AppImages {
 
     pub fn request(mut self: Pin<&mut Self>, path: &QString) {
         if !self.idle() {
-            self.as_mut().set_error_text(QString::from(
-                "The Store is busy with another AppImage. Try again in a moment.",
-            ));
+            self.say_busy();
             return;
         }
         self.as_mut().rust_mut().pending = None;
@@ -471,6 +496,7 @@ impl qobject::AppImages {
 
     pub fn confirm(mut self: Pin<&mut Self>) {
         if !self.idle() {
+            self.say_busy();
             return;
         }
         let Some(p) = self.as_mut().rust_mut().pending.take() else {
@@ -482,10 +508,14 @@ impl qobject::AppImages {
     pub fn cancel(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().pending = None;
         self.as_mut().set_detail_json(QString::from("{}"));
+        self.as_mut().clear_busy();
+        // The preview icon belongs to the question that was just closed.
+        remove_previews();
     }
 
     pub fn uninstall(self: Pin<&mut Self>, id: &QString) {
         if !self.idle() {
+            self.say_busy();
             return;
         }
         self.submit(Job::Remove(id.to_string()), "removing");
@@ -493,6 +523,7 @@ impl qobject::AppImages {
 
     pub fn open(self: Pin<&mut Self>, id: &QString, token: &QString) {
         if !self.idle() {
+            self.say_busy();
             return;
         }
         let token = token.to_string();

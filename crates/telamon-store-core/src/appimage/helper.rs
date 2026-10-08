@@ -86,6 +86,22 @@ pub fn child_main(path: &Path) -> i32 {
     0
 }
 
+/// The running program itself, for starting the helper: the kernel keeps the
+/// executable that is running even when a package upgrade replaced its file,
+/// so the helper is the same version as the Store that asks.
+pub const SELF: &str = "/proc/self/exe";
+
+/// The path of this program's file for starting something that must be the
+/// installed (possibly newer) one: what `/proc/self/exe` points to, without
+/// the " (deleted)" the kernel adds when the file was replaced.
+pub fn installed_path() -> Option<std::path::PathBuf> {
+    let link = std::fs::read_link(SELF).ok()?;
+    let text = link.to_str()?;
+    Some(std::path::PathBuf::from(
+        text.strip_suffix(" (deleted)").unwrap_or(text),
+    ))
+}
+
 /// Runs `exe --appimage-inspect <path>` and reads its answer.
 pub fn run(exe: &Path, path: &Path, timeout: Duration) -> Result<Inspection, InspectError> {
     let mut child = Command::new(exe)

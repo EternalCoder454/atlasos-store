@@ -32,7 +32,6 @@ use zbus::message::Type as MessageType;
 /// How long the notification waits for an answer.
 const ANSWER_WAIT: Duration = Duration::from_secs(60);
 /// The whole check ends after this, whatever it is doing (SIGALRM).
-const CHECK_DEADLINE_SECONDS: u32 = 5 * 60;
 /// The notification event in `telamon-store.notifyrc`.
 const EVENT: &str = "appimageFound";
 
@@ -100,7 +99,7 @@ fn check_main(target: &Path) -> i32 {
     helper::limit_core();
     // SAFETY: alarm has no memory effects; SIGALRM's default action ends the process.
     unsafe {
-        libc::alarm(CHECK_DEADLINE_SECONDS);
+        libc::alarm(check::DEADLINE.as_secs() as u32);
     }
     let Some(state_path) = SeenState::default_path() else {
         eprintln!("telamon-store: there is no state folder to keep the list of announced files in");
@@ -113,30 +112,32 @@ fn check_main(target: &Path) -> i32 {
             return 1;
         }
     };
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("telamon-store: {e}");
-            return 1;
-        }
+    let Some(installed) = helper::installed_path() else {
+        eprintln!("telamon-store: it cannot tell where its own file is");
+        return 1;
     };
     let report = check::run(
         target,
         &Config::default(),
         &mut state,
-        &HelperInspector { exe: exe.clone() },
+        &HelperInspector {
+            exe: PathBuf::from(helper::SELF),
+        },
         &mut DbusNotifier::new(),
-        &mut SystemdLauncher { exe },
+        &mut SystemdLauncher { exe: installed },
     );
     for e in &report.errors {
         eprintln!("telamon-store: {e}");
     }
-    eprintln!(
-        "telamon-store: {} announced, {} opened, {} skipped",
-        report.notified.len(),
-        report.launched.len(),
-        report.skipped
-    );
+    // Quiet unless something happened: the watcher runs on every change in
+    // Downloads.
+    if !report.notified.is_empty() || !report.launched.is_empty() {
+        eprintln!(
+            "telamon-store: {} announced, {} opened",
+            report.notified.len(),
+            report.launched.len()
+        );
+    }
     0
 }
 
@@ -292,47 +293,70 @@ struct SystemdLauncher {
     exe: PathBuf,
 }
 
+/// `$` doubled: systemd replaces `$NAME` and `${NAME}` in the arguments of a
+/// transient service's command, so a file called `a$HOME.AppImage` would
+/// otherwise be opened as another name (or not at all).
+fn dollar(arg: &str) -> String {
+    arg.replace('$', "$$")
+}
+
+/// The arguments of `systemd-run` that start the install dialog for `path`.
+fn systemd_run_args(
+    unit: &str,
+    exe: &Path,
+    path: &Path,
+    token: Option<&str>,
+    pass_through: &[&str],
+) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "--user",
+        "--quiet",
+        "--collect",
+        "--no-block",
+        "--unit",
+        unit,
+        "--description=Telamon Store",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(t) = token.and_then(valid_activation_token) {
+        a.push(format!("--setenv=XDG_ACTIVATION_TOKEN={t}"));
+        a.push(format!("--setenv=DESKTOP_STARTUP_ID={t}"));
+    }
+    for var in pass_through {
+        a.push(format!("--setenv={var}"));
+    }
+    // `--` first: the path is never read as an option. The Store reads the
+    // path again with the launch rules.
+    a.push("--".into());
+    a.push(dollar(&exe.to_string_lossy()));
+    a.push("--appimage-install".into());
+    a.push(dollar(&path.to_string_lossy()));
+    a
+}
+
 impl Launcher for SystemdLauncher {
     fn open_install(&mut self, path: &Path, token: Option<&str>) -> Result<(), String> {
         let mut r = [0u8; 4];
         // SAFETY: fills the buffer; a failure only makes the unit name less random.
         let _ = unsafe { libc::getrandom(r.as_mut_ptr().cast(), r.len(), 0) };
         let unit = format!("telamon-store-appimage-{:08x}", u32::from_le_bytes(r));
-        let mut cmd = Command::new("systemd-run");
-        cmd.args([
-            "--user",
-            "--quiet",
-            "--collect",
-            "--no-block",
-            "--unit",
-            &unit,
-            "--description=Telamon Store",
-        ]);
-        if let Some(t) = token.and_then(valid_activation_token) {
-            cmd.arg(format!("--setenv=XDG_ACTIVATION_TOKEN={t}"))
-                .arg(format!("--setenv=DESKTOP_STARTUP_ID={t}"));
-        }
-        for var in [
+        let pass: Vec<&str> = [
             "WAYLAND_DISPLAY",
             "DISPLAY",
             "XDG_CURRENT_DESKTOP",
             "XDG_SESSION_TYPE",
-        ] {
-            if std::env::var_os(var).is_some() {
-                cmd.arg(format!("--setenv={var}"));
-            }
-        }
-        // `--` first: the path is never read as an option. The Store reads
-        // the path again with the launch rules.
-        cmd.arg("--")
-            .arg(&self.exe)
-            .arg("--appimage-install")
-            .arg(path)
+        ]
+        .into_iter()
+        .filter(|v| std::env::var_os(v).is_some())
+        .collect();
+        let out = Command::new("systemd-run")
+            .args(systemd_run_args(&unit, &self.exe, path, token, &pass))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .process_group(0);
-        let out = cmd
+            .process_group(0)
             .output()
             .map_err(|e| format!("systemd-run could not start ({})", e.kind()))?;
         if out.status.success() {
@@ -367,6 +391,32 @@ mod tests {
         );
         assert_eq!(early(&["--appimage-inspect".to_string()]), Some(2));
         assert_eq!(early(&["--appimage-check=/a/../b".to_string()]), Some(2));
+    }
+
+    #[test]
+    fn systemd_run_gets_the_path_with_dollars_doubled_after_a_double_dash() {
+        let args = systemd_run_args(
+            "telamon-store-appimage-1",
+            Path::new("/usr/bin/telamon-store"),
+            Path::new("/home/u/Downloads/a$HOME${x}$$.AppImage"),
+            Some("tok-1"),
+            &["WAYLAND_DISPLAY"],
+        );
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            &args[dd..],
+            [
+                "--",
+                "/usr/bin/telamon-store",
+                "--appimage-install",
+                "/home/u/Downloads/a$$HOME$${x}$$$$.AppImage"
+            ]
+        );
+        assert!(args[..dd].contains(&"--setenv=XDG_ACTIVATION_TOKEN=tok-1".to_string()));
+        assert!(args[..dd].contains(&"--setenv=WAYLAND_DISPLAY".to_string()));
+        // A bad token is not passed.
+        let args = systemd_run_args("u", Path::new("/x"), Path::new("/y"), Some("a b"), &[]);
+        assert!(!args.iter().any(|a| a.contains("TOKEN")));
     }
 
     #[test]
