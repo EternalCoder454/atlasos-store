@@ -532,7 +532,9 @@ mod tests {
         ] {
             assert!(!github.allows(bad), "{bad}");
         }
-        assert!(Hosts::Only(FLATHUB_HOSTS).allows("https://dl.flathub.org/repo/appstream/x.xml.gz"));
+        assert!(
+            Hosts::Only(FLATHUB_HOSTS).allows("https://dl.flathub.org/repo/appstream/x.xml.gz")
+        );
         assert!(!Hosts::Only(FLATHUB_HOSTS).allows("https://github.com/"));
         assert!(Hosts::Any.allows("https://anything.example.org/"));
 
@@ -552,7 +554,11 @@ mod tests {
             Err(NetError::HostNotAllowed)
         );
         assert_eq!(
-            next_hop(base, "https://objects.githubusercontent.com:8443/z", &github),
+            next_hop(
+                base,
+                "https://objects.githubusercontent.com:8443/z",
+                &github
+            ),
             Err(NetError::Redirect)
         );
         assert_eq!(
