@@ -44,6 +44,7 @@ fn dirs(name: &str) -> (Dirs, PathBuf) {
             data,
             home,
             system: Vec::new(),
+            path: Vec::new(),
         },
         root,
     )

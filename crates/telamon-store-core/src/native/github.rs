@@ -338,6 +338,7 @@ mod tests {
                 executable: true,
             }],
             links: vec![],
+            commands: None,
             archive: Some(ArchiveInfo {
                 name: "net.eterneon.telamon.gates-0.2.0-x86_64.tar.zst".into(),
                 sha256: "b".repeat(64),

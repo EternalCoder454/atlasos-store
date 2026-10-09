@@ -735,6 +735,8 @@ applications/<id>.desktop       copied out of the bundle, Exec rewritten
 icons/hicolor/<size>/apps/..    metainfo/..  dbus-1/services/..  knotifications6/..
 ```
 
+and one thing outside it, `~/.local/bin/<command>` (see "Commands on PATH").
+
 What is copied out of a bundle, and under which names, is fixed in
 `desktop.rs`: a bundle can only ever write files that carry its own app ID
 (`<id>.desktop`, `<id>*.png|svg` icons, `<id>.metainfo.xml`, D-Bus services
@@ -837,12 +839,50 @@ failure before the record is written is undone in the reverse order: the copied
 files are as they were, `current` still names the old version, the new folder is
 removed (**rollback**; tested with a failure injected after each step).
 **Uninstall** removes the files the record lists, each only if it still has the
-content the Store wrote (an edited file is left and named), and the app's
+content the Store wrote (an edited file is left and named), its links in
+`~/.local/bin` that still point at it, and the app's
 folder, the record last: a removal that stops half way leaves an app that is
 still listed and can be removed again, never a hidden one. The app's own data and settings are never touched. A tampered record
 cannot reach other files: only paths under the five export folders pass, and the
 content must match its recorded SHA-256. One install runs at a time (`flock` on
 `telamon-apps/.lock`, opened `O_NOFOLLOW|O_CLOEXEC`).
+
+**Commands on PATH** (`commands.rs`). An app's programs can be run by name
+from a terminal or KRunner: the Store links `~/.local/bin/<name>` (on `PATH` on
+Telamon OS; made 0755 when missing, a link there is followed, it must be the
+user's) to `$XDG_DATA_HOME/telamon-apps/<id>/current/bin/<name>`. The link goes
+through `current`, so an update needs no change to it. Which programs: the
+manifest's optional `commands` (names of programs in the bundle's `bin/`, at
+most 16; `[]` for none; an addition to schema 1, a Store before it ignores it),
+else the desktop entry's program (`telamon-gates` for Telamon Gates).
+`~/.local/bin` comes before `/usr/bin` on `PATH`, so a name there wins over the
+system's; every rule below skips that one command with a logged warning and
+never fails the install:
+
+- the name carries the app's identity: the last part of the ID (`gates`) or
+  `telamon-` and it, alone or followed by `-` (`telamon-gates`, `gates-cli`),
+  plain ASCII, at most 64 bytes;
+- nothing of that name is in any other folder of the Store's `PATH`,
+  `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, Homebrew's
+  `bin` and `sbin`, mise's shims, `~/.cargo/bin` or `~/bin` (a Store started
+  from the menu may not have the folders shell profiles add on its `PATH`):
+  no command is shadowed. A folder that only a shell profile adds and that is
+  not one of these is not seen;
+- nothing in `~/.local/bin` is replaced except a link that already points at
+  `telamon-apps/<id>/current/bin/<name>` of this app (the Store's own; one made
+  when the data folder was elsewhere is pointed at the new place). A file, a
+  folder, or a link anywhere else, another app's included, is left alone.
+
+A manifest that lists a command not named so is refused; the desktop entry's
+program, when it is not, is just not linked.
+
+The record lists the names (`commands`); an uninstall, and an update that no
+longer has one, removes each link only while it still points at this app's
+place. Links are made after the record is written: a failed install makes
+none. An app installed by a Store from before this (a record without
+`commands`) gets its program linked once, when the window loads its list, and
+the record then names it, so a link the user removes later stays removed (a
+`~/.local/bin` that can't be used is tried again the next time).
 
 **Local bundles** (`--install-bundle`): for trying a bundle before it is
 published. The file is looked into without installing (unpacked into a scratch

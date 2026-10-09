@@ -848,6 +848,7 @@ pub fn native_manifest_for(
                 target: t.clone(),
             })
             .collect(),
+        commands: None,
         archive: None,
     }
 }

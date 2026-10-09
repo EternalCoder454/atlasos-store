@@ -94,6 +94,7 @@ fn main() {
         data: data.into(),
         home: home.into(),
         system: Vec::new(),
+        path: Vec::new(),
     };
     std::fs::create_dir_all(data).unwrap();
     std::fs::create_dir_all(home).unwrap();
