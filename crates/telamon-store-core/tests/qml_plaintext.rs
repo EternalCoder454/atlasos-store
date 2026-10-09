@@ -127,6 +127,86 @@ fn every_rule_catches_what_it_is_for() {
             "TelamonToolTip",
         ),
         (
+            "a source on the line after its key",
+            "Item { Image {\n source:\n  info.remoteUrl\n } }",
+            "Image source",
+        ),
+        (
+            "a text format on the line after its key",
+            "Item { Text {\n text: x\n textFormat:\n  fmt\n } }",
+            "with textFormat: fmt",
+        ),
+        (
+            "a quote in a regex literal, hiding what follows",
+            "Item { Component.onCompleted: s.replace(/\"/g, \"\"); Text { text: t; textFormat: Text.RichText } }",
+            "regular expression literal",
+        ),
+        (
+            "the same, still reporting what follows",
+            "Item { Component.onCompleted: s.replace(/\"/g, \"\"); Text { text: t; textFormat: Text.RichText } }",
+            "RichText",
+        ),
+        (
+            "a single quote in a regex, hiding a Text without a format",
+            "Item { Component.onCompleted: s.replace(/'/g, \"x\"); Text { text: t } }",
+            "without textFormat",
+        ),
+        (
+            "// inside a regex, hiding a Text without a format",
+            "Item { Component.onCompleted: s.replace(/[/]\"//g, \"x\"); Text { text: t } }",
+            "regular expression literal",
+        ),
+        (
+            "Binding on textFormat",
+            "Item { Text { text: x; textFormat: Text.PlainText; Binding on textFormat { value: fmt } } }",
+            "textFormat/source",
+        ),
+        (
+            "Binding with property named by a string",
+            "Item { Binding { target: t; property: \"textFormat\"; value: fmt } }",
+            "Binding on",
+        ),
+        (
+            "a state that changes a source",
+            "Item { Image { source: \"\"; states: State { name: \"x\"; PropertyChanges { target: i; source: info.remoteUrl } } } }",
+            "PropertyChanges source",
+        ),
+        (
+            "a state that changes a text format",
+            "Item { Text { text: x; textFormat: Text.PlainText; states: State { name: \"x\"; PropertyChanges { target: t; textFormat: fmt } } } }",
+            "PropertyChanges sets textFormat",
+        ),
+        (
+            "textFormat assigned in a handler",
+            "Item { MouseArea { onClicked: { t.textFormat = fmt } } }",
+            "textFormat assigned",
+        ),
+        (
+            "source assigned in a handler",
+            "Item { MouseArea { onClicked: { img.source = info.url } } }",
+            "source assigned in code",
+        ),
+        (
+            "a page title that mixes data into qsTr",
+            "TelamonPage { title: qsTr(\"Open %1\").arg(info.name) }",
+            "title",
+        ),
+        (
+            "a title that is only headerTitle on one branch",
+            "TelamonPage { title: found ? headerTitle(x) : info.name }",
+            "title",
+        ),
+        (
+            "a title on the line after its key",
+            "TelamonPage {\n title:\n  info.name\n}",
+            "title",
+        ),
+        (
+            "a page type of the Store",
+            "AppPage { title: info.name }",
+            "title",
+        ),
+        (
             "a page title from the catalog, as the header shows it",
             "TelamonPage { title: found ? info.name : qsTr(\"App\") }",
             "headerTitle",
@@ -165,6 +245,19 @@ Item {
     Loader { source: "Other.qml" }
     TelamonPage { title: found ? headerTitle(info.name) : qsTr("App") }
     TelamonPage { title: qsTr("Installed") }
+    TelamonPage { title: qsTr("Open %1").arg("literal") }
+    TelamonPage {
+        title:
+            found ? headerTitle(info.name) : qsTr("App")
+    }
+    // check-qml: local-title (a place name)
+    TelamonPage { title: places.find(p => p.key === place)?.text ?? "" }
+    Image {
+        source:
+            info.iconSource ?? ""
+    }
+    Component.onCompleted: s = s.replace(/[<>&]/g, "") + 1 / 2 / 1
+    Text { text: a / b; textFormat: Text.PlainText }
 }
 "#,
     )

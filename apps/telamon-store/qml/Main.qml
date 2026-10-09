@@ -630,6 +630,7 @@ TelamonWindow {
     Component {
         id: placeholderPlace
         PlaceholderPage {
+            // check-qml: local-title (the Store's own place names)
             title: root.places.find(p => p.key === root.place)?.text ?? ""
             heading: qsTr("Not Built Yet")
             text: qsTr("Coming in the F phase.")
