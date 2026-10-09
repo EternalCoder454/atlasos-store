@@ -69,6 +69,11 @@ pub struct Manifest {
     pub files: Vec<FileEntry>,
     #[serde(default)]
     pub links: Vec<LinkEntry>,
+    /// The programs of `bin/` the app puts on the user's `PATH` (by name, as
+    /// `telamon-gates`). Absent: the program of the desktop entry. Empty:
+    /// none. An addition to schema 1 (see `commands.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<ArchiveInfo>,
 }
@@ -251,6 +256,27 @@ impl Manifest {
                 return Err(err("The bundle has a link that leaves its folder."));
             }
         }
+        if let Some(commands) = &self.commands {
+            if commands.len() > super::commands::MAX_COMMANDS {
+                return Err(err("The bundle lists too many commands."));
+            }
+            let mut names = std::collections::HashSet::new();
+            for c in commands {
+                let path = format!("bin/{c}");
+                let in_bin = self.files.iter().any(|f| f.path == path && f.executable)
+                    || self.links.iter().any(|l| l.path == path);
+                if !super::commands::plain_name(c) || !in_bin || !names.insert(c.as_str()) {
+                    return Err(err(
+                        "The bundle lists a command that is not a program in its bin folder.",
+                    ));
+                }
+                if !super::commands::name_ok(&self.id, c) {
+                    return Err(err(
+                        "The bundle lists a command that is not named after the app.",
+                    ));
+                }
+            }
+        }
         match (kind, &self.archive) {
             (Kind::Outer, None) => return Err(err("The release's manifest has no archive.")),
             (Kind::Inner, Some(_)) => {
@@ -315,6 +341,9 @@ impl Manifest {
         b.files.sort_by(|x, y| x.path.cmp(&y.path));
         a.links.sort_by(|x, y| x.path.cmp(&y.path));
         b.links.sort_by(|x, y| x.path.cmp(&y.path));
+        for c in [&mut a.commands, &mut b.commands].into_iter().flatten() {
+            c.sort();
+        }
         a == b
     }
 }
@@ -382,6 +411,7 @@ mod tests {
                 executable: true,
             }],
             links: vec![],
+            commands: None,
             archive: (kind == Kind::Outer).then(|| ArchiveInfo {
                 name: "net.eterneon.telamon.gates-0.2.0-x86_64.tar.zst".into(),
                 sha256: "b".repeat(64),
@@ -400,6 +430,36 @@ mod tests {
             let m = sample(kind);
             assert_eq!(Manifest::parse(&json(&m), kind), Ok(m));
         }
+    }
+
+    #[test]
+    fn commands_name_programs_of_bin() {
+        let mut m = sample(Kind::Outer);
+        m.commands = Some(vec!["telamon-gates".into()]);
+        assert_eq!(Manifest::parse(&json(&m), Kind::Outer), Ok(m.clone()));
+        m.commands = Some(vec![]);
+        assert!(Manifest::parse(&json(&m), Kind::Outer).is_ok());
+    }
+
+    #[test]
+    fn commands_compare_in_any_order() {
+        let mut outer = sample(Kind::Outer);
+        let mut inner = sample(Kind::Inner);
+        for (m, list) in [
+            (&mut outer, ["telamon-gates", "gates"]),
+            (&mut inner, ["gates", "telamon-gates"]),
+        ] {
+            m.files.push(FileEntry {
+                path: "bin/gates".into(),
+                size: 1,
+                sha256: "c".repeat(64),
+                executable: true,
+            });
+            m.commands = Some(list.iter().map(|s| s.to_string()).collect());
+        }
+        assert!(outer.same_content(&inner));
+        inner.commands = Some(vec![]);
+        assert!(!outer.same_content(&inner));
     }
 
     #[test]
@@ -453,6 +513,39 @@ mod tests {
                     path: "bin/x".into(),
                     target: "../../etc".into(),
                 })
+            },
+            Outer,
+        );
+        rejects(|m| m.commands = Some(vec!["sudo".into()]), Outer);
+        // A program of the bundle, but not named after the app.
+        rejects(
+            |m| {
+                m.files[0].path = "bin/sudo".into();
+                m.commands = Some(vec!["sudo".into()]);
+            },
+            Outer,
+        );
+        rejects(
+            |m| m.commands = Some(vec!["../telamon-gates".into()]),
+            Outer,
+        );
+        rejects(
+            |m| m.commands = Some(vec!["telamon-gates".into(), "telamon-gates".into()]),
+            Outer,
+        );
+        rejects(
+            |m| {
+                m.files[0].executable = false;
+                m.commands = Some(vec!["telamon-gates".into()]);
+            },
+            Outer,
+        );
+        rejects(
+            |m| {
+                m.commands = Some(vec![
+                    "telamon-gates".into();
+                    crate::native::commands::MAX_COMMANDS + 1
+                ])
             },
             Outer,
         );

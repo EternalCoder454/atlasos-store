@@ -17,6 +17,7 @@
 //!   `telamon-apps` goes through (no path is walked twice, no link followed);
 //! - [`install`]: install, update (side by side, then the `current` link),
 //!   rollback, uninstall, the list and Open;
+//! - [`commands`]: the app's programs on `PATH` (`~/.local/bin`);
 //! - [`check`]: catalog + releases + what is installed = what the window shows;
 //! - [`fetch`]: the network behind a trait, so tests and screenshots use
 //!   recorded answers (`fake`, with the `fake-github` feature).
@@ -28,6 +29,7 @@
 pub mod archive;
 pub mod catalog;
 pub mod check;
+pub mod commands;
 pub mod desktop;
 pub mod dirfd;
 pub mod fetch;

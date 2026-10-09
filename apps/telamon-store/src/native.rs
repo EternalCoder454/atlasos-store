@@ -336,7 +336,10 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
     let host = Host::detect();
     let mut out = Outcome::default();
     match job {
-        Job::Load => out.report = Some(check::cached(&cache, &dirs, &host)),
+        Job::Load => {
+            install::link_older_installs(&dirs);
+            out.report = Some(check::cached(&cache, &dirs, &host));
+        }
         Job::Check { force } => {
             progress(-1, "Checking for Telamon app updates…");
             let report = check::check(fetcher().as_ref(), &cache, &dirs, &host, now(), force);
@@ -716,6 +719,7 @@ mod tests {
             data: root.join("data"),
             home: root.join("home"),
             system: Vec::new(),
+            path: Vec::new(),
         };
         std::fs::create_dir_all(&dirs.data).unwrap();
         let cache = Cache::new(root.join("cache"));
@@ -758,6 +762,7 @@ mod tests {
             data: root.join("data"),
             home: root.join("home"),
             system: Vec::new(),
+            path: Vec::new(),
         };
         std::fs::create_dir_all(&dirs.data).unwrap();
         std::fs::create_dir_all(&dirs.home).unwrap();
@@ -810,6 +815,7 @@ mod tests {
             data: root.join("data"),
             home: root.join("home"),
             system: Vec::new(),
+            path: Vec::new(),
         };
         std::fs::create_dir_all(&dirs.data).unwrap();
         let cache = Cache::new(root.join("cache"));

@@ -45,7 +45,12 @@ only what any Telamon app has: the CMake project under `apps/<name>`, its
 a metainfo file, and an icon named after the app ID. (The app template has all
 of it; the rules are in the framework's `docs/BUNDLES.md`.) If the app reads
 files at run time, it finds them next to its program, at `../share/<app-id>/`:
-nothing sets an environment for it.
+nothing sets an environment for it. The Store puts the program of the desktop
+entry on `PATH` (`~/.local/bin/<program>`), so it can be run by name, when the
+name is the last part of the app ID or `telamon-` and it (`telamon-gates`), alone
+or followed by `-`. To link other programs of `bin/` instead, or none, list them in
+the manifest's `commands` (`"commands": ["telamon-gates", "telamon-gates-cli"]`,
+or `[]`).
 
 Try it before publishing: run the workflow by hand (Actions, Telamon bundle,
 Run workflow; run it once on the default branch so its cache is shared), download the artifact, and install it with

@@ -43,6 +43,7 @@ fn dirs(name: &str) -> (Dirs, PathBuf) {
             data,
             home,
             system: Vec::new(),
+            path: Vec::new(),
         },
         root,
     )
@@ -1041,6 +1042,7 @@ impl Tree {
                     target: t.clone(),
                 })
                 .collect(),
+            commands: None,
             archive: None,
         };
         serde_json::to_vec(&m).unwrap()

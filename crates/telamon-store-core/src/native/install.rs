@@ -8,6 +8,7 @@
 //! telamon-apps/<id>/install.json    what the Store installed (the record)
 //! applications/<id>.desktop         copied out of the bundle (see desktop.rs)
 //! icons/, metainfo/, dbus-1/services/, knotifications6/
+//! ~/.local/bin/<command>            link to current/bin/<command> (commands.rs)
 //! ```
 //!
 //! **Update** = unpack the new version beside the old one, check it, write the
@@ -119,6 +120,10 @@ pub struct Dirs {
     /// or D-Bus name is already there is not installed, so a bundle cannot
     /// replace or shadow what is not its own.
     pub system: Vec<PathBuf>,
+    /// The folders commands are found in (`PATH`, the system's own `bin` and
+    /// `sbin` folders, and Homebrew's, mise's, cargo's and `~/bin`): a command the Store links into
+    /// [`Dirs::bin`] must not be in any of them (see `commands.rs`).
+    pub path: Vec<PathBuf>,
 }
 
 impl Dirs {
@@ -143,11 +148,40 @@ impl Dirs {
                 system.push(fixed);
             }
         }
+        let mut path: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|v| std::env::split_paths(&v).collect())
+            .unwrap_or_default();
+        path.retain(|p| p.is_absolute());
+        // The system's, and the folders shell profiles add that a Store
+        // started from the menu may not have on its `PATH` (Homebrew, mise,
+        // cargo, `~/bin`).
+        for fixed in [
+            "/usr/local/bin".into(),
+            "/usr/local/sbin".into(),
+            "/usr/bin".into(),
+            "/usr/sbin".into(),
+            "/home/linuxbrew/.linuxbrew/bin".into(),
+            "/home/linuxbrew/.linuxbrew/sbin".into(),
+            home.join(".local/share/mise/shims"),
+            home.join(".cargo/bin"),
+            home.join("bin"),
+        ] {
+            if !path.contains(&fixed) {
+                path.push(fixed);
+            }
+        }
         Some(Dirs {
             data: fsutil::data_home()?,
             home,
             system,
+            path,
         })
+    }
+
+    /// `~/.local/bin`, where an app's commands are linked (it is on `PATH`
+    /// on Telamon OS).
+    pub fn bin(&self) -> PathBuf {
+        self.home.join(".local/bin")
     }
 
     pub fn apps(&self) -> PathBuf {
@@ -226,6 +260,10 @@ pub struct Record {
     /// The program Open runs: `bin/<name>`.
     pub exe: String,
     pub copied: Vec<Copied>,
+    /// The commands put on `PATH` (`~/.local/bin/<name>`, see `commands.rs`).
+    /// Absent in a record from before the Store did that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
     /// Bytes of the installed tree.
     pub size: u64,
     /// Unix time of the install.
@@ -272,6 +310,10 @@ impl Record {
                 .as_deref()
                 .is_none_or(|p| Version::parse(p).is_some())
             && exe_ok(&self.exe)
+            && self.commands.as_ref().is_none_or(|c| {
+                c.len() <= super::commands::MAX_COMMANDS
+                    && c.iter().all(|n| super::commands::name_ok(&self.id, n))
+            })
             && self.copied.len() <= 256
             && self.copied.iter().all(|c| {
                 export_ok(&c.to)
@@ -562,6 +604,8 @@ pub struct Done {
     pub replaced: Option<String>,
     /// The key ID the release was verified with (none for a local file).
     pub signer: Option<String>,
+    /// The commands that are on `PATH` now (`~/.local/bin/<name>`).
+    pub commands: Vec<String>,
 }
 
 /// Puts back what an install changed, in the reverse order, when it is
@@ -979,6 +1023,24 @@ fn install_from(
         .files
         .iter()
         .fold(0u64, |sum, f| sum.saturating_add(f.size));
+    // The commands for `PATH`: the bundle's list, or the desktop entry's
+    // program. Only names that carry the app's are kept (and recorded).
+    let wanted = inner.commands.clone().unwrap_or_else(|| {
+        plan.exe
+            .strip_prefix("bin/")
+            .map(|n| vec![n.to_string()])
+            .unwrap_or_default()
+    });
+    let commands: Vec<String> = wanted
+        .into_iter()
+        .filter(|n| {
+            let ok = super::commands::name_ok(&id, n);
+            if !ok {
+                log::warn!("{id}: the command {n:?} is not named after the app; not put on PATH");
+            }
+            ok
+        })
+        .collect();
     let rec = Record {
         schema: 1,
         id: id.clone(),
@@ -996,6 +1058,7 @@ fn install_from(
                 sha256: hex(&sha2::Sha256::digest(&e.bytes)),
             })
             .collect(),
+        commands: Some(commands),
         size,
         installed_at: now(),
     };
@@ -1005,13 +1068,86 @@ fn install_from(
 
     // Tidy: nothing here can undo the install, and none of it is fatal.
     tidy(lock, &app, &rec, old.as_ref());
+    let now_wanted = rec.commands.clone().unwrap_or_default();
+    if let Some(old) = &old {
+        let dropped: Vec<String> = commands_of(old)
+            .into_iter()
+            .filter(|c| !now_wanted.contains(c))
+            .collect();
+        super::commands::unlink(dirs, &id, &dropped);
+    }
+    let commands = super::commands::link(dirs, &id, &now_wanted).unwrap_or_default();
     Ok(Done {
         id,
         name: inner.name,
         version: inner.version,
         replaced: old.map(|o| o.version),
         signer: opts.origin.signer.clone(),
+        commands,
     })
+}
+
+/// The commands an installed app has on `PATH`: the record's list, or, for a
+/// record from before the Store put commands there, its program.
+fn commands_of(rec: &Record) -> Vec<String> {
+    rec.commands.clone().unwrap_or_else(|| {
+        rec.exe
+            .strip_prefix("bin/")
+            .filter(|n| super::commands::name_ok(&rec.id, n))
+            .map(|n| vec![n.to_string()])
+            .unwrap_or_default()
+    })
+}
+
+/// Puts on `PATH` the program of each app installed before the Store did
+/// that (a record without `commands`), once: the record then lists it. Run
+/// by the window when it loads; nothing to do costs one read of each record.
+pub fn link_older_installs(dirs: &Dirs) {
+    let pending = |apps: &Dir| -> Vec<Record> {
+        apps.list_text()
+            .unwrap_or_default()
+            .iter()
+            .take(MAX_LISTED * 2)
+            .filter_map(|id| read_record_in(apps, id))
+            .filter(|r| r.commands.is_none())
+            .collect()
+    };
+    let Ok(data) = open_data(dirs, false) else {
+        return;
+    };
+    let Ok(apps) = open_apps(&data, false) else {
+        return;
+    };
+    if pending(&apps).is_empty() {
+        return;
+    }
+    let Ok(lock) = Lock::take(dirs) else {
+        return;
+    };
+    for mut rec in pending(&lock.apps) {
+        let names = commands_of(&rec);
+        // Only once `~/.local/bin` could be used: a folder that can't be is
+        // tried again next time. (A name skipped for being taken is not.)
+        if super::commands::link(dirs, &rec.id, &names).is_none() {
+            continue;
+        }
+        rec.commands = Some(names);
+        // Read back through the record's own checks: `read_record_in` cleans
+        // the texts it shows, so write what the file had but the new field.
+        let Ok(app) = lock.apps.sub_owned(&rec.id) else {
+            continue;
+        };
+        let Ok(Some(bytes)) = app.read_file(RECORD, MAX_RECORD) else {
+            continue;
+        };
+        let Ok(mut raw) = serde_json::from_slice::<Record>(&bytes) else {
+            continue;
+        };
+        raw.commands = rec.commands;
+        if let Err(e) = write_record(&app, &raw) {
+            log::warn!("{}: could not update the record: {e}", raw.id);
+        }
+    }
 }
 
 /// After a successful install: copies the old version had and the new one has
@@ -1072,6 +1208,7 @@ pub fn uninstall(dirs: &Dirs, id: &str) -> Result<Removed, Error> {
     // an app that is still listed (and can be removed again), not one that is
     // hidden and cannot be touched.
     remove_app_folder(&lock.apps, id)?;
+    super::commands::unlink(dirs, id, &commands_of(&rec));
     Ok(Removed {
         name: rec.name,
         left,

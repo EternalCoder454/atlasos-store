@@ -427,6 +427,7 @@ impl BundleBuilder {
                     target: t.clone(),
                 })
                 .collect(),
+            commands: None,
             archive: None,
         }
     }
