@@ -690,6 +690,13 @@ fn remove_export(data: &Dir, rel: &str, sha: &str) -> Result<bool, String> {
 /// checked against the release's size and SHA-256, or the user's own file).
 /// Everything about the tree is checked here: see `archive::unpack`.
 pub fn install_bundle(dirs: &Dirs, archive: &Path, opts: &Options<'_>) -> Result<Done, Error> {
+    // A release (it comes with its outer manifest) is installed only on a
+    // verified signature: the caller must name the key that verified it.
+    if opts.outer.is_some() && opts.origin.signer.is_none() {
+        return Err(err(
+            "A release is installed only with a verified signature. Nothing was installed.",
+        ));
+    }
     let lock = Lock::take(dirs)?;
     // Leftovers of an install that was cut short; the lock is held, so none
     // is in use.

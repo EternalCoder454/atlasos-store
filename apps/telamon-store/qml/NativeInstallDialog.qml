@@ -69,7 +69,7 @@ ConfirmDialog {
         if (dlg.local) {
             dlg.nativeApps.confirmLocal();
         } else {
-            dlg.nativeApps.install(dlg.app.id, dlg.app.availableVersion);
+            dlg.nativeApps.install(dlg.app.id, dlg.app.availableVersion, dlg.app.signer ?? "");
         }
     }
     // Closed any other way: a file that was looked at is dropped.

@@ -305,7 +305,7 @@ fn the_outer_manifest_must_match_the_one_inside() {
         &Options {
             expect_id: Some(ID),
             outer: Some(&outer),
-            origin: Origin::local(),
+            origin: Origin::signed_release(REPO, "v1.0.0", &default_key().key_id()),
             host: &h,
         },
     )
@@ -318,7 +318,7 @@ fn the_outer_manifest_must_match_the_one_inside() {
         &Options {
             expect_id: Some(ID),
             outer: Some(&built.outer),
-            origin: Origin::local(),
+            origin: Origin::signed_release(REPO, "v1.0.0", &default_key().key_id()),
             host: &h,
         },
     )
@@ -1167,7 +1167,11 @@ fn real_bundles_from_the_framework_tool_install() {
             &Options {
                 expect_id: Some(&m.id),
                 outer: outer.as_ref(),
-                origin: Origin::local(),
+                origin: if outer.is_some() {
+                    Origin::signed_release(REPO, "v0.0.0", &default_key().key_id())
+                } else {
+                    Origin::local()
+                },
                 host: &h,
             },
         )
@@ -1678,4 +1682,29 @@ fn releases_signed_by_the_real_minisign_tool_are_accepted() {
     )
     .unwrap_err();
     assert!(e.0.contains("tagged v0.2.0"), "{e}");
+}
+
+#[test]
+fn a_release_is_never_installed_without_a_signer() {
+    let (d, root) = dirs("unsigned-origin");
+    let built = gates("1.0.0").build();
+    let f = write_archive(&root, &built);
+    let h = host();
+    // A release (its outer manifest given) whose origin names no key.
+    for origin in [Origin::release(REPO, "v1.0.0"), Origin::local()] {
+        let e = install::install_bundle(
+            &d,
+            &f,
+            &Options {
+                expect_id: Some(ID),
+                outer: Some(&built.outer),
+                origin,
+                host: &h,
+            },
+        )
+        .unwrap_err();
+        assert!(e.0.contains("verified signature"), "{e}");
+    }
+    assert!(install::list(&d).is_empty());
+    assert!(install::read_record(&d, ID).is_none());
 }
