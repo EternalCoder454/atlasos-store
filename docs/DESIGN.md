@@ -180,6 +180,10 @@ enters, in `telamon-store-core`:
   pass their title through `headerTitle()`, which swaps `<`, `>` and `&` for
   look-alike characters, and the script fails on a data-built `TelamonPage`
   title without it.
+- "Verified" is Flathub's word: an app is marked Verified (and counted by the
+  verified filter) only when its catalog is Flathub's own (`flathub` or
+  `flathub-beta`); the same custom values in another remote's AppStream mean
+  nothing.
 - Images (screenshots, remote icons): https, an allowlisted host per remote
   (Flathub: `dl.flathub.org`), 15 s timeout, 8 MB cap, redirect cap, magic
   bytes and a pixel cap checked, decoded off the GUI thread, stored in a 200 MB
