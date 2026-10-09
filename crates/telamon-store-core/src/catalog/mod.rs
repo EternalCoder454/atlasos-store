@@ -116,6 +116,10 @@ pub struct CatalogSource {
     pub remote: String,
     /// The remote's title, or its name when it has none. Untrusted text.
     pub title: String,
+    /// The remote's address as flatpak compares remotes (normalized, no
+    /// trailing slash). It is what says whether this is Flathub, whatever
+    /// the remote is called or which installation it is in.
+    pub url: String,
     /// The remote's priority (higher first).
     pub priority: i32,
     /// `.../appstream/<remote>/<arch>/active`, resolved (an OCI remote's
@@ -275,14 +279,6 @@ const MAX_QUERY_CHARS: usize = 200;
 /// Distinct words of a query that are matched; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 10;
 
-/// Whether `remote` is Flathub's own: the names the Store keeps for it (a
-/// file can claim them only with Flathub's own address, see
-/// `flatpak::sources::reserved_name`). Only Flathub's catalog says who
-/// verified an app's publisher.
-fn is_flathub_remote(remote: &str) -> bool {
-    matches!(remote, "flathub" | "flathub-beta")
-}
-
 /// One app, with what search and browse need precomputed.
 struct Entry {
     comp: Component,
@@ -326,7 +322,7 @@ impl Library {
             // Flathub's "verified" is Flathub's claim: the same words in any
             // other remote's catalog are that remote's own, so they count for
             // nothing here.
-            let from_flathub = is_flathub_remote(&source.remote);
+            let from_flathub = crate::flatpak::sources::is_flathub_url(&source.url);
             sources.push(source);
             for comp in catalog.components {
                 if !is_listed(&comp) {
@@ -443,8 +439,9 @@ impl Library {
     }
 
     /// Whether Flathub verified the app's publisher. Only Flathub's own
-    /// catalog counts (`flathub`, `flathub-beta`): another remote can write
-    /// the same words in its AppStream data.
+    /// catalog counts, found by the remote's address (Flathub's or Flathub
+    /// Beta's), not by its name or installation: another remote can write the
+    /// same words in its AppStream data, and a remote can be given any name.
     pub fn is_verified(&self, id: EntryId) -> bool {
         self.entry(id).verified
     }

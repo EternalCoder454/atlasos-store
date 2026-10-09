@@ -53,6 +53,7 @@ fn library() -> Library {
     };
     let catalog = parse_appstream(ALPHA.as_bytes(), &opts).expect("the fixture parses");
     let source = CatalogSource {
+        url: String::new(),
         scope: Scope::User,
         remote: "alpha".into(),
         title: "alpha".into(),

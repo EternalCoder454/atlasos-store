@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     };
     let total = cat.components.len();
     let source = CatalogSource {
+        url: String::new(),
         scope: Scope::User,
         remote: "flathub".into(),
         title: "Flathub".into(),
