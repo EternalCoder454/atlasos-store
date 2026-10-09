@@ -167,8 +167,11 @@ pub fn check_superblock(
     if !COMPRESSORS.contains(&compressor) {
         return Err(SquashError::Unsupported);
     }
+    // `block_log` is a 16-bit field of the file: shifting by it unchecked
+    // panics (or wraps) for anything over 63.
     if !(4096..=1 << 20).contains(&block_size)
         || !block_size.is_power_of_two()
+        || block_log > 20
         || (1u64 << block_log) != block_size
     {
         return Err(SquashError::Damaged("block size"));

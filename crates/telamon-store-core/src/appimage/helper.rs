@@ -6,13 +6,20 @@
 //! file under resource limits and prints [`Inspection::encode`]'s answer, and
 //! [`run`] starts it, waits for it with a timeout and reads the answer back
 //! as untrusted input.
+//!
+//! The helper works in two stages (see [`super::sandbox`]). First it needs
+//! more than the file: it opens it, reads the ELF headers, hashes it and runs
+//! `gpgv`. Then it puts a seccomp allowlist on itself, and only then does the
+//! squashfs walk, the decompression and the parsing of the file's contents.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::inspect::{InspectError, Inspection, inspect};
+use super::inspect::{self, InspectError, Inspection};
+use super::sandbox;
 use super::squash::Limits;
 
 /// Most output read from the helper: a header, and an icon of at most 1 MiB.
@@ -70,14 +77,45 @@ pub fn limit_self() {
     }
 }
 
+/// Closes every descriptor above the standard three: whatever the Store held
+/// open and did not mark close-on-exec (a socket, a pipe) must not be usable
+/// by the helper, which is about to read a stranger's file. Done first, before
+/// the file is opened.
+pub fn close_inherited_fds() {
+    // SAFETY: close_range only closes descriptors of this process.
+    let rc = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
+    if rc != 0 {
+        // A kernel without close_range: the descriptors that can exist.
+        for fd in 3..4096 {
+            // SAFETY: closing a descriptor number; a bad one only fails.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+/// Ends this process at once with `code`, without running exit handlers or
+/// the destructors of the libraries the Store links (the sandboxed helper may
+/// not make the system calls they would).
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: _exit ends the process.
+    unsafe { libc::_exit(code) }
+}
+
 /// The helper's `main`: inspects `path` and writes the answer to stdout.
-/// Returns the exit code.
+/// Returns the exit code. On x86-64 the process is sandboxed when this
+/// returns (use [`exit_now`] to end it).
 pub fn child_main(path: &Path) -> i32 {
     use std::io::Write;
+    close_inherited_fds();
     limit_self();
-    let out = match inspect(path, &Limits::default()) {
-        Ok(i) => i.encode(),
+    // Stage 1: everything that needs more than the open file.
+    let out = match inspect::prepare(path) {
         Err(e) => format!("ERROR {e}\n").into_bytes(),
+        // Stage 2: the file's contents, from inside the sandbox.
+        Ok(prepared) => match sandbox::enter() {
+            Ok(_) => prepared.finish(&Limits::default()).encode(),
+            Err(e) => format!("ERROR {e}\n").into_bytes(),
+        },
     };
     let mut so = std::io::stdout().lock();
     if so.write_all(&out).and_then(|()| so.flush()).is_err() {
@@ -102,12 +140,39 @@ pub fn installed_path() -> Option<std::path::PathBuf> {
     ))
 }
 
+/// Kills every process of the group a child leads (`process_group(0)` made
+/// its pid the group's).
+pub fn kill_group(leader: u32) {
+    if let Ok(pid) = i32::try_from(leader)
+        && pid > 1
+    {
+        // SAFETY: kill with a negative pid signals that process group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+}
+
 /// Runs `exe --appimage-inspect <path>` and reads its answer.
 pub fn run(exe: &Path, path: &Path, timeout: Duration) -> Result<Inspection, InspectError> {
-    let mut child = Command::new(exe)
-        .arg("--appimage-inspect")
-        .arg(path)
-        .env_remove("XDG_ACTIVATION_TOKEN")
+    let mut cmd = Command::new(exe);
+    cmd.arg("--appimage-inspect").arg(path).env_clear();
+    // Only what the helper reads: where `gpgv` may make its private folder,
+    // and the language for the texts it picks. Nothing else of the Store's
+    // environment (no activation token, no session secrets).
+    for var in [
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_MESSAGES",
+    ] {
+        if let Some(v) = std::env::var_os(var) {
+            cmd.env(var, v);
+        }
+    }
+    // Its own process group: a timeout ends `gpgv` too, not only the helper.
+    let mut child = cmd
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -127,6 +192,7 @@ pub fn run(exe: &Path, path: &Path, timeout: Duration) -> Result<Inspection, Ins
             Ok(Some(s)) => break Some(s),
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(15)),
             _ => {
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;

@@ -432,9 +432,11 @@ pub fn entry_text(plan: &Plan, insp: &Inspection, exec: &str, icon_rel: Option<&
 
 fn applications_dir(dirs: &Dirs) -> Result<(), InstallError> {
     match fs::symlink_metadata(&dirs.applications) {
-        Ok(md) if md.is_dir() && md.uid() == fsutil::euid() => Ok(()),
+        // Anyone able to write in the folder could swap an installed app for
+        // another program.
+        Ok(md) if md.is_dir() && md.uid() == fsutil::euid() && md.mode() & 0o002 == 0 => Ok(()),
         Ok(_) => Err(err(
-            "The Applications folder in your home is a link, or isn't yours, so nothing is put there.",
+            "The Applications folder in your home is a link, isn't yours, or anyone can change what is in it, so nothing is put there.",
         )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if let Some(parent) = dirs.applications.parent() {
@@ -550,6 +552,18 @@ pub fn install(
             "There is nothing to install: the file was not looked at.",
         ));
     }
+    // The path goes into the menu entry as text: one that cannot be written
+    // there as it is (control characters, bytes that are not text) would be
+    // written as another path.
+    if plan
+        .target
+        .to_str()
+        .is_none_or(|t| t.chars().any(char::is_control))
+    {
+        return Err(err(
+            "The name of your home folder has characters a menu entry can't hold, so nothing is put in it.",
+        ));
+    }
     let old = if plan.replaces {
         // The plan was made when the dialog opened: it must still be the
         // Store's own install, at the same place.
@@ -622,13 +636,24 @@ pub fn install(
         rollback(&created);
         return Err(err("A menu entry with this name appeared. Try again."));
     }
-    let wrote = fs::create_dir_all(dirs.entries())
-        .and_then(|()| fsutil::write_atomic(&entry, text.as_bytes(), 0o644));
+    // A new entry is renamed in without replacing: the check above and the
+    // rename are two steps, a file that appeared between them is not ours.
+    let wrote = fs::create_dir_all(dirs.entries()).and_then(|()| {
+        if plan.replaces {
+            fsutil::write_atomic(&entry, text.as_bytes(), 0o644)
+        } else {
+            fsutil::write_atomic_new(&entry, text.as_bytes(), 0o644)
+        }
+    });
     if let Err(e) = wrote {
         if !plan.replaces {
             rollback(&created);
         }
-        return Err(io_err("write the menu entry", &e));
+        return Err(if e.kind() == io::ErrorKind::AlreadyExists {
+            err("A menu entry with this name appeared. Try again.")
+        } else {
+            io_err("write the menu entry", &e)
+        });
     }
     // The earlier install's icon, when this one has another (a different
     // size or kind, or none): it was the Store's own, and is not recorded now.
@@ -735,7 +760,7 @@ fn open_command(dirs: &Dirs, id: &str) -> Result<Command, InstallError> {
     let r = read_record(dirs, id).ok_or_else(|| err("That app wasn't installed by the Store."))?;
     let md = fs::symlink_metadata(&r.path)
         .map_err(|_| err("The app's file is gone. Remove it and install it again."))?;
-    if !md.is_file() || md.mode() & 0o100 == 0 {
+    if !md.is_file() || md.mode() & 0o100 == 0 || md.uid() != fsutil::euid() {
         return Err(err("The app's file is not a program any more."));
     }
     let mut cmd = Command::new(&r.path);
@@ -756,6 +781,12 @@ pub fn launch(dirs: &Dirs, id: &str, token: Option<&str>) -> Result<(), InstallE
     run_detached(open_command(dirs, id)?, token)
 }
 
+/// Whether `t` can go into the environment as an activation token: printable
+/// ASCII, not empty, not long (the same rule as the window applies).
+fn token_ok(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 256 && t.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// Starts `cmd` as [`launch`] does: own process group, no input, output
 /// dropped, the activation token (checked by the caller) or none in its
 /// environment, reaped in the background; an error only when it stops with a
@@ -765,7 +796,18 @@ pub fn run_detached(mut cmd: Command, token: Option<&str>) -> Result<(), Install
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    match token {
+    // Whatever descriptor the Store or a library in it left open without
+    // close-on-exec (a bus socket, a file) must not reach the app.
+    // SAFETY: the closure only makes a system call, which is safe between
+    // fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            fsutil::cloexec_from(3);
+            Ok(())
+        });
+    }
+    // A token is passed on only when it is one.
+    match token.filter(|t| token_ok(t)) {
         Some(t) => {
             cmd.env("XDG_ACTIVATION_TOKEN", t)
                 .env("DESKTOP_STARTUP_ID", t);

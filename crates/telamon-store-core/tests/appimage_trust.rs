@@ -400,6 +400,147 @@ fn svg_icons_may_refer_inside_themselves_only() {
 }
 
 #[test]
+fn svg_icons_that_hide_a_way_out_are_refused() {
+    use telamon_store_core::appimage::meta::icon_kind;
+    let wrap = |body: &str| {
+        format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' xmlns:s='http://www.w3.org/2000/svg'>{body}</svg>"
+        )
+    };
+    // What the earlier substring check let through, and the usual tricks.
+    for bad in [
+        // A namespace prefix on the element.
+        "<s:script>alert(1)</s:script>",
+        "<s:style>rect{fill:url(http://x/y)}</s:style>",
+        "<s:iframe src='x'/>",
+        "<S:SCRIPT>1</S:SCRIPT>",
+        // Event handlers.
+        "<rect onclick='x()'/>",
+        "<rect ONLOAD = \"x()\"/>",
+        "<g s:onmouseover='x'/>",
+        // References in CSS and presentation attributes.
+        "<rect style='fill:url(file:///etc/passwd)'/>",
+        "<rect fill=\"url('http://x/y.svg#a') red\"/>",
+        "<rect style='background:URL( \"x.png\" )'/>",
+        "<rect filter='url(other.svg#f)'/>",
+        "<rect style='background-image:image-set(\"x.png\" 1x)'/>",
+        "<rect style='fill:u\\72l(x)'/>",
+        "<rect style='@import \"x\"'/>",
+        // Character references that spell a name or a scheme.
+        "<animate attributeName='x&#108;ink:h&#114;ef' values='file:///x'/>",
+        "<linearGradient xlink:href='&#102;ile:///etc/passwd'/>",
+        "<linearGradient xlink:href='&#x23;a'/>",
+        "<rect fill='&unknown;'/>",
+        // Animation can set an href.
+        "<animate attributeName='xlink:href' values='x.svg'/>",
+        "<set attributeName='href' to='x.svg'/>",
+        "<s:set attributeName='href' to='x.svg'/>",
+        // Other ways in.
+        "<foreignObject><body xmlns='http://www.w3.org/1999/xhtml'/></foreignObject>",
+        "<s:foreignObject/>",
+        "<linearGradient xlink:href=' #a'/>",
+        "<linearGradient xlink:href='\nfile:///x'/>",
+        "<linearGradient href=\"javascript:alert(1)\"/>",
+        "<rect x='data:text/html,x'/>",
+        "<g xml:base='file:///etc/'/>",
+        "<handler type='application/ecmascript'>1</handler>",
+        "<tref xlink:href='#t'/>",
+        "<!DOCTYPE svg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><g/>",
+        "<?xml-stylesheet href='#a' type='text/css'?>",
+        "<![CDATA[ <script> ]]><script/>",
+        // Not well formed enough to know.
+        "<rect fill=red/>",
+        "<rect fill='a'fill='b'/>",
+        "<rect <script/>",
+        "<g><g></g>",
+        "</g>",
+        "<",
+        "<g",
+        "<g a",
+        "<g a=",
+        "<g a='x",
+        "<?>",
+        "<!-- unclosed",
+        "<!-- a -- b --><g/>",
+    ] {
+        assert_eq!(icon_kind(wrap(bad).as_bytes()), None, "{bad}");
+    }
+    // The declaration: UTF-8 only, and only first.
+    for bad in [
+        "<?xml version='1.0' encoding='UTF-7'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<?xml version='1.0' encoding='utf-16'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<?xml version='1.0' encoding=utf-8?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'/><?xml version='1.0'?>",
+        "<g/><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'/><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<html><svg xmlns='http://www.w3.org/2000/svg'/></html>",
+    ] {
+        assert_eq!(icon_kind(bad.as_bytes()), None, "{bad}");
+    }
+    // Nesting and size: a renderer recurses on the first.
+    let deep = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'>{}{}</svg>",
+        "<g>".repeat(2000),
+        "</g>".repeat(2000)
+    );
+    assert_eq!(icon_kind(deep.as_bytes()), None);
+    let many = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'>{}</svg>",
+        "<g/>".repeat(30_000)
+    );
+    assert_eq!(icon_kind(many.as_bytes()), None);
+    // What a real icon has still passes.
+    for good in [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<!-- Created with a tool -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"48\" height=\"48\" viewBox=\"0 0 48 48\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#fff\"/></linearGradient><linearGradient id=\"b\" xlink:href=\"#a\"/><filter id=\"f\"><feGaussianBlur stdDeviation=\"2\"/></filter></defs><g filter=\"url(#f)\"><rect fill=\"url(#b)\" width=\"48\" height=\"48\" rx=\"4\" style=\"opacity:.5;fill:url( &quot;#a&quot; )\"/><path d=\"M1 1h2z\"/><text x=\"1\" y=\"2\">A &amp; B &lt; C</text></g><metadata><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\"/></rdf:RDF></metadata><![CDATA[ plain ]]></svg>",
+        "\u{feff}<svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'><animateTransform attributeName='transform' type='rotate' from='0' to='360' dur='1s'/></svg>",
+    ] {
+        assert_eq!(icon_kind(good.as_bytes()), Some(IconKind::Svg), "{good}");
+    }
+}
+
+#[test]
+fn a_png_header_must_be_a_real_one() {
+    use telamon_store_core::appimage::meta::icon_kind;
+    let png = |w: u32, h: u32, tail: [u8; 5]| {
+        let mut b = build::fake_png(w, h);
+        b[24..29].copy_from_slice(&tail);
+        b
+    };
+    assert_eq!(
+        icon_kind(&png(256, 256, [8, 6, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+    assert_eq!(
+        icon_kind(&png(2048, 2048, [16, 6, 0, 0, 1])),
+        Some(IconKind::Png)
+    );
+    // Over the pixel cap, empty, impossible depth or colour type, an unknown
+    // compression, filter or interlace method.
+    assert_eq!(icon_kind(&png(2049, 1, [8, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(0, 5, [8, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [7, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 5, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 3, 1, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 6, 0, 1, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 6, 0, 0, 2])), None);
+    // A header whose length is not 13.
+    let mut b = build::fake_png(16, 16);
+    b[8..12].copy_from_slice(&14u32.to_be_bytes());
+    assert_eq!(icon_kind(&b), None);
+    // Colour type and depth go together.
+    assert_eq!(icon_kind(&png(16, 16, [16, 3, 0, 0, 0])), None);
+    assert_eq!(
+        icon_kind(&png(16, 16, [1, 0, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+    assert_eq!(
+        icon_kind(&png(16, 16, [4, 3, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+}
+
+#[test]
 fn the_helpers_answer_round_trips() {
     let i = sample();
     let back = Inspection::decode(&i.encode()).unwrap();
