@@ -146,7 +146,13 @@ fn mtime_ns(md: &std::fs::Metadata) -> i64 {
 
 fn skippable_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    name.starts_with('.') || TEMP_SUFFIXES.iter().any(|s| lower.ends_with(s))
+    name.starts_with('.')
+        || TEMP_SUFFIXES.iter().any(|s| lower.ends_with(s))
+        // A name with a newline, a bidi override or another character that
+        // hides what a name says is never announced: the Store would refuse to
+        // open it (`launch::internal_path`) and the notice could show it as
+        // another name. (A name that is not UTF-8 never gets this far.)
+        || name.chars().any(crate::launch::hidden)
 }
 
 fn plain_file(path: &Path) -> Option<std::fs::Metadata> {

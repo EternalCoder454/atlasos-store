@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use telamon_store_core::appimage::check::{
     self, Answer, Config, Launcher, Notice, Notifier, Reply,
 };
+use telamon_store_core::appimage::fsutil;
 use telamon_store_core::appimage::helper;
 use telamon_store_core::appimage::inspect::{InspectError, Inspection};
 use telamon_store_core::appimage::state::SeenState;
@@ -75,7 +76,9 @@ pub unsafe extern "C" fn telamon_store_early(
 pub fn early(args: &[String]) -> Option<i32> {
     if let Some(path) = internal_path("--appimage-inspect", args) {
         return Some(match path {
-            Ok(p) => helper::child_main(&p),
+            // The helper is sandboxed when it has answered: it ends here,
+            // without exit handlers that would make system calls it may not.
+            Ok(p) => helper::exit_now(helper::child_main(&p)),
             Err(reason) => {
                 eprintln!("telamon-store: --appimage-inspect: {reason}");
                 2
@@ -336,6 +339,32 @@ fn systemd_run_args(
     a
 }
 
+/// What `systemd-run` needs to find the user's manager, and nothing else of
+/// this process's environment: it is the service's, with its checked
+/// activation token, that the Store's window starts in, not this one's.
+const SYSTEMD_RUN_ENV: [&str; 3] = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HOME"];
+
+/// The `systemd-run` command: a program of the system (found by the caller in
+/// `/usr/bin` or `/bin`, never through `PATH`, which in a user session holds
+/// folders the user can write to), with an empty environment but
+/// `SYSTEMD_RUN_ENV` and the variables `--setenv=NAME` copies from it
+/// (`pass_through`).
+fn systemd_run_command(
+    program: PathBuf,
+    args: Vec<String>,
+    pass_through: &[&str],
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(args).env_clear();
+    for var in SYSTEMD_RUN_ENV.iter().chain(pass_through) {
+        if let Some(value) = get(var) {
+            cmd.env(var, value);
+        }
+    }
+    cmd
+}
+
 impl Launcher for SystemdLauncher {
     fn open_install(&mut self, path: &Path, token: Option<&str>) -> Result<(), String> {
         let mut r = [0u8; 4];
@@ -351,8 +380,11 @@ impl Launcher for SystemdLauncher {
         .into_iter()
         .filter(|v| std::env::var_os(v).is_some())
         .collect();
-        let out = Command::new("systemd-run")
-            .args(systemd_run_args(&unit, &self.exe, path, token, &pass))
+        let Some(program) = fsutil::system_program("systemd-run") else {
+            return Err("systemd-run is not installed".into());
+        };
+        let args = systemd_run_args(&unit, &self.exe, path, token, &pass);
+        let out = systemd_run_command(program, args, &pass, |v| std::env::var_os(v))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -417,6 +449,57 @@ mod tests {
         // A bad token is not passed.
         let args = systemd_run_args("u", Path::new("/x"), Path::new("/y"), Some("a b"), &[]);
         assert!(!args.iter().any(|a| a.contains("TOKEN")));
+    }
+
+    #[test]
+    fn systemd_run_is_a_system_program_with_a_cleared_environment() {
+        let env: std::collections::HashMap<&str, &str> = [
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("HOME", "/home/u"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XDG_ACTIVATION_TOKEN", "stale"),
+            ("PATH", "/home/u/.local/bin:/usr/bin"),
+            ("LD_PRELOAD", "/home/u/evil.so"),
+            ("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .into_iter()
+        .collect();
+        let cmd = systemd_run_command(
+            PathBuf::from("/usr/bin/systemd-run"),
+            vec!["--user".into()],
+            &["WAYLAND_DISPLAY", "DISPLAY"],
+            |v| env.get(v).map(std::ffi::OsString::from),
+        );
+        assert_eq!(cmd.get_program(), "/usr/bin/systemd-run");
+        let mut got: Vec<(String, String)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        got.sort();
+        let names: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "DBUS_SESSION_BUS_ADDRESS",
+                "HOME",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR"
+            ]
+        );
+        // Nothing of the rest is inherited either: the environment is cleared.
+        let out = {
+            let mut c = systemd_run_command(PathBuf::from("/usr/bin/env"), vec![], &[], |_| None);
+            c.output().unwrap()
+        };
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
     }
 
     #[test]

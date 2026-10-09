@@ -24,3 +24,26 @@ RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 MemoryMax=2G
+# Hardening that is a seccomp filter, a limit or a keyring and so needs nothing
+# from the kernel that a user manager may lack. The inspection helper and gpgv
+# this service starts inherit all of it.
+# No new namespaces for it or what it starts (the helper and gpgv need none).
+RestrictNamespaces=yes
+# No file with the set-user-ID or set-group-ID bit is created.
+RestrictSUIDSGID=yes
+# Its own kernel keyring, not the login session's.
+KeyringMode=private
+# What it creates is the user's alone; the files it keeps say their own mode.
+UMask=0077
+# No core file of a helper that crashed on a stranger's file.
+LimitCORE=0
+# Itself, the inspection helper, gpgv and systemd-run, one at a time.
+TasksMax=64
+# Deliberately not set, so that the unit keeps working where the kernel or the
+# user manager lacks what they need: ProtectSystem=, ProtectHome=, PrivateTmp=,
+# ProtectKernel*=, ProtectControlGroups=, ProtectClock=, ProtectHostname=,
+# PrivateNetwork= and CapabilityBoundingSet= (all of them set up namespaces or
+# capabilities a user unit gets only through an implied user namespace; and a
+# user unit has no capability to give up), SystemCallFilter= (it would be
+# inherited by the helper, which installs a seccomp filter of its own) and
+# MemoryDenyWriteExecute= (the binary links Qt).

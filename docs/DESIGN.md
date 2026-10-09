@@ -297,19 +297,58 @@ resolved inside the image only. From the desktop entry (parsed with the
 Store's key file reader), the AppStream metainfo (parsed by the Store's own
 AppStream parser, `parse_metainfo`: same limits and cleaning as a catalog) and
 the icon the Store takes name, version, publisher, summary, an app ID and an
-icon (a PNG up to 2048 px, or a small SVG without scripts, entities, `<use>`,
-`<image>`, styles or any `href` that leaves the document). Texts go through `text::clean`; the embedded `Exec=` is never
+icon (a PNG up to 2048 px with a real header, or a small SVG: see below).
+Texts go through `text::clean`; the embedded `Exec=` is never
 used (the Store writes its own). All of it is shown as `Text.PlainText`.
+
+**The SVG rule** (`meta::icon_kind`). The SVG is read tag by tag by a small
+tokenizer, not searched for words: it is accepted only when the whole document
+is understood, so what a real XML parser would read differently is refused.
+The entities are the five predefined ones (no `&#..;` that could spell a
+name, no DOCTYPE); the only declaration is `<?xml ...?>` first, with no
+encoding but UTF-8 (a UTF-7 parser would read other tags); no element
+`script`, `style`, `image`, `use`, `a`, `feImage`, `foreignObject`, `iframe`,
+`animate`, `set`, `handler` and the like, whatever its prefix or case; no
+event-handler attribute (`on...`), no `xml:base`, no backslash (a CSS
+escape), `javascript:` or `data:`; every `href` is `#id` and every CSS
+`url(...)` points at `#id`; one root, the `svg`; nesting at most 64 deep and
+20,000 elements. The PNG header must be 13 bytes of `IHDR` with a bit depth
+its colour type allows and the only compression and filter methods PNG has.
 
 **The helper process.** Inspection runs in `telamon-store --appimage-inspect
 <file>` (the same binary, before Qt starts) with `RLIMIT_AS` (its size at
 start plus 1 GiB), `RLIMIT_CPU` 150 s, `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 1 MiB
-and no new privileges, and a 180 s timeout on the Store's side. It prints one
+and no new privileges, started with an empty environment (but the runtime
+folder, `TMPDIR` and the language), in a process group of its own, and a 180 s
+timeout on the Store's side that kills the whole group. It prints one
 line of JSON and then the icon's bytes; the Store reads at most 2 MiB of it
 and treats it as untrusted again (`Inspection::sanitize`: texts cleaned again,
 IDs, hash, host and fingerprint checked, an icon that is not an image
 dropped). A helper that fails (out of memory, too long) means "Telamon
 couldn't look at this file" and no Install.
+
+It works in two stages (`appimage/sandbox.rs`, `inspect::prepare` and
+`Prepared::finish`). Stage 1 needs more than the file: it closes every
+descriptor but 0 to 2 (whatever the Store left open without close-on-exec),
+opens the file, reads the ELF headers and the signature sections, hashes the
+whole file (and the variant with the signature sections zeroed) and runs
+`gpgv`, the one child it ever starts. Then it puts a **seccomp-bpf
+allowlist** on itself (hand-written, no crate; `SECCOMP_RET_KILL_PROCESS` for
+everything else, the architecture checked first; x86-64 only, elsewhere it
+logs and goes on with the limits above) and only then does stage 2: the
+squashfs walk, the decompressors (zlib, liblzma, libzstd) and the XML,
+desktop-entry and icon parsing, and writes its answer. After the filter it can
+read the file it holds (`read`, `pread64`, `lseek`, `fcntl` to duplicate or
+read the flags of a descriptor), write to standard output and error, manage
+memory (`brk`, `mmap` that is never executable, `munmap`, `mremap`, `madvise`),
+get random bytes and end (`exit_group`, and `tgkill` of itself with `SIGABRT`
+for `abort()`). It cannot open a file, run a program, make a socket, a
+process or a thread, trace, signal another process, `ioctl`, `unlink`,
+`rename`, load a program, or map executable memory. Each entry in the list
+has its reason in a comment, found with `strace -f` under the tests. If the
+filter cannot be installed on x86-64 the helper does not read the file's
+contents (no Install). A bug in a parser that takes over the process gets the
+file's author a process that can do nothing.
 
 **What the user is told** (`appimage/trust.rs`, always, before Install). The
 findings are `Info`, `Caution` or `Danger`; any `Danger` makes the whole box
@@ -325,8 +364,15 @@ red and the Install button the red kind:
   SHA-256 of the file with both sections zeroed. It runs `gpgv` (only `/usr/bin/gpgv` or `/bin/gpgv`: a `PATH` in a
   user session holds folders the user can write to) by argv with an empty
   environment, a keyring made of the embedded key alone in a 0700
-  temporary folder that is removed after, and a 10 s timeout. The user's
-  keyring is never read or changed and the key is trusted nowhere.
+  temporary folder that is removed after (a timeout included), and a 10 s
+  timeout that kills its whole process group. It runs in a process group of
+  its own with `RLIMIT_CPU` 20 s, `RLIMIT_AS` 1 GiB, `RLIMIT_FSIZE` 1 MiB,
+  `RLIMIT_NOFILE` 64, no core file and no new privileges, and dies with the
+  helper that started it (`PR_SET_PDEATHSIG`). `gpgv` has no configuration
+  file, no agent and no network; its status output is read as it comes and at
+  most 64 KiB of it. A signature that is not detached (`gpgv` says so) reads as
+  wrong, never as signed. The user's keyring is never read or changed and the
+  key is trusted nowhere.
 - Where it came from (`origin.rs`): the browser's `user.xdg.origin.url`
   (or `referrer.url` when the origin is not a web address) read with
   `fgetxattr` from the file that was inspected, at most 2 KiB. `https` from a
@@ -343,7 +389,9 @@ red and the Install button the red kind:
 
 **Installing** (`appimage/install.rs`; the Store's dialog is the only way).
 The file is copied (never moved) to a temporary name in `~/Applications`
-(created 0755; refused when it is a link or not the user's), hashed while
+(created 0755; refused when it is a link, not the user's, or writable by
+everyone; refused too when its path has a control character or bytes that are
+not text, which a menu entry would write as another path), hashed while
 copying and compared with the hash the user was shown (a changed file is not
 installed), set 0755 and renamed to `<Name>.AppImage` with `RENAME_NOREPLACE`.
 `<Name>` is the app's name reduced to letters, digits, `.`, `_`, `-`. A name
@@ -351,7 +399,9 @@ that is taken is numbered (`-2`, `-3`); only the Store's own earlier install
 of the same app (its entry carries the marker and the path) is replaced. The
 icon goes to `$XDG_DATA_HOME/icons/hicolor/<size>/apps/appimage-<id>.png` (or
 `scalable/.../.svg`), and last the desktop entry
-`$XDG_DATA_HOME/applications/appimage-<id>.desktop`:
+`$XDG_DATA_HOME/applications/appimage-<id>.desktop` (a new one is renamed in
+with `RENAME_NOREPLACE`, so a file that appeared since the check is never
+replaced):
 `Type=Application`, `X-Telamon-AppImage=true`,
 `X-Telamon-AppImage-Path=<path>`, `X-Telamon-AppImage-Icon=<path under
 icons>`, the Store's own `Exec` with every argument quoted by the Desktop
@@ -365,7 +415,8 @@ makes the same choice when it starts the app.
 that carry the marker, whose recorded path is a plain `*.AppImage` file
 directly in `~/Applications`) below the Flatpak apps. Open runs the recorded
 file directly (no shell, no arguments, an own process group, the activation
-token only when valid ASCII). Uninstall asks first, then removes exactly the
+token only when valid ASCII, every descriptor above 2 marked close-on-exec
+before it starts, and only a regular file of the user). Uninstall asks first, then removes exactly the
 three files the entry records, each only if it is a regular file of the user
 (never through a link; anything else is left and named), the entry last. An
 entry that is not the Store's, or whose path or icon reference does not check
@@ -376,15 +427,25 @@ out, removes nothing.
 expand the XDG download folder, so another download folder is not watched)
 starts `telamon-store-appimage.service` (oneshot: `telamon-store
 --appimage-check %h/Downloads`, `NoNewPrivileges`, `AF_UNIX` only,
-`MemoryMax=2G`). The RPM installs both in `/usr/lib/systemd/user` and
+`MemoryMax=2G`, and the hardening that needs no namespace: `RestrictNamespaces`,
+`RestrictSUIDSGID`, `KeyringMode=private`, `UMask=0077`, `LimitCORE=0`,
+`TasksMax=64`; `systemd-analyze verify` is clean and its exposure score goes
+from 8.0 to 6.9). The unit leaves out `ProtectSystem`, `ProtectHome`,
+`PrivateTmp`, `ProtectKernel*`, `ProtectClock`, `ProtectHostname`,
+`CapabilityBoundingSet`, `SystemCallFilter` and `MemoryDenyWriteExecute`: the
+first ones set up namespaces that a user unit gets only through an implied
+user namespace (a unit that failed to start would stop the notice, silently),
+a user unit has no capability to give up, the filter would be inherited by the
+helper that installs its own, and the binary links Qt. The RPM installs both in `/usr/lib/systemd/user` and
 `90-telamon-store.preset` (`enable telamon-store-appimage.path`) in
 `/usr/lib/systemd/user-preset`, and runs `%systemd_user_post`. A preset only
 says what `systemctl preset` should do: the image must run `systemctl
 --global preset telamon-store-appimage.path` (the RPM scriptlet does it at
 image build when the package is installed there) for it to start at every
-login. The check looks one level deep at regular files (not links, not
-hidden, not `.part`, `.crdownload`, `.download`, `.partial`, `.opdownload`,
-`.tmp`) that arrived in the last 15 minutes (at most 8 are waited for and
+login. The check looks one level deep (at most 2000 entries) at regular files (not
+links, pipes, devices or sockets, not hidden, not `.part`, `.crdownload`,
+`.download`, `.partial`, `.opdownload`, `.tmp`, and no name with a control or
+bidi character, which the notice could show as another name) that arrived in the last 15 minutes (at most 8 are waited for and
 inspected per round) and are named `*.AppImage` or
 start like one, waits until a file has not changed for 3 s (at most 2
 minutes), inspects it through the helper, and remembers path, size,
@@ -406,7 +467,26 @@ Install and Show in Store both start the Store with the install dialog open
 (`systemd-run --user --collect --no-block telamon-store --appimage-install
 <file>`, so the window is not killed with the service) and pass the
 notification server's activation token when it sends one; the dialog is where
-the user decides. Not Now remembers nothing beyond the de-duplication.
+the user decides. `systemd-run` is the program in `/usr/bin` or `/bin` (never
+found through `PATH`) and gets an empty environment but the runtime folder, the
+session bus address and `HOME`, and the display variables it is told to copy.
+Not Now remembers nothing beyond the de-duplication.
+
+**What a file dropped in Downloads can and cannot do.** It is never run, and
+nothing opens it but the bounded inspector: the check only `lstat`s names and
+reads 16 bytes of a regular file (opened `O_NOFOLLOW|O_NONBLOCK` and `fstat`ed,
+so a pipe or a device named `x.AppImage` is skipped and cannot block it), and
+the inspector is the sandboxed helper above. A link, a pipe, a device, a
+socket, a folder, a hidden file, a download in progress and a name with
+control characters are skipped; a file swapped between the check and the
+inspection is `fstat`ed again by the inspector (a device or a pipe is "not a
+regular file", over 4 GiB is refused) and compared by size and time after;
+nothing is announced unless the state can be kept. It can make the watcher
+start the check many times (the path unit has no trigger limit on purpose),
+each of which looks at no more than 2000 entries and exits at once when
+nothing is new. It cannot make the Store install anything: only the user's
+answer in the Store's own dialog does, and the install hashes the bytes it
+copies against the hash the user was shown.
 
 
 ## Native Telamon apps
