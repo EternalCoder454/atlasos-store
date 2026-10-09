@@ -911,4 +911,82 @@ mod tests {
         );
         assert_eq!(bad.len(), 1);
     }
+    #[test]
+    fn ids_that_look_like_options_never_pass() {
+        // An ID ends up in `flatpak run` and in libflatpak calls: it never
+        // starts with a dash, however it arrives.
+        for id in [
+            "-a.b.c",
+            "--help.x.y",
+            "--verbose.konsole",
+            "-.b.c",
+            "--.a.b",
+        ] {
+            for args in [
+                vec!["--app".to_string(), id.to_string()],
+                vec![format!("--app={id}")],
+                vec![format!("--remove={id}")],
+                vec![format!("appstream:{id}")],
+                vec![format!("appstream://{id}/")],
+            ] {
+                let l = parse(&args, Path::new("/"));
+                assert!(l.requests.is_empty(), "{args:?}");
+                assert_eq!(l.refused.len(), 1, "{args:?}");
+            }
+        }
+        // Whatever the arguments, an app request is a plain ID.
+        for arg in [
+            "appstream:org.a.B",
+            "appstream:org.a.B.desktop",
+            "--app=org.a-b.C_d",
+        ] {
+            for r in p(&[arg]).0 {
+                let Request::App(id) = r else { panic!("{arg}") };
+                assert!(!id.starts_with(['-', '.']) && app_id(&id).is_some(), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_name_that_starts_with_a_dash_is_a_path_not_an_option() {
+        // Relative to the folder, so the path starts with `/`; only after
+        // `--` is a dash name a file at all, and then it is never an option.
+        assert_eq!(
+            p(&["--", "-rf.flatpakref"]).0,
+            vec![Request::File(
+                FileKind::Ref,
+                "/home/u/-rf.flatpakref".into()
+            )]
+        );
+        assert!(p(&["-rf.flatpakref"]).0.is_empty());
+        assert!(p(&["--rf.flatpakref"]).0.is_empty());
+        assert!(
+            p(&["--appimage-install=-x.AppImage"])
+                .0
+                .iter()
+                .all(|r| match r {
+                    Request::File(_, path) => path.is_absolute(),
+                    _ => false,
+                })
+        );
+    }
+
+    #[test]
+    fn forwarded_urls_after_the_double_dash_are_never_options() {
+        // main.cpp puts `--` before the URLs of org.freedesktop.Application.Open.
+        let l = parse(
+            &[
+                "--".to_string(),
+                "--app=org.a.B".to_string(),
+                "--install-bundle".to_string(),
+                "file:///tmp/x.tar.zst".to_string(),
+                "-evil".to_string(),
+            ],
+            Path::new(""),
+        );
+        // Not options: `--app=…` is a name, not a request for an app. The
+        // file link is not a kind the Store opens by name alone.
+        assert!(l.requests.is_empty(), "{:?}", l.requests);
+        assert_eq!(l.refused.len(), 4);
+    }
 }

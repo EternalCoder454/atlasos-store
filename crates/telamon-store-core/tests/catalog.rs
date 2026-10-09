@@ -41,8 +41,10 @@ fn source(remote: &str) -> CatalogSource {
     }
 }
 
+/// The alpha fixture as Flathub's catalog (its apps carry Flathub's
+/// verification marks, which only that remote's catalog can vouch for).
 fn alpha() -> Library {
-    Library::new(vec![(source("alpha"), catalog(ALPHA, "alpha"))])
+    Library::new(vec![(source("flathub"), catalog(ALPHA, "flathub"))])
 }
 
 fn both() -> Library {
@@ -105,6 +107,37 @@ fn only_apps_with_an_app_bundle_are_listed() {
     assert_eq!(lib.find(""), None);
     assert!(Library::new(Vec::new()).is_empty());
     assert!(Library::new(Vec::new()).search("x", NONE, 5).is_empty());
+}
+
+#[test]
+fn only_flathubs_catalog_can_verify_an_app() {
+    let verified_in = |remote: &str| {
+        let lib = Library::new(vec![(source(remote), catalog(ALPHA, remote))]);
+        let cafe = lib.find("org.example.Cafe").unwrap();
+        let filter = Filter {
+            verified_only: true,
+            ..NONE
+        };
+        let listed = lib.browse(None, filter, Sort::Name).len();
+        (lib.is_verified(cafe), listed)
+    };
+    // The fixture marks Cafe and one more app as verified.
+    assert_eq!(verified_in("flathub"), (true, 2));
+    assert_eq!(verified_in("flathub-beta"), (true, 2));
+    // The same marks in any other remote's catalog mean nothing: no badge,
+    // no place in the "verified" filter.
+    for other in ["alpha", "evil", "flathub-source", "Flathub", "kde"] {
+        assert_eq!(verified_in(other), (false, 0), "{other}");
+    }
+    // Where an app is listed twice, Flathub's copy comes first and keeps its
+    // mark; the other remote's copy is only an alternative.
+    let lib = Library::new(vec![
+        (source("flathub"), catalog(ALPHA, "flathub")),
+        (source("evil"), catalog(ALPHA, "evil")),
+    ]);
+    let cafe = lib.find("org.example.Cafe").unwrap();
+    assert!(lib.is_verified(cafe));
+    assert_eq!(lib.source(cafe).remote, "flathub");
 }
 
 #[test]

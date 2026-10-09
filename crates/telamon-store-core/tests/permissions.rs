@@ -50,13 +50,13 @@ fn every_known_value_maps_to_a_known_item() {
          sockets=x11;wayland;fallback-x11;pulseaudio;system-bus;session-bus;ssh-auth;pcsc;cups;gpg-agent;inherit-wayland-socket;\n\
          devices=dri;input;usb;kvm;shm;all;\n\
          features=devel;multiarch;bluetooth;canbus;per-app-dev-shm;\n\
-         filesystems=host;host-os;host-etc;home;xdg-desktop;xdg-documents;xdg-download;xdg-music;xdg-pictures;xdg-public-share;xdg-videos;xdg-templates;xdg-config;xdg-cache;xdg-data;xdg-run;xdg-download/sub:ro;~/x:create;/opt/x:rw;\n\
+         filesystems=host;host-os;host-etc;host-root;home;xdg-desktop;xdg-documents;xdg-download;xdg-music;xdg-pictures;xdg-public-share;xdg-videos;xdg-templates;xdg-config;xdg-cache;xdg-data;xdg-run;xdg-download/sub:ro;~/x:create;/opt/x:rw;\n\
          persistent=.mozilla;\nunset-environment=FOO;\n\
          [Session Bus Policy]\norg.example.A=talk\norg.example.B=own\norg.example.C=see\norg.example.*=talk\n\
          [System Bus Policy]\norg.example.D=talk\n",
     );
     let p = all.permissions();
-    assert_eq!(p.len(), 50, "{:?}", codes(&p));
+    assert_eq!(p.len(), 51, "{:?}", codes(&p));
     for x in &p {
         assert!(!x.is_unknown(), "{} is unknown", x.code());
         assert!(!x.describe().is_empty());
@@ -1916,4 +1916,133 @@ fn newly_listed_sensitive_apps_are_high() {
             "{id}"
         );
     }
+}
+
+// ---- what flatpak 1.18 applies, checked against its source ----
+
+#[test]
+fn host_root_is_known_and_high_in_every_mode() {
+    // `host-root` is new in flatpak 1.18: all of the host's root folder,
+    // other mounts included. It is named, not an unknown item.
+    for (item, verb) in [
+        ("host-root", "read and change"),
+        ("host-root:ro", "read"),
+        ("host-root:create", "read, change and create"),
+    ] {
+        let p = meta(&format!("[Context]\nfilesystems={item};\n")).permissions();
+        assert_eq!(p.len(), 1, "{item}: {:?}", codes(&p));
+        assert!(!p[0].is_unknown(), "{item}: {:?}", codes(&p));
+        assert_eq!(p[0].risk(), Risk::High, "{item}");
+        assert_eq!(
+            p[0].describe(),
+            format!("Can {verb} every file on your computer, including other drives")
+        );
+    }
+    // Several spellings of host-root are one item at the widest access.
+    let p = meta("[Context]\nfilesystems=host-root:ro;host-root;\n").permissions();
+    assert_eq!(p.len(), 1);
+    // A newer update that adds it is reported.
+    let old = meta("[Context]\nfilesystems=xdg-download;\n");
+    let new = meta("[Context]\nfilesystems=xdg-download;host-root:ro;\n");
+    assert_eq!(codes(&new.added_since(&old)), ["filesystem:host-root:ro"]);
+}
+
+#[test]
+fn usb_devices_are_high_because_flatpak_binds_all_of_dev_bus_usb() {
+    // `--dev-bind /dev/bus/usb /dev/bus/usb`: a program with usbfs can take a
+    // keyboard (to read what is typed) or a disk over.
+    let p = meta("[Context]\ndevices=usb;\n").permissions();
+    assert_eq!(codes(&p), ["device:usb"]);
+    assert_eq!(p[0].risk(), Risk::High);
+    assert!(p[0].describe().contains("USB"));
+    // A new USB grant in an update is reported at that risk.
+    let old = meta("[Context]\ndevices=dri;\n");
+    let added = meta("[Context]\ndevices=dri;usb;\n").added_since(&old);
+    assert_eq!(codes(&added), ["device:usb"]);
+    assert_eq!(added[0].risk(), Risk::High);
+}
+
+#[test]
+fn groups_flatpak_reads_but_the_store_does_not_model_are_unknown_and_high() {
+    // `[USB Devices]` (--usb), `[Policy ...]` (--add-policy) and the
+    // accessibility bus are read by flatpak's metadata parser; each is shown,
+    // never dropped, and none is rated low.
+    for (group, body) in [
+        ("USB Devices", "enumerable-devices=all;\n"),
+        ("USB Devices", "hidden-devices=vnd:1234;\n"),
+        (
+            "Policy Tracker3",
+            "dbus:org.freedesktop.Tracker3.Miner.Files=tracker:Documents;\n",
+        ),
+        ("Instance", "sandbox=false\n"),
+        ("X-DConf", "paths=/;\n"),
+        ("Accessibility Bus Policy", "org.a11y.Bus=talk\n"),
+    ] {
+        let p = meta(&format!("[{group}]\n{body}")).permissions();
+        assert_eq!(p.len(), 1, "{group}: {:?}", codes(&p));
+        assert_eq!(p[0].risk(), Risk::High, "{group}");
+        assert!(!p[0].describe().is_empty());
+    }
+    // Harmless groups stay out.
+    let p = meta("[Extension org.example.App.Locale]\ndirectory=share/locale\n[Extra Data]\nname=x\n[Build]\nbuilt-extensions=a;\n").permissions();
+    assert!(p.is_empty(), "{:?}", codes(&p));
+}
+
+#[test]
+fn conditional_and_misspelled_context_values_are_never_waved_through() {
+    // flatpak 1.18 reads `if:name:condition` entries and refuses a plain value
+    // with a colon; the case of a name matters (`X11` is nothing to flatpak,
+    // so showing it as unknown and High only overstates).
+    for (key, item) in [
+        ("sockets", "if:x11:!has-wayland"),
+        ("sockets", "X11"),
+        ("devices", "ALL"),
+        ("shared", "Network"),
+        ("features", "if:devel:true"),
+        ("filesystems", "HOST"),
+        ("filesystems", "host-reset"),
+    ] {
+        let p = meta(&format!("[Context]\n{key}={item};\n")).permissions();
+        assert_eq!(p.len(), 1, "{key}={item}: {:?}", codes(&p));
+        assert!(p[0].is_unknown(), "{key}={item}: {:?}", codes(&p));
+        assert_eq!(p[0].risk(), Risk::High, "{key}={item}");
+    }
+    // A key flatpak does not read in `[Context]` is shown too.
+    let p = meta("[Context]\nallow=devel;\n").permissions();
+    assert_eq!(p.len(), 1);
+    assert!(p[0].is_unknown() && p[0].risk() == Risk::High);
+}
+
+#[test]
+fn bus_names_with_odd_levels_or_spelling_are_not_low() {
+    for body in [
+        "org.freedesktop.Flatpak=TALK\n",
+        "org.freedesktop.Flatpak=talk \n",
+        "org.freedesktop.Flatpak=everything\n",
+        "org.freedesktop.flatpak=talk\n",
+    ] {
+        let p = meta(&format!("[Session Bus Policy]\n{body}")).permissions();
+        assert_eq!(p.len(), 1, "{body}");
+        assert!(
+            p[0].risk() >= Risk::Medium,
+            "{body}: {:?} {:?}",
+            codes(&p),
+            p[0].risk()
+        );
+    }
+}
+
+#[test]
+fn an_unknown_item_with_no_value_has_no_dangling_colon() {
+    let p = meta("[Context]\nweird=\nsockets=\n[Strange]\nkey=\n").permissions();
+    assert!(!p.is_empty());
+    for x in &p {
+        assert!(!x.describe().ends_with([':', ' ']), "{:?}", x.describe());
+        assert!(x.is_unknown() && x.risk() == Risk::High);
+    }
+    let q = meta("[Strange]\nkey=value\n").permissions();
+    assert_eq!(
+        q[0].describe(),
+        "Asks for something the Store doesn't know (Strange / key): value"
+    );
 }

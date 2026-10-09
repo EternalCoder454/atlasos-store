@@ -231,7 +231,7 @@ pub struct EntryId(pub u32);
 /// What [`Library::browse`] and [`Library::search`] leave out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Filter {
-    /// Only apps whose publisher Flathub verified.
+    /// Only apps whose publisher Flathub verified (see [`Library::is_verified`]).
     pub verified_only: bool,
     /// Only apps whose licence is free (see [`is_free_license`]).
     pub free_only: bool,
@@ -275,6 +275,14 @@ const MAX_QUERY_CHARS: usize = 200;
 /// Distinct words of a query that are matched; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 10;
 
+/// Whether `remote` is Flathub's own: the names the Store keeps for it (a
+/// file can claim them only with Flathub's own address, see
+/// `flatpak::sources::reserved_name`). Only Flathub's catalog says who
+/// verified an app's publisher.
+fn is_flathub_remote(remote: &str) -> bool {
+    matches!(remote, "flathub" | "flathub-beta")
+}
+
 /// One app, with what search and browse need precomputed.
 struct Entry {
     comp: Component,
@@ -315,6 +323,10 @@ impl Library {
         let mut free_cache: HashMap<String, bool> = HashMap::new();
         for (si, (source, catalog)) in catalogs.into_iter().enumerate() {
             let si = si as u32;
+            // Flathub's "verified" is Flathub's claim: the same words in any
+            // other remote's catalog are that remote's own, so they count for
+            // nothing here.
+            let from_flathub = is_flathub_remote(&source.remote);
             sources.push(source);
             for comp in catalog.components {
                 if !is_listed(&comp) {
@@ -350,7 +362,7 @@ impl Library {
                 ];
                 entries.push(Entry {
                     cats: Category::of(&comp.categories),
-                    verified: comp.verification.is_some(),
+                    verified: from_flathub && comp.verification.is_some(),
                     free,
                     updated: comp
                         .releases
@@ -430,6 +442,9 @@ impl Library {
         &self.entry(id).cats
     }
 
+    /// Whether Flathub verified the app's publisher. Only Flathub's own
+    /// catalog counts (`flathub`, `flathub-beta`): another remote can write
+    /// the same words in its AppStream data.
     pub fn is_verified(&self, id: EntryId) -> bool {
         self.entry(id).verified
     }

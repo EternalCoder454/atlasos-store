@@ -33,7 +33,16 @@ TelamonPage {
     readonly property bool mine: page.nativeApps.busyId === page.appId && !idle
     readonly property bool messageHere: page.nativeApps.busyId.length === 0 || page.nativeApps.busyId === page.appId
 
-    title: found ? info.name : qsTr("App")
+    // The navigation stack shows a page's title in a Label that decides for
+    // itself whether it is markup (Qt's AutoText), and a name such as
+    // "<img src=...>" would then load that image. Telamon.Ui is not ours to
+    // change, so the title carries look-alike characters in place of the
+    // three that can start markup.
+    function headerTitle(value: string): string {
+        return value.replace(/[<>&]/g, c => ({ "<": "\uFF1C", ">": "\uFF1E", "&": "\uFF06" })[c]);
+    }
+
+    title: found ? headerTitle(info.name) : qsTr("App")
 
     // Open asks the window system for an activation token first, then starts
     // the app: without one Wayland can leave its window behind this one.

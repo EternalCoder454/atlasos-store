@@ -169,7 +169,21 @@ enters, in `telamon-store-core`:
 - AppStream XML: size cap before parsing, depth and count limits, text
   cleaned of control and bidi characters, length caps, IDs validated.
 - AppStream markup becomes blocks of plain text. Nothing is shown as QML
-  RichText or HTML. Links open through TelamonPortal, https only.
+  RichText or HTML. Links open through TelamonPortal, https only. The QML is
+  held to that by `scripts/check-qml-plaintext.sh` (`cargo test` runs it
+  too): every `Text` and `Label` sets `textFormat: Text.PlainText`; no
+  `Qt.openUrlExternally`, `Qt.createQmlObject`, `eval` or `XMLHttpRequest`; an
+  `Image` source is a `file:` URL (the backend's `iconSource`) or a literal.
+  The one place Telamon.Ui shows data as Qt's default `AutoText` is the
+  navigation stack's header, which shows a page's title: a name like
+  `<img src=...>` would be fetched as an image. `AppPage` and `NativeAppPage`
+  pass their title through `headerTitle()`, which swaps `<`, `>` and `&` for
+  look-alike characters, and the script fails on a data-built `TelamonPage`
+  title without it.
+- "Verified" is Flathub's word: an app is marked Verified (and counted by the
+  verified filter) only when its catalog is Flathub's own (`flathub` or
+  `flathub-beta`); the same custom values in another remote's AppStream mean
+  nothing.
 - Images (screenshots, remote icons): https, an allowlisted host per remote
   (Flathub: `dl.flathub.org`), 15 s timeout, 8 MB cap, redirect cap, magic
   bytes and a pixel cap checked, decoded off the GUI thread, stored in a 200 MB
@@ -217,7 +231,20 @@ enters, in `telamon-store-core`:
 the Store's own dialog, showing the app, the remote, sizes and permissions.
 Fedora's polkit gives wheel members Flatpak installs without a password, so
 polkit is not the confirmation. System-wide changes go through flatpak's own
-polkit helper; the Store has no helper and no polkit actions of its own.
+polkit helper; the Store has no helper and no polkit actions of its own, and
+asks for no privilege itself. What the helper asks polkit for (flatpak 1.18,
+Fedora's `org.freedesktop.Flatpak.rules`): an install (`app-install`,
+`runtime-install`), an uninstall (`app-uninstall`, `runtime-uninstall`) and
+the repository upkeep around them (`modify-repo`) need no password for a
+wheel member in an active local session; adding, removing, enabling or
+disabling a system-wide source (`configure-remote`) always asks for one;
+updates (`app-update`, `runtime-update`) and the refreshes of AppStream and
+summaries (`appstream-update`, `metadata-update`, `update-remote`) need
+none for anyone in an active session. The scope of an operation is never
+read from a file or a link: it is the installation of the catalog entry's
+remote, of the installed ref, or the one the person picked in a dialog. A
+removal names its installation as well as its ref (the same ref can be
+installed in both), so the one the dialog showed is the one removed.
 A file's source is its own step: "Add Source" (remote, URL, key fingerprint or
 a warning that it is unsigned) comes before the install confirmation, and a
 declined install can take the source back (`remove_remote`: exact name and
@@ -230,11 +257,22 @@ runs (the dialog then offers "Close and Remove": SIGTERM, 3 s, SIGKILL, on the
 worker, after the user confirms) and never while another branch of it is installed; a runtime an
 installed app uses is refused (only "remove unused" removes runtimes).
 
+**Permissions shown:** the install dialog lists everything flatpak applies
+from the app's metadata, read the way flatpak reads it (`permissions.rs`);
+what the Store does not know, whether flatpak reads it or not, is shown as
+unknown and High, never dropped. `host-root` (new in flatpak 1.18) and raw USB
+access (`devices=usb` binds all of `/dev/bus/usb`) are High. A runtime's own
+permissions are not inherited by its apps in flatpak (only environment
+variables are), so the dialog lists the app's metadata alone.
+
 ## Opening an app
 
 Open asks the window system for an XDG activation token on the GUI thread
 (`cpp/activation_token.cpp`, KWaylandExtras, a signal and a 1 s timeout, none
-on X11), then the worker runs `flatpak run --user|--system --arch --branch <id>`
+on X11), then the worker runs `flatpak run --user|--system --arch --branch -- <id>`
+(the program is `/usr/bin/flatpak`, or `/bin/flatpak`, never found through
+`PATH`, which in a user session holds folders any process of the user can write
+to; the ID never starts with a dash and follows `--`)
 with `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` set, in its own process
 group, and does not wait for the app. Without the token Wayland can leave the
 app's window behind the Store.

@@ -127,7 +127,9 @@ fn id_chars(s: &str) -> bool {
 /// A component or Flatpak ID: `[A-Za-z0-9_.-]`, at most 255 bytes, at least two
 /// dot-separated parts and none of them empty. A `.desktop` suffix passes.
 pub fn valid_id(s: &str) -> bool {
-    if s.is_empty() || s.len() > 255 || !id_chars(s) {
+    // No name starts with `-` (D-Bus names cannot), and one that did could be
+    // read as an option wherever an ID ends up on a command line.
+    if s.is_empty() || s.len() > 255 || s.starts_with('-') || !id_chars(s) {
         return false;
     }
     let mut parts = 0;
@@ -273,8 +275,19 @@ mod tests {
     #[test]
     fn ids_icons_refs() {
         assert!(valid_id("org.gnome.Nautilus.desktop"));
+        // A `-` inside a name is fine.
+        assert!(valid_id("io.github.a-b.App-2"));
         for bad in [
-            "", "nodots", "a..b", ".a.b", "a.b.", "a.b/c", "a b.c", "../x.y",
+            "",
+            "nodots",
+            "a..b",
+            ".a.b",
+            "a.b.",
+            "a.b/c",
+            "a b.c",
+            "../x.y",
+            "-a.b",
+            "--verbose.x",
         ] {
             assert!(!valid_id(bad), "{bad}");
         }
