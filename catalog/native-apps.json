@@ -1,4 +1,6 @@
 {
   "schema": 1,
-  "apps": []
+  "apps": [
+    { "id": "net.eterneon.telamon.gates", "repo": "EternalCoder454/telamon-gates", "channel": "releases" }
+  ]
 }
