@@ -244,7 +244,10 @@ installed app uses is refused (only "remove unused" removes runtimes).
 
 Open asks the window system for an XDG activation token on the GUI thread
 (`cpp/activation_token.cpp`, KWaylandExtras, a signal and a 1 s timeout, none
-on X11), then the worker runs `flatpak run --user|--system --arch --branch <id>`
+on X11), then the worker runs `flatpak run --user|--system --arch --branch -- <id>`
+(the program is `/usr/bin/flatpak`, or `/bin/flatpak`, never found through
+`PATH`, which in a user session holds folders any process of the user can write
+to; the ID never starts with a dash and follows `--`)
 with `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` set, in its own process
 group, and does not wait for the app. Without the token Wayland can leave the
 app's window behind the Store.
