@@ -1,6 +1,13 @@
 {
   "schema": 1,
   "apps": [
-    { "id": "net.eterneon.telamon.gates", "repo": "EternalCoder454/telamon-gates", "channel": "releases" }
+    {
+      "id": "net.eterneon.telamon.gates",
+      "repo": "EternalCoder454/telamon-gates",
+      "channel": "releases",
+      "signers": [
+        { "type": "minisign", "key": "RWR7yabRcxtBSnPoKofwv/t9g09aKRnZ32dWSi0kt2wbt4SeDp5QAzcf" }
+      ]
+    }
   ]
 }
