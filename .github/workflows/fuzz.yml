@@ -45,10 +45,10 @@ jobs:
         run: |
           dnf -y install git-core cargo gcc gcc-c++ rustup flatpak-devel pkgconf-pkg-config tar xz
           rustup-init -y --profile minimal --default-toolchain "$NIGHTLY" --no-modify-path
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # The downloads, and the installed cargo-fuzz; not a target dir (it would grow without bound).
           path: |
@@ -66,7 +66,7 @@ jobs:
           fuzz/run.sh "$FUZZ_SECONDS"
       # The input that crashed a target, to run again with
       # `cargo fuzz run <target> <file>`.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: fuzz-crashes
