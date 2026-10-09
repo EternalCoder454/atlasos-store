@@ -99,6 +99,16 @@ pub(crate) fn reserved_name(name: &str, url: &str) -> bool {
         .any(|(n, urls)| n.eq_ignore_ascii_case(name) && !urls.contains(&url.as_str()))
 }
 
+/// Whether `url` is the address of Flathub or Flathub Beta (the reserved
+/// list above), whatever the remote is called and wherever it is installed.
+pub(crate) fn is_flathub_url(url: &str) -> bool {
+    let url = norm_url(url);
+    RESERVED
+        .iter()
+        .filter(|(n, _)| matches!(*n, "flathub" | "flathub-beta"))
+        .any(|(_, urls)| urls.contains(&url.as_str()))
+}
+
 /// The most "-N" numbers tried to find a free remote name.
 const NAME_TRIES: u32 = 99;
 

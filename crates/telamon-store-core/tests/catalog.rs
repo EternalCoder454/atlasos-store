@@ -31,6 +31,11 @@ fn catalog(xml: &str, origin: &str) -> Catalog {
 
 fn source(remote: &str) -> CatalogSource {
     CatalogSource {
+        url: match remote {
+            "flathub" => "https://dl.flathub.org/repo".into(),
+            "flathub-beta" => "https://dl.flathub.org/beta-repo".into(),
+            _ => format!("https://{remote}.example.org/repo"),
+        },
         scope: Scope::User,
         remote: remote.into(),
         title: remote.into(),
@@ -111,8 +116,9 @@ fn only_apps_with_an_app_bundle_are_listed() {
 
 #[test]
 fn only_flathubs_catalog_can_verify_an_app() {
-    let verified_in = |remote: &str| {
-        let lib = Library::new(vec![(source(remote), catalog(ALPHA, remote))]);
+    let verified_in = |src: CatalogSource| {
+        let name = src.remote.clone();
+        let lib = Library::new(vec![(src, catalog(ALPHA, &name))]);
         let cafe = lib.find("org.example.Cafe").unwrap();
         let filter = Filter {
             verified_only: true,
@@ -121,13 +127,43 @@ fn only_flathubs_catalog_can_verify_an_app() {
         let listed = lib.browse(None, filter, Sort::Name).len();
         (lib.is_verified(cafe), listed)
     };
+    let at = |remote: &str, url: &str, scope: Scope| CatalogSource {
+        url: url.into(),
+        scope,
+        ..source(remote)
+    };
     // The fixture marks Cafe and one more app as verified.
-    assert_eq!(verified_in("flathub"), (true, 2));
-    assert_eq!(verified_in("flathub-beta"), (true, 2));
+    for (name, url) in [
+        ("flathub", "https://dl.flathub.org/repo"),
+        ("flathub", "https://flathub.org/repo/"),
+        ("flathub-beta", "https://dl.flathub.org/beta-repo"),
+        // Flathub under any name, in either installation.
+        ("my-flathub", "https://dl.flathub.org/repo"),
+    ] {
+        for scope in [Scope::User, Scope::System] {
+            assert_eq!(verified_in(at(name, url, scope)), (true, 2), "{name} {url}");
+        }
+    }
     // The same marks in any other remote's catalog mean nothing: no badge,
-    // no place in the "verified" filter.
-    for other in ["alpha", "evil", "flathub-source", "Flathub", "kde"] {
-        assert_eq!(verified_in(other), (false, 0), "{other}");
+    // no place in the "verified" filter. That includes a remote that is
+    // *named* flathub (in the user installation, say) with another address.
+    for (name, url) in [
+        ("alpha", "https://alpha.example.org/repo"),
+        ("flathub", "https://evil.example.org/repo"),
+        ("flathub", "https://dl.flathub.org.evil.example.org/repo"),
+        ("flathub", "http://dl.flathub.org/repo"),
+        ("flathub", "https://dl.flathub.org/repo-evil"),
+        ("flathub-beta", ""),
+        ("flathub", ""),
+        ("Flathub", "https://evil.example.org/repo"),
+    ] {
+        for scope in [Scope::User, Scope::System] {
+            assert_eq!(
+                verified_in(at(name, url, scope)),
+                (false, 0),
+                "{name} {url}"
+            );
+        }
     }
     // Where an app is listed twice, Flathub's copy comes first and keeps its
     // mark; the other remote's copy is only an alternative.
@@ -625,6 +661,7 @@ fn load_uses_the_index_the_second_time() {
     assert_eq!(load(&src, &cache, &langs).unwrap(), first);
     // Another commit or other languages need the XML again.
     let other = CatalogSource {
+        url: String::new(),
         commit: Some("fedcba9876543210fedc".into()),
         ..src.clone()
     };
@@ -655,6 +692,7 @@ fn the_same_remote_in_both_scopes_keeps_an_index_each() {
     let cache = root.join("cache");
     let user = on_disk(&root.join("u"), "flathub", "0123456789abcdef0123");
     let system = CatalogSource {
+        url: String::new(),
         scope: Scope::System,
         ..on_disk(&root.join("s"), "flathub", "fedcba9876543210fedc")
     };
@@ -710,6 +748,7 @@ fn load_failures_are_errors_not_panics() {
     assert!(!e.to_string().is_empty());
     // An unusable commit never builds a path from it.
     let evil = CatalogSource {
+        url: String::new(),
         commit: Some("../../etc/passwd".into()),
         ..src.clone()
     };

@@ -300,6 +300,7 @@ fn flathub_library() -> Library {
         .unwrap()
     };
     let src = |remote: &str| CatalogSource {
+        url: String::new(),
         scope: Scope::User,
         remote: remote.into(),
         title: remote.into(),
@@ -351,6 +352,7 @@ fn only_the_flathub_remote_counts() {
         let cat = parse(xml.as_bytes(), &ParseOptions::default()).unwrap();
         Library::new(vec![(
             CatalogSource {
+                url: String::new(),
                 scope: Scope::User,
                 remote: "fedora".into(),
                 title: "Fedora".into(),

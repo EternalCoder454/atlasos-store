@@ -443,6 +443,7 @@ mod tests {
         };
         let catalog = parse(ALPHA.as_bytes(), &opts).unwrap();
         let source = CatalogSource {
+            url: String::new(),
             scope: Scope::User,
             remote: "alpha".into(),
             title: "alpha".into(),

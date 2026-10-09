@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::{CatalogSource, LoadError, SourcesOutcome};
 use crate::appstream::{self, Catalog, IndexKey, ParseError, ParseOptions, index};
+use crate::flatpak::sources::is_flathub_url;
 use crate::flatpak::{self, CancelToken, Scope};
 use crate::text;
 
@@ -115,6 +116,10 @@ fn scan(scope: Scope, arch: &str, cancel: &CancelToken, out: &mut SourcesOutcome
         }
         let title = r.title().map(|t| text::clean(&t, 200)).unwrap_or_default();
         let mut source = CatalogSource {
+            url: flatpak::transaction::norm_url(&text::clean(
+                r.url().as_deref().unwrap_or_default(),
+                500,
+            )),
             scope,
             title: if title.is_empty() {
                 rname.clone()
@@ -161,15 +166,23 @@ pub(super) fn list(cancel: &CancelToken) -> SourcesOutcome {
         }
         scan(scope, &arch, cancel, &mut out);
     }
-    out.sources.sort_by(|a, b| {
+    order(&mut out.sources);
+    out
+}
+
+/// Flathub first (the remote named `flathub` that has Flathub's address: a
+/// remote can be given any name), then by priority, then by name; the system
+/// copy before the user copy of the same name.
+fn order(sources: &mut [CatalogSource]) {
+    let is_flathub = |s: &CatalogSource| s.remote == "flathub" && is_flathub_url(&s.url);
+    sources.sort_by(|a, b| {
         let scope = |s: &CatalogSource| u8::from(s.scope == Scope::User);
-        (a.remote != "flathub")
-            .cmp(&(b.remote != "flathub"))
+        (!is_flathub(a))
+            .cmp(&(!is_flathub(b)))
             .then(b.priority.cmp(&a.priority))
             .then_with(|| a.remote.cmp(&b.remote))
             .then(scope(a).cmp(&scope(b)))
     });
-    out
 }
 
 pub(super) fn load(
@@ -247,6 +260,34 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn src(remote: &str, url: &str, priority: i32, scope: Scope) -> CatalogSource {
+        CatalogSource {
+            url: url.into(),
+            scope,
+            remote: remote.into(),
+            title: remote.into(),
+            priority,
+            dir: None,
+            commit: None,
+            updated: None,
+        }
+    }
+
+    #[test]
+    fn flathub_sorts_first_by_its_address_not_by_a_name_anyone_can_give() {
+        let flathub = "https://dl.flathub.org/repo";
+        let mut v = vec![
+            src("aaa", "https://a.example.org/repo", 9, Scope::System),
+            // A remote the user (or a tool) named flathub with another address.
+            src("flathub", "https://evil.example.org/repo", 1, Scope::User),
+            src("flathub", flathub, 1, Scope::System),
+        ];
+        order(&mut v);
+        assert_eq!(v[0].url, flathub);
+        assert_eq!(v[1].remote, "aaa");
+        assert_eq!(v[2].url, "https://evil.example.org/repo");
     }
 
     #[test]
