@@ -482,7 +482,9 @@ pub fn search_text(s: &str) -> Option<String> {
         .filter(|w| !w.is_empty())
         .collect();
     let joined: String = words.join(" ").chars().take(200).collect();
-    (!joined.is_empty()).then_some(joined)
+    // The cut can fall on a separator: no space ends the text.
+    let joined = joined.trim_end();
+    (!joined.is_empty()).then(|| joined.to_string())
 }
 
 /// Characters that change how text around them looks without showing

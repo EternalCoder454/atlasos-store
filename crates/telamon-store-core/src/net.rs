@@ -367,7 +367,11 @@ pub fn redirect_target(base: &str, location: &str) -> Option<String> {
         return None;
     }
     let target = if location.starts_with('/') {
-        let host_end = base[8..]
+        // A base that is too short or cuts a character (`get` is None) would
+        // panic on a slice; the fetcher only passes URLs it fetched, but this
+        // function is public.
+        let host_end = base
+            .get(8..)?
             .find(['/', '?', '#'])
             .map_or(base.len(), |i| i + 8);
         format!("{}{}", &base[..host_end], location)
@@ -532,7 +536,9 @@ mod tests {
         ] {
             assert!(!github.allows(bad), "{bad}");
         }
-        assert!(Hosts::Only(FLATHUB_HOSTS).allows("https://dl.flathub.org/repo/appstream/x.xml.gz"));
+        assert!(
+            Hosts::Only(FLATHUB_HOSTS).allows("https://dl.flathub.org/repo/appstream/x.xml.gz")
+        );
         assert!(!Hosts::Only(FLATHUB_HOSTS).allows("https://github.com/"));
         assert!(Hosts::Any.allows("https://anything.example.org/"));
 
@@ -552,7 +558,11 @@ mod tests {
             Err(NetError::HostNotAllowed)
         );
         assert_eq!(
-            next_hop(base, "https://objects.githubusercontent.com:8443/z", &github),
+            next_hop(
+                base,
+                "https://objects.githubusercontent.com:8443/z",
+                &github
+            ),
             Err(NetError::Redirect)
         );
         assert_eq!(

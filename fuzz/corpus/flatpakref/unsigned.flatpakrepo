@@ -1,0 +1,4 @@
+[Flatpak Repo]
+Title=Unsigned Example
+Comment=A source without a signing key
+Url=https://dl.example.org/unsigned/repo/

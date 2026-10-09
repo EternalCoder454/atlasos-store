@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Telamon Gates
+Name[de]=Tor
+Exec=telamon-gates %U
+TryExec=telamon-gates
+Path=/tmp
+Icon=net.eterneon.telamon.gates
+Terminal=false
+Categories=Utility;
+
+[Desktop Action new]
+Name=New Chat
+Exec=telamon-gates --new
+/home/u/.local/share/telamon-apps/net.eterneon.telamon.gates/currenttelamon-gates

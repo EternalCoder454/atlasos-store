@@ -43,5 +43,10 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+    ignore:
+      # The reusable workflow is pinned together with the framework crates
+      # (`framework-ref` and Cargo.toml's tag): see CLAUDE.md, "Moving the
+      # atlas-framework pin".
+      - dependency-name: "EternalCoder454/atlas-framework"
     commit-message:
       prefix: "CI"
