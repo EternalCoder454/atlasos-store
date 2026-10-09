@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A desktop application in the style of the AppStream specification's
+     example for a Qt/KDE program. -->
+<component type="desktop-application">
+  <id>net.eterneon.telamon.gates</id>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>GPL-3.0+</project_license>
+  <name>Foobar</name>
+  <name xml:lang="de">Foobar</name>
+  <summary>A foo-ish bar</summary>
+  <summary xml:lang="de">Ein fooartiges Bar</summary>
+  <developer_name>The Foo Project</developer_name>
+  <description>
+    <p>The Foobar program is a foo-ish bar that lets you do things &amp; stuff.</p>
+    <p>It supports:</p>
+    <ul>
+      <li>the <em>foo</em> format</li>
+      <li>the <code>--bar</code> option</li>
+    </ul>
+    <ol>
+      <li>first</li>
+      <li>second</li>
+    </ol>
+  </description>
+  <launchable type="desktop-id">net.eterneon.telamon.gates.desktop</launchable>
+  <url type="homepage">https://example.org/</url>
+  <url type="bugtracker">https://example.org/issues</url>
+  <url type="faq">https://example.org/faq</url>
+  <url type="donation">https://example.org/donate</url>
+  <url type="help">https://example.org/help</url>
+  <categories>
+    <category>Qt</category>
+    <category>KDE</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>foo</keyword>
+    <keyword xml:lang="de">fu</keyword>
+  </keywords>
+  <provides>
+    <binary>foobar</binary>
+    <id>net.eterneon.telamon.gates.desktop</id>
+    <mediatype>text/x-foo</mediatype>
+    <dbus type="session">net.eterneon.telamon.gates.Daemon</dbus>
+  </provides>
+  <icon type="stock">foobar</icon>
+  <project_group>KDE</project_group>
+  <update_contact>maintainer_AT_example.org</update_contact>
+</component>

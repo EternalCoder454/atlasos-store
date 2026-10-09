@@ -46,7 +46,7 @@ use sha2::Digest;
 
 use super::archive::{self, hex};
 use super::desktop;
-use super::dirfd::{Dir, Expect, Kind, Refused, ReplaceError};
+use super::dirfd::{Dir, Expect, Kind, Refused, RemoveError, ReplaceError};
 use super::manifest::{Host, Manifest};
 use super::version::Version;
 use super::{APPS_DIR, Error, err, io_err, valid_app_id};
@@ -654,6 +654,8 @@ fn remove_export(data: &Dir, rel: &str, sha: &str) -> Result<bool, String> {
     else {
         return Ok(false);
     };
+    // Temporary files an interrupted write or removal of this one left.
+    dir.sweep_temps(name);
     match dir.stat_opt(name) {
         Ok(None) => return Ok(false),
         Ok(Some(m)) if m.kind != Kind::File => return Err("is not a plain file any more".into()),
@@ -662,8 +664,11 @@ fn remove_export(data: &Dir, rel: &str, sha: &str) -> Result<bool, String> {
     }
     match dir.remove_checked(name, sha) {
         Ok(()) => {}
-        Err(Refused::Gone) => return Ok(false),
-        Err(Refused::Changed) => return Err("was changed since the Store wrote it".into()),
+        Err(RemoveError::Refused(Refused::Gone)) => return Ok(false),
+        Err(RemoveError::Refused(Refused::Changed)) => {
+            return Err("was changed since the Store wrote it".into());
+        }
+        Err(RemoveError::Io(_)) => return Err("couldn't be removed".into()),
     }
     // Empty folders below the second level.
     let parts: Vec<&str> = rel.split('/').collect();
@@ -819,7 +824,16 @@ fn install_from(
     }
     let prefix = dirs.app(&id).join("current");
     let plan = desktop::plan(staging, &inner, &prefix)?;
-    desktop::check_system(&plan, &id, &dirs.system)?;
+    // The data folder itself may be listed among the system's (a session that
+    // names it in `XDG_DATA_DIRS`): the Store's own copies are not "provided
+    // by the system".
+    let system: Vec<PathBuf> = dirs
+        .system
+        .iter()
+        .filter(|p| !data.is_same_dir(p))
+        .cloned()
+        .collect();
+    desktop::check_system(&plan, &id, &system)?;
 
     // Copied files: not over anything that is not this app's own, and not
     // over one the user changed since the Store wrote it. (Checked again,
@@ -933,6 +947,12 @@ fn install_from(
                     dirs.data.join(&e.to).display()
                 )));
             }
+            Err(ReplaceError::Displaced(kept)) => {
+                return Err(err(format!(
+                    "{} was changed while the Store was installing; the file written meanwhile was kept as {kept} next to it. Nothing else was changed.",
+                    dirs.data.join(&e.to).display()
+                )));
+            }
             Err(ReplaceError::Io(er)) => return Err(io_err("write a menu or icon file", &er)),
         }
     }
@@ -998,6 +1018,15 @@ fn tidy(lock: &Lock, app: &Dir, rec: &Record, old: Option<&Record>) {
             }
         }
     }
+    // What a killed write left: the record's and the link's temporary names,
+    // and those of the copied files (only an exact match, only the Store's).
+    app.sweep_temps(RECORD);
+    app.sweep_link_temps(".current.");
+    for c in &rec.copied {
+        if let Ok(Some((dir, name))) = export_parent(&lock.data, &c.to, false) {
+            dir.sweep_temps(name);
+        }
+    }
     let keep = [Some(rec.version.as_str()), rec.previous.as_deref()];
     let Ok(names) = app.list_text() else {
         return;
@@ -1032,22 +1061,42 @@ pub fn uninstall(dirs: &Dirs, id: &str) -> Result<Removed, Error> {
             left.push((dirs.data.join(&c.to), why));
         }
     }
-    // The record goes first: an interrupted removal must not look installed.
-    {
-        let app = lock
-            .apps
-            .sub_owned(id)
-            .map_err(|e| io_err("open the app's folder", &e))?;
-        app.unlink(RECORD)
-            .map_err(|e| io_err("remove the record", &e))?;
-    }
-    lock.apps
-        .remove_all(id)
-        .map_err(|e| io_err("remove the app's folder", &e))?;
+    // The app's folder, the record last: a removal that stops half way leaves
+    // an app that is still listed (and can be removed again), not one that is
+    // hidden and cannot be touched.
+    remove_app_folder(&lock.apps, id)?;
     Ok(Removed {
         name: rec.name,
         left,
     })
+}
+
+/// Removes `telamon-apps/<id>`: everything in it but the record, then the
+/// record, then the folder.
+fn remove_app_folder(apps: &Dir, id: &str) -> Result<(), Error> {
+    let bad = |what: &str, e: std::io::Error| io_err(what, &e);
+    let app = apps
+        .sub_owned(id)
+        .map_err(|e| bad("open the app's folder", e))?;
+    let names = app.list().map_err(|e| bad("remove the app's folder", e))?;
+    for name in names {
+        if name.to_str() == Some(RECORD) {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            // A name that is not text cannot be named by `Dir`; the whole
+            // folder is removed below, after the record.
+            continue;
+        };
+        app.remove_all(name)
+            .map_err(|e| bad("remove the app's folder", e))?;
+    }
+    hook("contents")?;
+    app.unlink(RECORD)
+        .map_err(|e| bad("remove the record", e))?;
+    drop(app);
+    apps.remove_all(id)
+        .map_err(|e| bad("remove the app's folder", e))
 }
 
 /// Starts an installed app. The program is `current/<exe>` of the record; its

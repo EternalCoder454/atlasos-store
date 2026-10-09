@@ -251,24 +251,39 @@ fn strict_scan<'a>(src: &'a [u8], what: &str) -> Result<&'a str, Error> {
     };
     let text =
         std::str::from_utf8(src).map_err(|_| err(format!("The bundle's {what} is not text.")))?;
-    let mut after_cr = false;
-    for c in text.chars() {
-        if after_cr && c != '\n' {
-            return Err(bad());
-        }
-        after_cr = c == '\r';
-        if !after_cr && c != '\n' && c != '\t' && hidden(c) {
-            return Err(bad());
-        }
-    }
-    if after_cr {
-        return Err(bad());
-    }
     let mut groups: HashSet<&str> = HashSet::new();
     let mut keys: HashSet<(&str, &str)> = HashSet::new();
     let mut group = "";
-    for line in text.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+    for raw in text.split_inclusive('\n') {
+        // A line ends with `\n` or `\r\n`; a `\r` anywhere else is refused.
+        let line = match raw.strip_suffix('\n') {
+            Some(l) => l.strip_suffix('\r').unwrap_or(l),
+            None => raw,
+        };
+        if line.contains('\r') {
+            return Err(bad());
+        }
+        // The value of a translated key (`Name[ar]=...`) may hold the marks
+        // right-to-left scripts need; nowhere else may a hidden character be.
+        let mut soft_from = line.len();
+        let mut parsed_key = None;
+        if !line.is_empty()
+            && !line.starts_with(['#', '['])
+            && let Some((key, _)) = line.split_once('=')
+        {
+            let key = key.trim_end_matches([' ', '\t']);
+            if simple_key(key) {
+                if key.contains('[') {
+                    soft_from = line.find('=').map_or(line.len(), |i| i + 1);
+                }
+                parsed_key = Some(key);
+            }
+        }
+        for (i, c) in line.char_indices() {
+            if c != '\t' && hidden(c) && !(i >= soft_from && soft_mark(c)) {
+                return Err(bad());
+            }
+        }
         let Some(first) = line.chars().next() else {
             continue;
         };
@@ -288,15 +303,22 @@ fn strict_scan<'a>(src: &'a [u8], what: &str) -> Result<&'a str, Error> {
             group = name;
             continue;
         }
-        let Some((key, _)) = line.split_once('=') else {
+        let Some(key) = parsed_key else {
             return Err(bad());
         };
-        let key = key.trim_end_matches([' ', '\t']);
-        if !simple_key(key) || !keys.insert((group, key)) {
+        if !keys.insert((group, key)) {
             return Err(bad());
         }
     }
     Ok(text)
+}
+
+/// The marks of right-to-left and some other scripts that are normal in a
+/// translated text: the left-to-right and right-to-left marks, the variation
+/// selector-16 and the soft hyphen. (Overrides and isolates, line and
+/// paragraph separators, zero-width spaces and joiners are never allowed.)
+fn soft_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{FE0F}' | '\u{00AD}')
 }
 
 /// `Name` or `Name[locale]`: ASCII letters, digits and `-` for the name, and
@@ -455,11 +477,15 @@ fn check_notifyrc(bytes: &[u8]) -> Result<(), Error> {
         let s = s.to_ascii_lowercase();
         s.contains("execute") || s.contains("logfile")
     };
+    // A value is read as KConfig reads it (`\x65` is an `e`) before it is
+    // looked at.
+    let refused_value = |s: &str| refused(&kconfig_unescape(s));
     // By lines as well as by the parsed keys, in case a reader splits them
     // differently.
     if text.lines().any(|l| {
-        l.split_once('=')
-            .is_some_and(|(k, v)| refused(k) || (k.trim().starts_with("Action") && refused(v)))
+        l.split_once('=').is_some_and(|(k, v)| {
+            refused(k) || (k.trim().starts_with("Action") && refused_value(v))
+        })
     }) {
         return Err(err(
             "The bundle's notification file runs a command or writes a log file.",
@@ -469,7 +495,7 @@ fn check_notifyrc(bytes: &[u8]) -> Result<(), Error> {
     for g in groups {
         for key in kf.all_keys(&g) {
             let base = key.split('[').next().unwrap_or(key);
-            let action = base == "Action" && kf.raw(&g, key).is_some_and(refused);
+            let action = base == "Action" && kf.raw(&g, key).is_some_and(refused_value);
             if refused(base) || action {
                 return Err(err(
                     "The bundle's notification file runs a command or writes a log file.",
@@ -480,12 +506,57 @@ fn check_notifyrc(bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
+/// A value with KConfig's escapes resolved: `\s`, `\t`, `\n`, `\r`, `\\`,
+/// `\;` and `\xNN` (one or two hex digits); any other `\c` is `c`.
+fn kconfig_unescape(v: &str) -> String {
+    let mut out = String::new();
+    let mut it = v.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            None => out.push('\\'),
+            Some('s') => out.push(' '),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('x') => {
+                let mut n = 0u32;
+                let mut digits = 0;
+                while digits < 2 {
+                    match it.peek().and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            n = n * 16 + d;
+                            digits += 1;
+                            it.next();
+                        }
+                        None => break,
+                    }
+                }
+                if digits == 0 {
+                    out.push('x');
+                } else if let Some(ch) = char::from_u32(n) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => out.push(other),
+        }
+    }
+    out
+}
+
 /// A metainfo file describes the bundle's own app to software centers, which
 /// read the user's folder before the system's. It must be one `<component>`
-/// whose `<id>` is the app ID (with an optional `.desktop`), replace or extend
-/// nothing, and provide only its own IDs and bus names. Read with limits: at
-/// most 1 MiB, 32 levels deep, no DOCTYPE, no entity but the predefined five,
-/// no processing instruction.
+/// whose `<id>` is the app ID (with an optional `.desktop`), and it may only
+/// use the elements AppStream metainfo for a desktop app uses (see
+/// [`metainfo_children`]): anything else is refused with its name, among them
+/// `<replaces>`, `<extends>`, `<bundle>`, `<pkgname>` and a `<launchable>` that
+/// is not `desktop-id` with the app's own `<id>.desktop`. It provides only
+/// its own IDs and bus names. Read with limits: at most 1 MiB, 32 levels
+/// deep, no DOCTYPE, no entity but the predefined five, no processing
+/// instruction, and the XML declaration says no encoding or UTF-8.
 fn check_metainfo(bytes: &[u8], id: &str) -> Result<(), Error> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -515,7 +586,12 @@ fn check_metainfo(bytes: &[u8], id: &str) -> Result<(), Error> {
             Event::Eof => break,
             Event::DocType(_) => return Err(metainfo_bad("has a DOCTYPE")),
             Event::PI(_) => return Err(metainfo_bad("has a processing instruction")),
-            Event::Decl(_) | Event::Comment(_) => {}
+            Event::Comment(_) => {}
+            Event::Decl(d) => match d.encoding() {
+                None => {}
+                Some(Ok(enc)) if enc.eq_ignore_ascii_case("utf-8") => {}
+                Some(_) => return Err(metainfo_bad("is not UTF-8")),
+            },
             Event::GeneralRef(r) => {
                 if st.capture.is_some() {
                     return Err(metainfo_bad("has an entity where an ID is read"));
@@ -546,6 +622,100 @@ fn check_metainfo(bytes: &[u8], id: &str) -> Result<(), Error> {
         return Err(metainfo_bad("must be one <component> with the app's ID"));
     }
     Ok(())
+}
+
+/// The elements of AppStream metainfo that a desktop app uses, and what each
+/// may hold. `None`: not an element the Store copies. An empty list: text only.
+/// Not on it, so refused: `bundle`, `pkgname`, `source_pkgname`, `replaces`,
+/// `extends`, `suggests`, `artifacts`, `reviews`, `agreement`, `tags`, `info`...
+fn metainfo_children(element: &str) -> Option<&'static [&'static str]> {
+    Some(match element {
+        "component" => &[
+            "id",
+            "name",
+            "summary",
+            "description",
+            "developer",
+            "developer_name",
+            "metadata_license",
+            "project_license",
+            "url",
+            "launchable",
+            "provides",
+            "categories",
+            "keywords",
+            "screenshots",
+            "releases",
+            "content_rating",
+            "branding",
+            "requires",
+            "recommends",
+            "supports",
+            "custom",
+            "translation",
+            "icon",
+            "name_variant_suffix",
+            "project_group",
+            "update_contact",
+            "compulsory_for_desktop",
+            "languages",
+        ],
+        "description" => &["p", "ul", "ol"],
+        "p" | "li" => &["em", "code"],
+        "ul" | "ol" => &["li"],
+        "developer" => &["name"],
+        "provides" => &["id", "binary", "dbus", "mediatype"],
+        "categories" => &["category"],
+        "keywords" => &["keyword"],
+        "screenshots" => &["screenshot"],
+        "screenshot" => &["image", "video", "caption"],
+        "releases" => &["release"],
+        "release" => &["description", "url", "issues"],
+        "issues" => &["issue"],
+        "content_rating" => &["content_attribute"],
+        "branding" => &["color"],
+        "requires" | "recommends" | "supports" => {
+            &["control", "display_length", "internet", "memory", "kernel"]
+        }
+        "custom" => &["value"],
+        "languages" => &["lang"],
+        // Text only.
+        "id"
+        | "name"
+        | "summary"
+        | "developer_name"
+        | "metadata_license"
+        | "project_license"
+        | "url"
+        | "launchable"
+        | "binary"
+        | "dbus"
+        | "mediatype"
+        | "category"
+        | "keyword"
+        | "image"
+        | "video"
+        | "caption"
+        | "issue"
+        | "content_attribute"
+        | "color"
+        | "control"
+        | "display_length"
+        | "internet"
+        | "memory"
+        | "kernel"
+        | "value"
+        | "translation"
+        | "icon"
+        | "name_variant_suffix"
+        | "project_group"
+        | "update_contact"
+        | "compulsory_for_desktop"
+        | "lang"
+        | "em"
+        | "code" => &[],
+        _ => return None,
+    })
 }
 
 fn metainfo_bad(why: &str) -> Error {
@@ -579,33 +749,54 @@ impl MetaState<'_> {
         if self.stack.len() >= 32 {
             return Err(metainfo_bad("is nested too deeply"));
         }
-        if self.stack.is_empty() {
-            self.roots += 1;
-            if name != "component" || self.roots > 1 {
-                return Err(metainfo_bad("must be one <component>"));
+        let shown = crate::text::clean(&name, 40);
+        match self.stack.last() {
+            None => {
+                self.roots += 1;
+                if name != "component" || self.roots > 1 {
+                    return Err(metainfo_bad("must be one <component>"));
+                }
             }
-        } else if name == "component" {
-            return Err(metainfo_bad("has a component inside a component"));
-        }
-        if name == "replaces" || name == "extends" {
-            return Err(metainfo_bad("replaces or extends another component"));
+            Some(parent) => {
+                let allowed = metainfo_children(parent).is_some_and(|c| c.contains(&name.as_str()));
+                if !allowed {
+                    return Err(if metainfo_children(&name).is_some() {
+                        metainfo_bad(&format!("has <{shown}> where it does not belong"))
+                    } else {
+                        metainfo_bad(&format!(
+                            "has an element the Store does not copy (<{shown}>)"
+                        ))
+                    });
+                }
+            }
         }
         let path: Vec<&str> = self.stack.iter().map(String::as_str).collect();
+        let attr = |key: &str| -> Result<Option<String>, Error> {
+            for a in e.attributes().flatten() {
+                if a.key.as_ref() == key {
+                    if a.value.contains('&') {
+                        return Err(metainfo_bad("has an entity where an ID is read"));
+                    }
+                    return Ok(Some(a.value.to_string()));
+                }
+            }
+            Ok(None)
+        };
         self.capture = match (path.as_slice(), name.as_str()) {
             (["component"], "id") => Some(("id", String::new())),
             (["component", "provides"], "id") => Some(("provides-id", String::new())),
             (["component", "provides"], "dbus") => Some(("dbus", String::new())),
             (["component"], "launchable") => {
-                let mut desktop = false;
-                for a in e.attributes().flatten() {
-                    if a.key.as_ref() == "type" {
-                        if a.value.contains('&') {
-                            return Err(metainfo_bad("has an entity where an ID is read"));
-                        }
-                        desktop = a.value == "desktop-id";
-                    }
+                if attr("type")?.as_deref() != Some("desktop-id") {
+                    return Err(metainfo_bad("launches something that is not the app"));
                 }
-                desktop.then(|| ("launchable", String::new()))
+                Some(("launchable", String::new()))
+            }
+            (["component"], "icon") => {
+                if attr("type")?.as_deref() == Some("local") {
+                    return Err(metainfo_bad("names an icon by a file path"));
+                }
+                None
             }
             _ => None,
         };
@@ -941,13 +1132,23 @@ pub fn check_system(plan: &Plan, id: &str, system: &[PathBuf]) -> Result<(), Err
 }
 
 /// The `Name` of a system D-Bus service file, if it can be read (at most
-/// 64 KiB; links are followed, Flatpak's exports are links).
+/// 64 KiB; links are followed, Flatpak's exports are links). Opened without
+/// waiting and only a regular file is read: one of the folders is the user's
+/// (`~/.local/share/flatpak/exports/share`), where a FIFO could be planted
+/// to hold the install, which has the lock, for ever.
 fn system_service_name(path: &Path) -> Option<String> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_SYSTEM_SERVICE_BYTES + 1)
+    file.take(MAX_SYSTEM_SERVICE_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() as u64 > MAX_SYSTEM_SERVICE_BYTES {
@@ -1561,14 +1762,12 @@ mod tests {
             )),
             meta(&format!("<id><![CDATA[{ID}]]></id>")),
             meta(&format!(
-                "<id>{ID}</id><description><p>a &amp; b &lt; &#65;</p></description><launchable type=\"service\">x.service</launchable>"
+                "<id>{ID}</id><description><p>a &amp; b &lt; &#65;</p></description><launchable type=\"desktop-id\">{ID}.desktop</launchable>"
             )),
         ] {
             check_metainfo(&ok, ID)
                 .unwrap_or_else(|e| panic!("{}: {e}", String::from_utf8_lossy(&ok)));
         }
-        let long_ok = format!("<id>{ID}</id>{}", "<a>".repeat(30) + &"</a>".repeat(30));
-        check_metainfo(&meta(&long_ok), ID).unwrap();
         let deep = format!("<id>{ID}</id>{}", "<a>".repeat(40) + &"</a>".repeat(40));
         let huge = format!(
             "<id>{ID}</id><description>{}</description>",
@@ -1589,6 +1788,22 @@ mod tests {
             ("a foreign launchable", nested("<launchable type=\"desktop-id\">org.kde.dolphin.desktop</launchable>")),
             ("a launchable type hidden in an entity", nested("<launchable type=\"desktop&#45;id\">org.kde.dolphin.desktop</launchable>")),
             ("a component in a component", nested("<component><id>x</id></component>")),
+            ("a package name", nested("<pkgname>coreutils</pkgname>")),
+            ("a source package name", nested("<source_pkgname>coreutils</source_pkgname>")),
+            ("a bundle", nested("<bundle type=\"flatpak\">app/org.mozilla.firefox/x86_64/stable</bundle>")),
+            ("a launchable of another type", nested("<launchable type=\"service\">x.service</launchable>")),
+            ("a launchable with no type", nested(&format!("<launchable>{ID}.desktop</launchable>"))),
+            ("a launchable of a service for a foreign app", nested("<launchable type=\"cockpit-manifest\">x</launchable>")),
+            ("suggests", nested("<suggests><id>org.kde.dolphin</id></suggests>")),
+            ("an id in requires", nested("<requires><id>org.kde.dolphin</id></requires>")),
+            ("artifacts", nested("<releases><release version=\"1\"><artifacts><artifact type=\"binary\"><location>https://evil/x</location></artifact></artifacts></release></releases>")),
+            ("an unknown element", nested("<frobnicate>x</frobnicate>")),
+            ("a known element in the wrong place", nested("<categories><url>x</url></categories>")),
+            ("markup in a leaf", nested("<name>x<b>y</b></name>")),
+            ("an icon by a file path", nested("<icon type=\"local\">/etc/passwd</icon>")),
+            ("a foreign launchable in a provided id", nested("<provides><mediatype>text/x-foo</mediatype><id>org.kde.dolphin.desktop</id></provides>")),
+            ("another encoding", b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><component><id>net.eterneon.telamon.gates</id></component>".to_vec()),
+            ("another encoding in capitals", b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><component><id>net.eterneon.telamon.gates</id></component>".to_vec()),
             ("too deep", meta(&deep)),
             ("too large", meta(&huge)),
             ("a doctype", format!("<?xml version=\"1.0\"?><!DOCTYPE component SYSTEM \"http://evil/x.dtd\"><component><id>{ID}</id></component>").into_bytes()),
@@ -1604,6 +1819,149 @@ mod tests {
         ] {
             assert!(check_metainfo(&bad, ID).is_err(), "{what}");
         }
+    }
+
+    #[test]
+    fn utf8_declarations_and_none_are_accepted() {
+        for decl in [
+            "",
+            "<?xml version=\"1.0\"?>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+            "<?xml version='1.0' encoding='Utf-8'?>",
+        ] {
+            let xml = format!("{decl}<component><id>{ID}</id></component>");
+            check_metainfo(xml.as_bytes(), ID).unwrap_or_else(|e| panic!("{decl}: {e}"));
+        }
+    }
+
+    #[test]
+    fn what_real_and_specified_metainfo_files_use_is_accepted() {
+        let fixtures: [(&str, &str); 6] = [
+            (
+                "Telamon Gates",
+                include_str!(
+                    "../../tests/fixtures/native/gates-files/net.eterneon.telamon.gates.metainfo.xml"
+                ),
+            ),
+            (
+                "a Qt app",
+                include_str!("../../tests/fixtures/native/metainfo/qt-app.metainfo.xml"),
+            ),
+            (
+                "release notes",
+                include_str!("../../tests/fixtures/native/metainfo/release-notes.metainfo.xml"),
+            ),
+            (
+                "screenshots",
+                include_str!("../../tests/fixtures/native/metainfo/screenshots.metainfo.xml"),
+            ),
+            (
+                "content rating and requirements",
+                include_str!(
+                    "../../tests/fixtures/native/metainfo/content-rating-requires.metainfo.xml"
+                ),
+            ),
+            (
+                "the template",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<component type=\"desktop-application\"><id>net.eterneon.telamon.gates</id><name>x</name></component>",
+            ),
+        ];
+        for (what, xml) in fixtures {
+            check_metainfo(xml.as_bytes(), ID).unwrap_or_else(|e| panic!("{what}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_refused_element_is_named() {
+        let xml = meta(&format!("<id>{ID}</id><pkgname>coreutils</pkgname>"));
+        let e = check_metainfo(&xml, ID).unwrap_err().0;
+        assert!(e.contains("pkgname"), "{e}");
+        let xml = meta(&format!("<id>{ID}</id><bundle>x</bundle>"));
+        assert!(check_metainfo(&xml, ID).unwrap_err().0.contains("bundle"));
+    }
+
+    // ---- translated texts may carry the marks right-to-left scripts need ----
+
+    #[test]
+    fn marks_of_right_to_left_scripts_are_allowed_only_in_translated_values() {
+        let entry = |line: &str| {
+            format!("[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n{line}\n")
+        };
+        // Allowed: LRM, RLM, VS-16 and soft hyphen in the value of Key[locale].
+        for ok in [
+            "Name[ar]=\u{200F}\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}\u{200F}",
+            "Comment[he]=\u{200E}shalom\u{200E}",
+            "Comment[de]=Zu\u{00AD}sammen",
+            "Keywords[ja]=\u{2764}\u{FE0F};\u{FE0F}",
+            "GenericName[fa]=a\u{200F}b",
+        ] {
+            assert!(rewrite(&entry(ok)).is_ok(), "{ok:?}");
+        }
+        // Refused everywhere else.
+        for bad in [
+            "Name=\u{200F}x",
+            "Comment=Zu\u{00AD}sammen",
+            "Comment=\u{FE0F}",
+            "Name[ar]\u{200F}=x",
+            "N\u{200E}ame[ar]=x",
+            "Name[a\u{200F}r]=x",
+            "Exec[ar]=\u{200F}telamon-gates",
+            "# \u{200F} a comment",
+        ] {
+            assert!(rewrite(&entry(bad)).is_err(), "{bad:?}");
+        }
+        let group = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Desktop Action a\u{200F}]\nName=y\n";
+        assert!(rewrite(group).is_err());
+        let exec = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon\u{200F}-gates\n";
+        assert!(rewrite(exec).is_err());
+        // Still refused in translated values: overrides and isolates, line and
+        // paragraph separators, zero-width space and word joiner.
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{2028}', '\u{2029}', '\u{200B}', '\u{2060}', '\u{FEFF}',
+            '\u{0085}', '\u{034F}',
+        ] {
+            let line = format!("Name[ar]=a{c}b");
+            assert!(rewrite(&entry(&line)).is_err(), "{c:?}");
+        }
+        // The same holds for notification and service files.
+        let rc = "[Global]\nName[ar]=\u{200F}x\n[Event/m]\nAction=Popup\n";
+        assert!(check_notifyrc(rc.as_bytes()).is_ok());
+        assert!(check_notifyrc("[Global]\nName=\u{200F}x\n".as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_marks_survive_the_rewrite() {
+        let text = "[Desktop Entry]\nType=Application\nName=X\nName[ar]=\u{200F}\u{0645}\u{200F}\nExec=telamon-gates\n";
+        let (out, _) = rewrite(text).unwrap();
+        assert!(out.contains("Name[ar]=\u{200F}\u{0645}\u{200F}\n"), "{out}");
+    }
+
+    // ---- notification actions are read as KConfig reads them ----
+
+    #[test]
+    fn escaped_spellings_of_execute_are_still_execute() {
+        for bad in [
+            "Action=Popup|Ex\\x65cute",
+            "Action=Popup|\\x45xecute",
+            "Action=Popup|E\\x78\\x65cute",
+            "Action=Log\\x66ile",
+            "Action=Popup|EXECUT\\x45",
+            "Action=\\x45\\x58\\x45\\x43\\x55\\x54\\x45",
+            "Action=Ex\\ecute",
+            "Action[$e]=Ex\\x65cute",
+        ] {
+            let rc = format!("[Event/m]\n{bad}\n");
+            assert!(check_notifyrc(rc.as_bytes()).is_err(), "{bad}");
+        }
+        assert_eq!(
+            kconfig_unescape("a\\x65b\\s\\t\\n\\\\\\;\\q\\x"),
+            "aeb \t\n\\;qx"
+        );
+        assert_eq!(kconfig_unescape("\\x4"), "\u{4}");
+        assert!(check_notifyrc(b"[Event/m]\nAction=Popup|Sound|Taskbar\n").is_ok());
+        assert!(check_notifyrc(b"[Event/m]\nAction=Pop\\x75p\n").is_ok());
     }
 
     #[test]

@@ -587,7 +587,9 @@ https, public addresses only, capped at the size the manifest declares and
 256 MiB), and its size and SHA-256 must equal the manifest's before it is
 opened. Then every tar entry is checked before anything is written, and the
 tar library only reads, it never unpacks: names are relative, plain, UTF-8, with
-no `..`, `.`, empty or hidden-character parts, unique; only folders, regular
+no `..`, `.`, empty or hidden-character parts, at most 32 parts deep
+(`manifest::MAX_PATH_PARTS`, also for a link's target, so every tree the Store
+unpacks can be walked and removed again), unique; only folders, regular
 files and symbolic links exist (hard links, sparse files, devices, FIFOs and
 anything else refuse the bundle); at most 40,000 entries, 512 MiB per file
 (the size the tar library will read, so a PAX `size` counts, not the header's)
@@ -732,7 +734,9 @@ else. The same reason gives more rules, all checked before anything is written:
   is an ID with fewer than three parts (`org.kde`).
 - **The text files are read strictly.** A desktop entry, a D-Bus service or a
   notification file with a control character other than TAB, a `\r` that is not
-  part of a line end, a hidden or line-separating Unicode character, a line that
+  part of a line end, a hidden or line-separating Unicode character (the
+  left-to-right and right-to-left marks, U+FE0F and the soft hyphen are allowed
+  only in the value of a translated key, `Name[ar]=`), a line that
   starts with white space, a key that is not ASCII letters, digits and `-`
   (plus `[locale]`), or a repeated group or key is refused, not normalized:
   GLib, KDE's KConfig and the D-Bus daemon would not all read it the same way.
@@ -752,12 +756,16 @@ else. The same reason gives more rules, all checked before anything is written:
   `mimeapps.list`). That is accepted.
 - **Notification files** may not run a command (`Execute`, `Action=Execute`) or
   write a log file (`Logfile`): the notification service would do it whenever
-  the app notifies.
+  the app notifies. Values are decoded as KConfig reads them (`\x65` is `e`)
+  before they are looked at.
 - **Metainfo** is read with quick-xml under limits (1 MiB, 32 levels, no
-  DOCTYPE, no entity but the five predefined, no processing instruction): exactly
-  one `<component>` whose `<id>` is the app ID (or `<id>.desktop`), no
-  `<replaces>` or `<extends>`, and nothing provided or launched that is not the
-  app's own.
+  DOCTYPE, no entity but the five predefined, no processing instruction, no
+  encoding but UTF-8): exactly one `<component>` whose `<id>` is the app ID (or
+  `<id>.desktop`), only the elements AppStream metainfo for a desktop app uses,
+  each in its place (`desktop.rs`, `metainfo_children`; anything else, such as
+  `<replaces>`, `<extends>`, `<bundle>`, `<pkgname>`, is refused with its
+  name), a `<launchable>` only as `desktop-id` with the app's own
+  `<id>.desktop`, and nothing provided that is not the app's own.
 - **Icons** are decoded by Qt, in the Store and in the desktop shell: a PNG of
   at most 2048 pixels each way by its header, or a plain SVG without scripts,
   entities or references to other files (`appimage::meta::icon_kind`); the file
@@ -778,8 +786,17 @@ root (`icons/hicolor`), refuses the install and names the path. A file the Store
 replaces is swapped in with `renameat2(RENAME_EXCHANGE)` (or `RENAME_NOREPLACE`
 when nothing should be there) and the old file, now under a temporary name, is
 read and hashed through its descriptor: if it is not the content the Store wrote
-the swap is undone. A file it removes is first renamed aside, hashed there and
-unlinked, or renamed back. Removing a tree never follows a link
+the swap is undone (if a writer put a file at the name meanwhile, as an editor
+saving does, that file is kept as `<name>.orig-<pid>`, never unlinked). A file
+it removes is first renamed aside, hashed there and unlinked, or renamed back.
+A file system that cannot do `RENAME_NOREPLACE`/`RENAME_EXCHANGE` (NFS, some
+FUSE, vfat) gets a hard link plus unlink, or a check followed by a rename: the
+same result with a short window the flags would not have. An error of the
+file system is reported as such, not as "changed since the Store wrote it".
+Temporary files a killed Store left (`.<name>.<pid>.<n>.tmp`, `.current.<pid>-<n>`,
+only the exact pattern, only the user's regular files and links) are swept by
+the next update and by an uninstall. A data folder that appears in
+`XDG_DATA_DIRS` is not counted among the system's. Removing a tree never follows a link
 (`unlinkat`/`O_NOFOLLOW` level by level). The app's program is started by its
 path, as the menu does, after the same folders were checked; it gets no
 descriptor of the Store's (`close_range(CLOSE_RANGE_CLOEXEC)`) and the
@@ -798,7 +815,8 @@ files are as they were, `current` still names the old version, the new folder is
 removed (**rollback**; tested with a failure injected after each step).
 **Uninstall** removes the files the record lists, each only if it still has the
 content the Store wrote (an edited file is left and named), and the app's
-folder. The app's own data and settings are never touched. A tampered record
+folder, the record last: a removal that stops half way leaves an app that is
+still listed and can be removed again, never a hidden one. The app's own data and settings are never touched. A tampered record
 cannot reach other files: only paths under the five export folders pass, and the
 content must match its recorded SHA-256. One install runs at a time (`flock` on
 `telamon-apps/.lock`, opened `O_NOFOLLOW|O_CLOEXEC`).

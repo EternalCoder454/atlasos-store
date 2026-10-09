@@ -137,12 +137,19 @@ fn is_hex_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// The most parts a path in a bundle may have (`share/a/b/file` is four). One
+/// number for everything that walks a bundle's tree: the unpacker, the link
+/// resolver and the recursive remove (whose own limit is well above it), so a
+/// tree the Store unpacked can always be walked and removed again.
+pub const MAX_PATH_PARTS: usize = 32;
+
 /// A relative path inside a bundle: `/`-separated plain names, none empty,
-/// `.` or `..`, at most 1024 bytes in all and 255 in a name, no control or
-/// hidden characters.
+/// `.` or `..`, at most 1024 bytes in all, 255 in a name and
+/// [`MAX_PATH_PARTS`] parts, no control or hidden characters.
 pub fn valid_rel_path(p: &str) -> bool {
     !p.is_empty()
         && p.len() <= 1024
+        && p.split('/').count() <= MAX_PATH_PARTS
         && !p.starts_with('/')
         && p.split('/').all(|n| {
             !n.is_empty() && n != "." && n != ".." && n.len() <= 255 && !n.chars().any(hidden)
@@ -334,7 +341,13 @@ pub fn link_target_ok(path: &str, target: &str) -> bool {
                     return false;
                 }
             }
-            _ => depth += 1,
+            _ => {
+                depth += 1;
+                // What the link leads to is a path of the bundle too.
+                if depth > MAX_PATH_PARTS as i64 {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -478,6 +491,19 @@ mod tests {
         assert!(!link_target_ok("bin/x", ""));
         assert!(!link_target_ok("bin/x", "a//b"));
         assert!(!link_target_ok("bin/x", "./a"));
+    }
+
+    #[test]
+    fn paths_and_link_targets_have_a_depth_cap() {
+        let path = |n: usize| vec!["d"; n].join("/");
+        assert!(valid_rel_path(&path(MAX_PATH_PARTS)));
+        assert!(!valid_rel_path(&path(MAX_PATH_PARTS + 1)));
+        assert!(!valid_rel_path(&path(300)));
+        // A link whose target resolves to a path over the cap.
+        assert!(link_target_ok("l", &path(MAX_PATH_PARTS)));
+        assert!(!link_target_ok("l", &path(MAX_PATH_PARTS + 1)));
+        assert!(link_target_ok("a/l", &path(MAX_PATH_PARTS - 1)));
+        assert!(!link_target_ok("a/l", &path(MAX_PATH_PARTS)));
     }
 
     #[test]

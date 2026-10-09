@@ -958,19 +958,19 @@ fn the_program_gets_no_descriptor_of_the_stores() {
     use std::os::fd::AsRawFd;
     let (d, root) = dirs("fds");
     let out = root.join("fds");
-    script_app(
-        &root,
-        &d,
-        &format!(
-            "if [ -e /proc/$$/fd/201 ]; then echo leaked; else echo clean; fi > {}",
-            out.display()
-        ),
-    );
     // A descriptor the Store (or a library in it) forgot to mark close-on-exec.
     let f = fs::File::open("/dev/null").unwrap();
     // SAFETY: duplicating an open descriptor to a high number, without the flag.
     let fd = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_DUPFD, 201) };
-    assert_eq!(fd, 201);
+    assert!(fd >= 201);
+    script_app(
+        &root,
+        &d,
+        &format!(
+            "if [ -e /proc/$$/fd/{fd} ]; then echo leaked; else echo clean; fi > {}",
+            out.display()
+        ),
+    );
     let r = install::launch(&d, ID, None);
     // SAFETY: closing the descriptor made above.
     unsafe { libc::close(fd) };
@@ -1628,4 +1628,359 @@ fn the_files_telamon_gates_and_the_app_template_ship_are_accepted() {
             .join("knotifications6/telamon-gates.notifyrc")
             .is_file()
     );
+}
+
+// ---- depth of a bundle's tree ----
+
+use telamon_store_core::native::dirfd::test_hooks::NO_RENAME_FLAGS;
+use telamon_store_core::native::manifest::MAX_PATH_PARTS;
+
+fn deep(parts: usize) -> String {
+    vec!["d"; parts].join("/")
+}
+
+#[test]
+fn a_tree_deeper_than_the_cap_is_refused_before_anything_is_made() {
+    let body = b"x".to_vec();
+    let m = Tree::minimal().tar();
+    // A chain of folders, as long names (GNU `L`) and as short ones.
+    for depth in [MAX_PATH_PARTS + 1, 40, 300] {
+        let mut tar = Vec::new();
+        let path = format!("{}/", deep(depth));
+        tar.extend(long_name(&path));
+        tar.extend(entry(b"placeholder", b'5', b"", b"", 0o755));
+        tar.extend(&m);
+        let (r, _root, dest) = unpack_raw("deep-dirs", &zst(&with_end(tar)));
+        assert!(r.is_err(), "{depth} folders");
+        assert!(
+            files_under(&dest).is_empty(),
+            "{depth}: {:?}",
+            files_under(&dest)
+        );
+        // And a file at the bottom.
+        let mut tar = Vec::new();
+        tar.extend(long_name(&format!("{}/f", deep(depth))));
+        tar.extend(entry(b"placeholder", b'0', &body, b"", 0o644));
+        tar.extend(&m);
+        let (r, _root, dest) = unpack_raw("deep-file", &zst(&with_end(tar)));
+        assert!(r.is_err(), "{depth} deep file");
+        assert!(files_under(&dest).is_empty());
+    }
+    // Names short enough for a plain header: 40 parts of `a/`.
+    let mut tar = entry(
+        format!("{}/", "a/".repeat(39) + "a").as_bytes(),
+        b'5',
+        b"",
+        b"",
+        0o755,
+    );
+    tar.extend(&m);
+    assert!(unpack_tar("deep-short", &with_end(tar)).is_err());
+    // A manifest that lists a path or a link over the cap.
+    let mut t = Tree::minimal();
+    t.files
+        .push((format!("{}/f", deep(MAX_PATH_PARTS)), b"x".to_vec(), false));
+    assert!(unpack_tar("deep-manifest", &with_end(t.tar())).is_err());
+    let mut t = Tree::minimal();
+    t.links
+        .push(("l".into(), format!("bin/{}", deep(MAX_PATH_PARTS))));
+    assert!(unpack_tar("deep-link", &with_end(t.tar())).is_err());
+}
+
+#[test]
+fn a_tree_at_the_cap_installs_uninstalls_and_sweeps() {
+    let (d, root) = dirs("deep-cap");
+    let file = format!("share/{}/f", deep(MAX_PATH_PARTS - 2));
+    assert_eq!(file.split('/').count(), MAX_PATH_PARTS);
+    let built = gates("0.1.0").file(&file, b"bottom", false).build();
+    install_local(&d, &root, &built).unwrap();
+    assert_eq!(
+        fs::read(d.app(ID).join("0.1.0").join(&file)).unwrap(),
+        b"bottom"
+    );
+    install::uninstall(&d, ID).unwrap();
+    assert!(!d.app(ID).exists());
+    assert!(install::list(&d).is_empty());
+
+    // A staging folder a killed install left, deeper than any bundle can be,
+    // is swept by the next install.
+    install_local(&d, &root, &built).unwrap();
+    let left = d.apps().join(".staging-killed-1");
+    fs::create_dir_all(left.join(deep(200))).unwrap();
+    fs::write(left.join(deep(200)).join("f"), b"x").unwrap();
+    install_local(
+        &d,
+        &root,
+        &gates("0.2.0").file(&file, b"bottom", false).build(),
+    )
+    .unwrap();
+    assert!(!left.exists(), "the staging folder was not swept");
+}
+
+#[test]
+fn many_deep_links_are_resolved_quickly() {
+    let mut t = Tree::minimal();
+    let target = format!("{}/f", deep(MAX_PATH_PARTS - 2));
+    t.files.push((target.clone(), b"bottom".to_vec(), false));
+    for i in 0..4000 {
+        t.links.push((format!("l{i}"), target.clone()));
+    }
+    // Links in the deepest folder, to its file.
+    for i in 0..500 {
+        t.links.push((
+            format!("{}/m{i}", deep(MAX_PATH_PARTS - 2)),
+            "f".to_string(),
+        ));
+    }
+    let started = std::time::Instant::now();
+    let (r, _root, dest) = unpack_raw("deep-links", &zst(&with_end(t.tar())));
+    r.unwrap();
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    assert_eq!(fs::read(dest.join("l3999")).unwrap(), b"bottom");
+}
+
+#[test]
+fn a_removal_that_stops_half_way_leaves_the_app_listed_and_removable() {
+    let (d, root) = dirs("uninstall-half");
+    install_local(&d, &root, &gates("0.1.0").build()).unwrap();
+    FAIL_AFTER.with(|f| f.set(Some("contents")));
+    let e = install::uninstall(&d, ID).unwrap_err();
+    FAIL_AFTER.with(|f| f.set(None));
+    assert!(e.0.contains("contents"), "{e}");
+    // The folder's contents are gone but the app is still known.
+    assert_eq!(install::list(&d).len(), 1);
+    assert!(install::read_record(&d, ID).is_some());
+    assert!(d.app(ID).join("install.json").is_file());
+    // And it can be removed, or installed again over.
+    install::uninstall(&d, ID).unwrap();
+    assert!(!d.app(ID).exists());
+    assert!(install::list(&d).is_empty());
+    install_local(&d, &root, &gates("0.1.0").build()).unwrap();
+    FAIL_AFTER.with(|f| f.set(Some("contents")));
+    assert!(install::uninstall(&d, ID).is_err());
+    FAIL_AFTER.with(|f| f.set(None));
+    install_local(&d, &root, &gates("0.2.0").build()).unwrap();
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.2.0");
+}
+
+// ---- a FIFO in a system folder ----
+
+#[test]
+fn a_fifo_in_a_system_folder_does_not_hold_the_install() {
+    let (mut d, root) = dirs("fifo");
+    let sys = system_dir(&root);
+    fs::create_dir_all(sys.join("dbus-1/services")).unwrap();
+    let fifo = sys.join("dbus-1/services/evil.service");
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    d.system = vec![sys];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (d2, root2) = (d.clone(), root.clone());
+    std::thread::spawn(move || {
+        let r = install_local(&d2, &root2, &gates("0.1.0").build());
+        let _ = tx.send(r);
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(20));
+    if got.is_err() {
+        // Let the stuck read go, so the test can end.
+        let _ = fs::OpenOptions::new().write(true).open(&fifo);
+    }
+    got.expect("the install is held by a FIFO").unwrap();
+    assert_eq!(install::list(&d).len(), 1);
+}
+
+// ---- file systems without renameat2 flags ----
+
+#[test]
+fn an_install_update_and_removal_work_where_renameat2_flags_do_not() {
+    NO_RENAME_FLAGS.with(|h| h.set(true));
+    let (d, root) = dirs("noflags");
+    install_local(
+        &d,
+        &root,
+        &gates("0.1.0")
+            .file(
+                &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
+                &png(48, 48),
+                false,
+            )
+            .build(),
+    )
+    .unwrap();
+    // An update replaces the copies it wrote.
+    install_local(&d, &root, &gates("0.2.0").build()).unwrap();
+    assert!(
+        !d.data
+            .join(format!("icons/hicolor/48x48/apps/{ID}.png"))
+            .exists()
+    );
+    let desktop = d.data.join(format!("applications/{ID}.desktop"));
+    assert!(fs::read_to_string(&desktop).unwrap().contains("0.2.0"));
+    // A file the user changed is still not replaced, nor removed.
+    fs::write(
+        &desktop,
+        b"[Desktop Entry]\nType=Application\nName=Mine\nExec=true\n",
+    )
+    .unwrap();
+    let e = install_local(&d, &root, &gates("0.3.0").build()).unwrap_err();
+    assert!(e.contains("was changed since"), "{e}");
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.2.0");
+    // A file someone else has is still not overwritten by a first install.
+    let r = install::uninstall(&d, ID).unwrap();
+    assert_eq!(r.left.len(), 1);
+    assert!(desktop.is_file());
+    let e = install_local(&d, &root, &gates("0.1.0").build()).unwrap_err();
+    assert!(e.contains("didn't put it there"), "{e}");
+    fs::remove_file(&desktop).unwrap();
+    install_local(&d, &root, &gates("0.1.0").build()).unwrap();
+    // Rollback still works.
+    FAIL_AFTER.with(|f| f.set(Some("record")));
+    let before = files_under(&d.data);
+    assert!(install_local(&d, &root, &gates("0.2.0").build()).is_err());
+    FAIL_AFTER.with(|f| f.set(None));
+    assert_eq!(files_under(&d.data), before);
+    install::uninstall(&d, ID).unwrap();
+    NO_RENAME_FLAGS.with(|h| h.set(false));
+    assert!(install::list(&d).is_empty());
+}
+
+// ---- the data folder is not "the system" ----
+
+#[test]
+fn the_data_folder_in_the_system_list_is_not_the_system() {
+    let svc = |b: BundleBuilder| {
+        b.file(
+            &format!("share/dbus-1/services/{ID}.Daemon.service"),
+            &service(&format!("{ID}.Daemon")),
+            false,
+        )
+    };
+    let (mut d, root) = dirs("data-in-system");
+    // Listed as it is, and through a link.
+    symlink(&d.data, root.join("data-link")).unwrap();
+    d.system = vec![d.data.clone(), root.join("data-link"), system_dir(&root)];
+    install_local(&d, &root, &svc(gates("0.1.0")).build()).unwrap();
+    install_local(&d, &root, &svc(gates("0.2.0")).build()).unwrap();
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.2.0");
+    install::uninstall(&d, ID).unwrap();
+    // A real system folder still counts.
+    put(
+        &d.system[2].clone(),
+        "applications/net.eterneon.telamon.gates.desktop",
+        b"x",
+    );
+    assert!(install_local(&d, &root, &gates("0.1.0").build()).is_err());
+}
+
+// ---- temporary files a killed install left ----
+
+#[test]
+fn temporary_files_of_a_killed_write_are_swept_only_when_they_are_the_stores() {
+    let (d, root) = dirs("temps");
+    install_local(&d, &root, &gates("0.1.0").build()).unwrap();
+    let apps_dir = d.data.join("applications");
+    let left = [
+        apps_dir.join(format!(".{ID}.desktop.99.1.tmp")),
+        d.app(ID).join(".install.json.99.2.tmp"),
+    ];
+    let stay = [
+        apps_dir.join(".other.desktop.99.1.tmp"),
+        apps_dir.join(format!(".{ID}.desktop.x.1.tmp")),
+        apps_dir.join(format!("{ID}.desktop.orig-1")),
+    ];
+    let plant = || {
+        for p in left.iter().chain(&stay) {
+            fs::write(p, b"left").unwrap();
+        }
+        symlink("0.1.0", d.app(ID).join(".current.99-3")).unwrap();
+        // The exact name, but a link and a folder: not the Store's files.
+        symlink("x", apps_dir.join(format!(".{ID}.desktop.98.1.tmp"))).unwrap();
+        fs::create_dir(apps_dir.join(format!(".{ID}.desktop.97.1.tmp"))).unwrap();
+    };
+    plant();
+    install_local(&d, &root, &gates("0.2.0").build()).unwrap();
+    for p in &left {
+        assert!(!p.exists(), "{}", p.display());
+    }
+    assert!(std::fs::symlink_metadata(d.app(ID).join(".current.99-3")).is_err());
+    for p in &stay {
+        assert!(p.exists(), "{}", p.display());
+    }
+    assert!(std::fs::symlink_metadata(apps_dir.join(format!(".{ID}.desktop.98.1.tmp"))).is_ok());
+    assert!(apps_dir.join(format!(".{ID}.desktop.97.1.tmp")).is_dir());
+    // Uninstall sweeps the ones next to the files it removes.
+    fs::write(&left[0], b"left").unwrap();
+    install::uninstall(&d, ID).unwrap();
+    assert!(!left[0].exists());
+}
+
+// ---- texts: translated marks, escaped actions, the allow-listed metainfo ----
+
+#[test]
+fn a_translated_name_with_right_to_left_marks_installs() {
+    let (d, root) = dirs("rtl");
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName=Gates\nName[ar]=\u{200F}\u{0628}\u{0648}\u{0627}\u{0628}\u{0629}\u{200F}\nName[he]=\u{200E}\u{05E9}\u{05E2}\u{05E8}\u{200E}\nExec=telamon-gates\nIcon={ID}\n"
+    );
+    let b = gates("1.0.0").file(
+        &format!("share/applications/{ID}.desktop"),
+        desktop.as_bytes(),
+        false,
+    );
+    install_local(&d, &root, &b.build()).unwrap();
+    let out = fs::read_to_string(d.data.join(format!("applications/{ID}.desktop"))).unwrap();
+    assert!(out.contains("Name[ar]=\u{200F}\u{0628}"), "{out}");
+    // The same marks in an untranslated name are refused.
+    let (d, root) = dirs("rtl-bad");
+    let bad = desktop.replace("Name=Gates", "Name=\u{200F}Gates");
+    let b = gates("1.0.0").file(
+        &format!("share/applications/{ID}.desktop"),
+        bad.as_bytes(),
+        false,
+    );
+    assert!(install_local(&d, &root, &b.build()).is_err());
+}
+
+#[test]
+fn an_escaped_execute_in_an_action_is_refused() {
+    let (d, root) = dirs("kconfig-escape");
+    let b = gates("1.0.0").file(
+        "share/knotifications6/telamon-gates.notifyrc",
+        b"[Event/m]\nName=x\nAction=Popup|Ex\\x65cute\nExecute=true\n",
+        false,
+    );
+    assert!(install_local(&d, &root, &b.build()).is_err());
+    let b = gates("1.0.0").file(
+        "share/knotifications6/telamon-gates.notifyrc",
+        b"[Event/m]\nName=x\nAction=Popup|Ex\\x65cute\n",
+        false,
+    );
+    assert!(install_local(&d, &root, &b.build()).is_err());
+}
+
+#[test]
+fn metainfo_files_as_the_appstream_specification_shows_them_install() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native/metainfo");
+    for name in [
+        "qt-app.metainfo.xml",
+        "release-notes.metainfo.xml",
+        "screenshots.metainfo.xml",
+        "content-rating-requires.metainfo.xml",
+    ] {
+        let (d, root) = dirs("metainfo-fixture");
+        let xml = fs::read(dir.join(name)).unwrap();
+        let b = gates("1.0.0").file(&format!("share/metainfo/{ID}.metainfo.xml"), &xml, false);
+        install_local(&d, &root, &b.build()).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    // A package name or a bundle element is not copied.
+    let (d, root) = dirs("metainfo-pkgname");
+    let xml = format!("<component><id>{ID}</id><pkgname>coreutils</pkgname></component>");
+    let b = gates("1.0.0").file(
+        &format!("share/metainfo/{ID}.metainfo.xml"),
+        xml.as_bytes(),
+        false,
+    );
+    let e = install_local(&d, &root, &b.build()).unwrap_err();
+    assert!(e.contains("pkgname"), "{e}");
 }
