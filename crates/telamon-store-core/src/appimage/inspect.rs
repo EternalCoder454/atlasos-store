@@ -136,8 +136,25 @@ fn hash_file(file: &File, len: u64, zero: &[(u64, u64)]) -> io::Result<(String, 
     Ok((hex(&full.finalize()), signed.map(|s| hex(&s.finalize()))))
 }
 
-/// Looks inside the AppImage at `path`. Never runs it.
-pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError> {
+/// An AppImage that has been opened, hashed and checked for a signature, and
+/// whose squashfs has not been read yet. The inspection is in two stages so
+/// that the helper process can close itself in between (see
+/// [`super::sandbox`]): [`prepare`] does everything that needs more than the
+/// open file (`gpgv` is started in it), [`Prepared::finish`] does the complex
+/// parsing of the file's contents and needs nothing but the open file and
+/// memory.
+pub struct Prepared {
+    file: File,
+    len: u64,
+    out: Inspection,
+    /// Where the squashfs starts, for a type 2 file whose header was read.
+    squash_at: Option<u64>,
+}
+
+/// Opens `path`, reads the ELF headers and the signature sections, hashes the
+/// whole file (and the variant with the signature sections zeroed) and checks
+/// the signature. Never runs the file.
+pub fn prepare(path: &Path) -> Result<Prepared, InspectError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
@@ -187,7 +204,12 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError>
         out.note =
             "This AppImage uses an old format (type 1) that Telamon can't look inside.".into();
         out.sha256 = hash_file(&file, len, &[]).map_err(io_err)?.0;
-        return Ok(out);
+        return Ok(Prepared {
+            file,
+            len,
+            out,
+            squash_at: None,
+        });
     }
 
     // Type 2: the ELF runtime, then the squashfs.
@@ -195,6 +217,7 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError>
     let mut sig_bytes = None;
     let mut key_bytes = None;
     let mut sig_unreadable = false;
+    let mut squash_at = None;
     match format::read_elf(&file, len) {
         Ok(elf) => {
             for name in [".sha256_sig", ".sig_key"] {
@@ -208,22 +231,7 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError>
             key_bytes = elf.read_section(&file, len, ".sig_key", sign::MAX_KEY);
             sig_unreadable = (elf.section(".sha256_sig").is_some() && sig_bytes.is_none())
                 || (elf.section(".sig_key").is_some() && key_bytes.is_none());
-            match squash::with_tree(&file, elf.end, len, limits, meta::extract) {
-                Ok(m) => {
-                    out.inspected = true;
-                    out.name = if m.name.is_empty() { out.name } else { m.name };
-                    out.version = m.version;
-                    out.publisher = m.publisher;
-                    out.summary = m.summary;
-                    out.app_id = m.app_id;
-                    out.icon_kind = m.icon.as_ref().map(|i| i.kind);
-                    out.icon = m.icon;
-                    if let Some(n) = m.notes.first() {
-                        out.note = (*n).to_string();
-                    }
-                }
-                Err(e) => out.note = format!("Telamon couldn't look inside this file: {e}."),
-            }
+            squash_at = Some(elf.end);
         }
         Err(_) => out.note = "Telamon couldn't read this file's header.".into(),
     }
@@ -251,7 +259,51 @@ pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError>
     } else {
         Signature::Unchecked
     };
-    Ok(out)
+    Ok(Prepared {
+        file,
+        len,
+        out,
+        squash_at,
+    })
+}
+
+impl Prepared {
+    /// Reads the squashfs: desktop entry, metainfo and icon.
+    pub fn finish(self, limits: &Limits) -> Inspection {
+        let Prepared {
+            file,
+            len,
+            mut out,
+            squash_at,
+        } = self;
+        let Some(base) = squash_at else {
+            return out;
+        };
+        match squash::with_tree(&file, base, len, limits, meta::extract) {
+            Ok(m) => {
+                out.inspected = true;
+                out.name = if m.name.is_empty() { out.name } else { m.name };
+                out.version = m.version;
+                out.publisher = m.publisher;
+                out.summary = m.summary;
+                out.app_id = m.app_id;
+                out.icon_kind = m.icon.as_ref().map(|i| i.kind);
+                out.icon = m.icon;
+                if let Some(n) = m.notes.first() {
+                    out.note = (*n).to_string();
+                }
+            }
+            Err(e) => out.note = format!("Telamon couldn't look inside this file: {e}."),
+        }
+        out
+    }
+}
+
+/// Looks inside the AppImage at `path`. Never runs it. (In-process: the
+/// helper process uses [`prepare`] and [`Prepared::finish`] with its sandbox
+/// in between.)
+pub fn inspect(path: &Path, limits: &Limits) -> Result<Inspection, InspectError> {
+    Ok(prepare(path)?.finish(limits))
 }
 
 fn host_ok(h: &str) -> bool {

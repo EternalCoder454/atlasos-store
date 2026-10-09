@@ -41,3 +41,9 @@ telamon-store-core = { path = ".", features = ["test-hooks"] }
 [[example]]
 name = "make_native_fake"
 required-features = ["fake-github"]
+
+# Its own `main`: the test is also the inspection helper it starts, so the
+# sandboxed helper process is the real code path (see the file's header).
+[[test]]
+name = "appimage_helper"
+harness = false

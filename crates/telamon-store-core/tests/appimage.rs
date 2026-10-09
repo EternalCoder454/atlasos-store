@@ -267,6 +267,46 @@ fn a_superblock_over_the_limits_is_refused_before_anything_is_decompressed() {
 }
 
 #[test]
+fn no_byte_of_the_headers_can_make_the_reader_panic() {
+    // Every byte of the ELF header, the section headers, the squashfs
+    // superblock and the first metadata block, set to values that sit on the
+    // edges of integer sizes. A panic here is a test failure (debug builds
+    // check overflow); the answer itself does not matter.
+    let ok = build::normal();
+    let base = runtime_len();
+    let shoff = u64::from_le_bytes(ok[0x28..0x30].try_into().unwrap()) as usize;
+    let regions = [
+        (0, 64),
+        (shoff, shoff + 4 * 64),
+        (base, base + 96),
+        (base + 96, base + 104),
+    ];
+    let dir = scratch("flipped");
+    for (from, to) in regions {
+        for at in from..to {
+            for value in [0x00u8, 0x01, 0x7f, 0x80, 0xff] {
+                let mut b = ok.clone();
+                b[at] = value;
+                let p = build::write(&dir, "f.AppImage", &b);
+                let _ = inspect(&p, &Limits::default());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_block_size_exponent_that_overflows_the_shift_is_refused() {
+    let base = runtime_len();
+    for log in [21u16, 32, 63, 64, 65, 255, 0xffff] {
+        let mut b = build::normal();
+        b[base + 22..base + 24].copy_from_slice(&log.to_le_bytes());
+        let i = inspect_bytes("log.AppImage", &b).unwrap();
+        assert!(!i.inspected, "{log}");
+        assert!(i.note.contains("damaged"), "{log}: {}", i.note);
+    }
+}
+
+#[test]
 fn thousands_of_tiny_metadata_blocks_are_refused() {
     // A superblock whose inode table is 20,000 two-byte-payload blocks: each
     // would be a legitimate block, together far more than any real image.
@@ -650,4 +690,166 @@ fn elf_sections_are_read_in_both_widths_and_byte_orders() {
     let p = build::write(&dir, "y", &b);
     let f = std::fs::File::open(&p).unwrap();
     assert_eq!(read_elf(&f, b.len() as u64).unwrap_err(), ElfError::NotElf);
+}
+
+// ---- gpgv is run as locked down as it can be ----
+
+mod gpgv_run {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    use telamon_store_core::appimage::sign::{self, verify_within};
+
+    /// A stand-in for `gpgv`: a script that records how it was started in
+    /// `out`, then does `then`.
+    fn fake_gpgv(dir: &std::path::Path, out: &std::path::Path, then: &str) -> PathBuf {
+        let script = dir.join("gpgv");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/bash\n\
+                 {{ echo \"home=$GNUPGHOME\"; echo \"cpu=$(ulimit -t)\"; echo \"fsize=$(ulimit -f)\"; \
+                 echo \"core=$(ulimit -c)\"; echo \"files=$(ulimit -n)\"; echo \"nonewprivs=$(grep NoNewPrivs /proc/self/status)\"; \
+                 echo \"pgid=$(cut -d' ' -f5 /proc/$$/stat)\"; echo \"args=$*\"; echo \"env:\"; env; }} > '{}'\n{then}\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    fn pgid_of_me() -> String {
+        // SAFETY: getpgrp has no arguments and cannot fail.
+        unsafe { libc::getpgrp() }.to_string()
+    }
+
+    fn key_and_sig() -> (Vec<u8>, Vec<u8>) {
+        // Any binary OpenPGP-looking bytes pass the reading; a fake gpgv
+        // does not check them.
+        (vec![0x99, 1, 2, 3], vec![0x89, 1, 2, 3])
+    }
+
+    #[test]
+    fn gpgv_gets_an_empty_environment_limits_and_a_group_of_its_own() {
+        let dir = scratch("gpgv-env");
+        let out = dir.join("seen");
+        let gpgv = fake_gpgv(&dir, &out, "exit 0");
+        let (key, sig) = key_and_sig();
+        let _ = verify_within(&gpgv, &sig, &key, "abc", Duration::from_secs(20));
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let (head, env) = seen.split_once("env:\n").unwrap();
+        // Nothing of the caller's environment: no agent socket, no proxy,
+        // no HOME. (The shell adds its own PWD, SHLVL and _.)
+        for line in env.lines() {
+            let name = line.split('=').next().unwrap();
+            assert!(
+                matches!(
+                    name,
+                    "LC_ALL" | "GNUPGHOME" | "PWD" | "SHLVL" | "_" | "OLDPWD"
+                ),
+                "unexpected variable: {line}"
+            );
+        }
+        assert!(head.contains("cpu=20\n"), "{head}");
+        assert!(head.contains("core=0\n"), "{head}");
+        assert!(head.contains("files=64\n"), "{head}");
+        assert!(head.contains("NoNewPrivs:\t1"), "{head}");
+        // 1 MiB, in the shell's 1024-byte units.
+        assert!(head.contains("fsize=1024\n"), "{head}");
+        let pgid = head
+            .lines()
+            .find_map(|l| l.strip_prefix("pgid="))
+            .unwrap()
+            .trim();
+        assert_ne!(pgid, pgid_of_me(), "gpgv is in the caller's group");
+        // The private home is inside the private folder, which is gone now.
+        let home = head.lines().find_map(|l| l.strip_prefix("home=")).unwrap();
+        assert!(
+            !std::path::Path::new(home).parent().unwrap().exists(),
+            "the temporary folder was left behind"
+        );
+        assert!(head.contains("--status-fd 1 --keyring"), "{head}");
+    }
+
+    #[test]
+    fn a_gpgv_that_hangs_is_killed_with_what_it_started_and_leaves_nothing() {
+        let dir = scratch("gpgv-hang");
+        let out = dir.join("seen");
+        let child_pid = dir.join("child.pid");
+        let gpgv = fake_gpgv(
+            &dir,
+            &out,
+            &format!(
+                "/usr/bin/sleep 300 &\necho $! > '{}'\nwait",
+                child_pid.display()
+            ),
+        );
+        let (key, sig) = key_and_sig();
+        let started = Instant::now();
+        let got = verify_within(&gpgv, &sig, &key, "abc", Duration::from_millis(1500));
+        assert_eq!(got, Signature::Unchecked);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid: i32 = std::fs::read_to_string(&child_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s.contains(") Z"))
+            .unwrap_or(false);
+        assert!(!alive, "what gpgv started outlived the timeout");
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let home = seen.lines().find_map(|l| l.strip_prefix("home=")).unwrap();
+        assert!(!std::path::Path::new(home).parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_gpgv_that_floods_its_output_does_not_stall_or_pass() {
+        let dir = scratch("gpgv-flood");
+        let out = dir.join("seen");
+        // 8 MiB of status text, then exit 0: more than the pipe holds and
+        // more than is read.
+        let gpgv = fake_gpgv(&dir, &out, "head -c 8388608 /dev/zero | tr '\\0' 'x'");
+        let (key, sig) = key_and_sig();
+        let started = Instant::now();
+        let got = verify_within(&gpgv, &sig, &key, "abc", Duration::from_secs(20));
+        assert_eq!(got, Signature::Wrong);
+        assert!(started.elapsed() < Duration::from_secs(10), "stalled");
+    }
+
+    #[test]
+    fn an_inline_signature_is_not_a_signature_of_the_file() {
+        if !has_gpgv() {
+            eprintln!("skipped: no gpgv");
+            return;
+        }
+        let Some(key) = signing::make_key("sig-inline") else {
+            return;
+        };
+        // A genuine signature by the embedded key, but of some other text and
+        // not detached: it must not read as "signed".
+        let inline = signing::gpg(
+            &key.home,
+            &[
+                "--armor",
+                "--sign",
+                "--local-user",
+                &key.fingerprint,
+                "--output",
+                "-",
+            ],
+            Some(b"anything at all"),
+        )
+        .unwrap();
+        let bytes = build::type2(
+            &build::normal_squash().build(),
+            &inline,
+            &signing::public(&key),
+        );
+        let i = inspect_bytes("inline.AppImage", &bytes).unwrap();
+        assert_eq!(i.signature, Signature::Wrong);
+        let _ = sign::MAX_SIG;
+    }
 }
