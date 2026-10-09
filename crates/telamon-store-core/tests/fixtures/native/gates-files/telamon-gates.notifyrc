@@ -1,0 +1,10 @@
+[Global]
+IconName=applications-system
+Name=Atlas App
+Comment=Atlas app template
+DesktopEntry=net.eterneon.atlas.apptemplate
+
+[Event/demoAction]
+Name=Demo notification
+Comment=Sent when you press Send a Notification
+Action=Popup

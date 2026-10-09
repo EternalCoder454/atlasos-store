@@ -60,6 +60,16 @@ fn gates(version: &str) -> BundleBuilder {
     BundleBuilder::new(ID, "Telamon Gates", version).exe("telamon-gates")
 }
 
+/// The start of a PNG: enough for the Store's check of an icon (the signature
+/// and the header's size), which is all it reads.
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    b.extend_from_slice(&w.to_be_bytes());
+    b.extend_from_slice(&h.to_be_bytes());
+    b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b
+}
+
 fn write_archive(root: &Path, built: &Built) -> PathBuf {
     let p = root.join(format!("bundle-{}.tar.zst", built.sha256.get(..8).unwrap()));
     fs::write(&p, &built.archive).unwrap();
@@ -450,7 +460,7 @@ fn an_update_that_drops_a_file_removes_its_copy() {
         &gates("0.1.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"png",
+                &png(48, 48),
                 false,
             )
             .build(),
@@ -472,7 +482,7 @@ fn a_failed_update_leaves_the_old_version_working() {
         &gates("0.1.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"old icon",
+                &png(48, 48),
                 false,
             )
             .build(),
@@ -498,12 +508,12 @@ fn a_failed_update_leaves_the_old_version_working() {
         let new = gates("0.2.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"new icon",
+                &png(49, 49),
                 false,
             )
             .file(
                 &format!("share/icons/hicolor/64x64/apps/{ID}.png"),
-                b"new 64",
+                &png(64, 64),
                 false,
             )
             .build();
@@ -522,7 +532,7 @@ fn a_failed_update_leaves_the_old_version_working() {
         assert_eq!(fs::read(&desktop).unwrap(), before_desktop, "{step}");
         assert_eq!(
             fs::read(d.data.join(format!("icons/hicolor/48x48/apps/{ID}.png"))).unwrap(),
-            b"old icon",
+            png(48, 48),
             "{step}"
         );
         assert!(
@@ -1246,9 +1256,11 @@ fn an_update_does_not_overwrite_a_file_the_user_edited() {
 #[test]
 fn a_bundle_cannot_take_another_apps_notification_file() {
     let (d, root) = dirs("notifyrc");
-    let b = gates("1.0.0").file("share/knotifications6/telamon-store.notifyrc", b"x", false);
+    let rc: &[u8] =
+        b"[Global]\nIconName=telamon-gates\n\n[Event/message]\nName=Message\nAction=Popup\n";
+    let b = gates("1.0.0").file("share/knotifications6/telamon-store.notifyrc", rc, false);
     assert!(install_local(&d, &root, &b.build()).is_err());
-    let ok = gates("1.0.0").file("share/knotifications6/telamon-gates.notifyrc", b"x", false);
+    let ok = gates("1.0.0").file("share/knotifications6/telamon-gates.notifyrc", rc, false);
     install_local(&d, &root, &ok.build()).unwrap();
     assert!(
         d.data

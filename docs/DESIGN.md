@@ -453,19 +453,27 @@ https, public addresses only, capped at the size the manifest declares and
 opened. Then every tar entry is checked before anything is written, and the
 tar library only reads, it never unpacks: names are relative, plain, UTF-8, with
 no `..`, `.`, empty or hidden-character parts, unique; only folders, regular
-files and symbolic links exist (hard links, devices, FIFOs and anything else
-refuse the bundle); at most 40,000 entries, 512 MiB per file and 1 GiB
-unpacked, with the decompressor cut off at its cap; files are created new
-(`O_EXCL|O_NOFOLLOW`) below folders the Store made, with the mode the manifest
+files and symbolic links exist (hard links, sparse files, devices, FIFOs and
+anything else refuse the bundle); at most 40,000 entries, 512 MiB per file
+(the size the tar library will read, so a PAX `size` counts, not the header's)
+and 1 GiB unpacked, with the decompressor cut off at its cap and its window at
+128 MiB (`window_log_max(27)`); what the tar library keeps in memory for an
+entry (long-name and PAX headers) is capped at 1 MiB, and only zero padding may
+follow the end of the tar. Everything is written through an open folder
+(`native/dirfd.rs`): each file and folder is made by `openat`/`mkdirat` from its
+parent's descriptor with `O_NOFOLLOW` (files `O_EXCL`, folders 0700), so a
+name in the archive, or a link another process plants in the staging folder
+meanwhile, cannot lead a write outside the tree. Files get the mode the manifest
 says (0644, or 0755 when `executable`), never what the archive says; links are
 created last, each must be relative with a target that stays inside the folder
-and, on the real folders, resolve to something inside it. The unpacked tree
-must then be exactly what the inner manifest lists (same files, sizes,
-SHA-256, same links), and the inner manifest must say what the release's outer
-one says. The bundle must fit this system (`min_os_version` against
-`/etc/os-release`, `min_telamon_ui` against `rpm -q telamon-ui`; a minimum that
-cannot be looked up is not held against the app). All of this runs in the
-install worker, so a failure leaves nothing: the private folder is removed.
+and is then followed by hand, name by name, to something that exists inside it.
+The unpacked tree must then be exactly what the inner manifest lists (same
+files, sizes, SHA-256, same links), and the inner manifest must say what the
+release's outer one says. The bundle must fit this system (`min_os_version`
+against `/etc/os-release`, `min_telamon_ui` against `rpm -q telamon-ui`; a
+minimum that cannot be looked up is not held against the app). All of this runs
+in the install worker, so a failure leaves nothing: the private folder is
+removed (also when the worker panics: the cleanup and the undo are `Drop`s).
 
 **Integrity and what it is not.** Today integrity is HTTPS to GitHub, the
 SHA-256 in the manifest of the same release, the catalog naming the one
@@ -493,14 +501,75 @@ What is copied out of a bundle, and under which names, is fixed in
 (`<id>.desktop`, `<id>*.png|svg` icons, `<id>.metainfo.xml`, D-Bus services
 named `<id>` or `<id>.*`, `telamon-<last part of the ID>.notifyrc`), because the user's folders
 come before `/usr` in every search path and a bundle must not shadow anything
-else. The first word of every `Exec` must be a plain program name that is in
-the bundle's `bin/`; it becomes the absolute path under `current/bin/` (quoted
-by the Desktop Entry rules), `TryExec` and `Path` are dropped, and the Store
-adds `X-Telamon-Native-App` and `-Version`. Nothing is copied over a file that
-the Store did not itself put there (or that the user changed since: an update
-stops and says so), or through a link, and an ID that already has a menu entry
-or D-Bus service in the system's folders (`XDG_DATA_DIRS`, Flatpak's exports)
-is refused, as is an ID with fewer than three parts (`org.kde`). The app finds its own
+else. The same reason gives more rules, all checked before anything is written:
+
+- **Nothing is copied over what is not the Store's own:** a file the Store did
+  not put there, or that the user changed since (an update stops and says so),
+  or a link.
+- **Nothing shadows the system.** No file may be copied to a relative path that
+  exists in any system data folder (`XDG_DATA_DIRS`, `/usr/share`,
+  `/usr/local/share`, Flatpak's exports); an ID with a menu entry or a D-Bus
+  service of that name there is refused; and the app ID and every D-Bus name the
+  bundle declares must not be the `Name` of any system `dbus-1/services/*.service`
+  file (whatever the file is called; at most 2,000 are read, 64 KiB each, and
+  more than that is a refusal). An ID or D-Bus name below `org.freedesktop.`,
+  `org.kde.`, `org.gnome.`, `org.gtk.`, `org.mate.`, `org.xfce.`, `org.flatpak.`,
+  `org.fedoraproject.`, `org.mozilla.` or `com.canonical.` is refused, and so
+  is an ID with fewer than three parts (`org.kde`).
+- **The text files are read strictly.** A desktop entry, a D-Bus service or a
+  notification file with a control character other than TAB, a `\r` that is not
+  part of a line end, a hidden or line-separating Unicode character, a line that
+  starts with white space, a key that is not ASCII letters, digits and `-`
+  (plus `[locale]`), or a repeated group or key is refused, not normalized:
+  GLib, KDE's KConfig and the D-Bus daemon would not all read it the same way.
+- **The desktop entry is rewritten.** The first word of every `Exec` (in any
+  group) must be a plain program name that is in the bundle's `bin/`; it becomes
+  the absolute path under `current/bin/` (quoted by the Desktop Entry rules; a
+  folder name that cannot be quoted so that it reads back the same is refused),
+  `TryExec` and `Path` are dropped, and so are the keys that make another
+  component load or run something of the bundle's choosing or hand it
+  privileges: `X-KDE-Library`, `X-KDE-ServiceTypes`, `X-KDE-Protocols`,
+  `X-KDE-Init`, `Implements`, `X-KDE-SubstituteUID`, `X-KDE-Username`,
+  `X-KDE-Wayland-Interfaces`, `X-KDE-DBUS-Restricted-Interfaces`, and the
+  markers of other tools (`X-Telamon-*`, `X-Flatpak*`, `X-Snap*`, `X-AppImage*`,
+  `X-KDE-PluginInfo*`); the Store adds `X-Telamon-Native-App` and `-Version`.
+  Plain metadata is kept, `MimeType` included: a bundle can offer itself as a
+  handler for a file type (the default stays the user's choice in
+  `mimeapps.list`). That is accepted.
+- **Notification files** may not run a command (`Execute`, `Action=Execute`) or
+  write a log file (`Logfile`): the notification service would do it whenever
+  the app notifies.
+- **Metainfo** is read with quick-xml under limits (1 MiB, 32 levels, no
+  DOCTYPE, no entity but the five predefined, no processing instruction): exactly
+  one `<component>` whose `<id>` is the app ID (or `<id>.desktop`), no
+  `<replaces>` or `<extends>`, and nothing provided or launched that is not the
+  app's own.
+- **Icons** are decoded by Qt, in the Store and in the desktop shell: a PNG of
+  at most 2048 pixels each way by its header, or a plain SVG without scripts,
+  entities or references to other files (`appimage::meta::icon_kind`); the file
+  extension must match. The icon the window shows is checked again when listed
+  (a regular file of this user, at most 1 MiB, the same kind of check), through
+  the open folders, then given to QML as a `file:` URL like a catalog icon.
+
+Everything below `telamon-apps` goes through folders held open by descriptor
+(`native/dirfd.rs`), not paths walked by name, because a process of the same
+user with less privilege (a Flatpak app with access to the home folder) could
+swap a folder for a link between a check and its use. `$XDG_DATA_HOME` and the
+export roots (`applications`, `icons`, `metainfo`, `dbus-1`, `knotifications6`)
+may be links (a dotfile manager makes them): they are opened following the link.
+`telamon-apps` and everything below it is opened with `O_NOFOLLOW`, must belong
+to the user, and `telamon-apps` and the staging folders are 0700 (nothing needs
+other users); a link in their place, or in place of a folder below an export
+root (`icons/hicolor`), refuses the install and names the path. A file the Store
+replaces is swapped in with `renameat2(RENAME_EXCHANGE)` (or `RENAME_NOREPLACE`
+when nothing should be there) and the old file, now under a temporary name, is
+read and hashed through its descriptor: if it is not the content the Store wrote
+the swap is undone. A file it removes is first renamed aside, hashed there and
+unlinked, or renamed back. Removing a tree never follows a link
+(`unlinkat`/`O_NOFOLLOW` level by level). The app's program is started by its
+path, as the menu does, after the same folders were checked; it gets no
+descriptor of the Store's (`close_range(CLOSE_RANGE_CLOEXEC)`) and the
+activation token only if it is a valid one. The app finds its own
 data relative to its program (`../share/<id>`, the framework's convention);
 the Store sets no environment. The program runs through the `current` link, so
 an update needs no change to the menu entry.
@@ -518,7 +587,7 @@ content the Store wrote (an edited file is left and named), and the app's
 folder. The app's own data and settings are never touched. A tampered record
 cannot reach other files: only paths under the five export folders pass, and the
 content must match its recorded SHA-256. One install runs at a time (`flock` on
-`telamon-apps/.lock`).
+`telamon-apps/.lock`, opened `O_NOFOLLOW|O_CLOEXEC`).
 
 **Local bundles** (`--install-bundle`): for trying a bundle before it is
 published. The file is looked into without installing (unpacked into a scratch
