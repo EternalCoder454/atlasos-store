@@ -21,17 +21,21 @@ serde_json.workspace = true
 backhand.workspace = true
 tar.workspace = true
 zstd.workspace = true
+minisign-verify.workspace = true
+# Only for `native::fake` (see the features).
+ed25519-compact = { workspace = true, optional = true }
+blake2 = { workspace = true, optional = true }
 
 [features]
 # The hooks the integration tests use to force a branch that is otherwise a
 # matter of timing (`flatpak::transaction::test_hooks`, the `*_in` lock
 # functions). Never enabled for a normal build; the tests turn it on through
 # the self dev-dependency below.
-test-hooks = []
+test-hooks = ["dep:ed25519-compact", "dep:blake2"]
 # A fetcher that answers from a folder of recorded GitHub responses
 # (`native::fake`), for screenshots and tests of the window. Never enabled in
 # a package.
-fake-github = []
+fake-github = ["dep:ed25519-compact", "dep:blake2"]
 
 [dev-dependencies]
 telamon-store-core = { path = ".", features = ["test-hooks"] }

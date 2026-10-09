@@ -43,6 +43,15 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 # unpacked by the library; libzstd is the one backhand already builds.
 tar = { version = "0.4", default-features = false }
 zstd = { version = "0.13", default-features = false }
+# Release signatures of native Telamon apps (minisign, Ed25519): verification
+# only, no dependencies, no unsafe. Exact pin: a new version is read before it
+# is taken (see docs/DESIGN.md, "Native Telamon apps").
+minisign-verify = "=0.3.0"
+# Test-only (the fake GitHub signs its releases with throw-away keys, behind
+# the `fake-github` and `test-hooks` features): Ed25519 signing and the hash
+# minisign signs.
+ed25519-compact = { version = "2", default-features = false }
+blake2 = { version = "0.10", default-features = false }
 # Reads (and, in tests, writes) the squashfs inside an AppImage without
 # running anything: the decompressors for the formats AppImages use, no
 # threads (`parallel`) and no tracing.

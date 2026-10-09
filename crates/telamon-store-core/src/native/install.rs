@@ -125,6 +125,11 @@ pub struct Origin {
     pub repo: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    /// The key ID (16 upper-case hex digits) of the key whose signature the
+    /// release was installed on; none for a local file and for installs made
+    /// before releases were signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 impl Origin {
@@ -133,6 +138,15 @@ impl Origin {
             kind: "release".into(),
             repo: Some(repo.into()),
             tag: Some(tag.into()),
+            signer: None,
+        }
+    }
+
+    /// A release whose manifest was verified with the key `signer`.
+    pub fn signed_release(repo: &str, tag: &str, signer: &str) -> Origin {
+        Origin {
+            signer: Some(signer.into()),
+            ..Origin::release(repo, tag)
         }
     }
 
@@ -141,6 +155,7 @@ impl Origin {
             kind: "local".into(),
             repo: None,
             tag: None,
+            signer: None,
         }
     }
 }
@@ -240,6 +255,11 @@ pub fn read_record(dirs: &Dirs, id: &str) -> Option<Record> {
     if !rec.check(id) {
         return None;
     }
+    rec.origin.signer = rec
+        .origin
+        .signer
+        .take()
+        .filter(|s| super::sign::valid_key_id(s));
     rec.name = crate::text::clean(&rec.name, 80);
     rec.summary = crate::text::clean(&rec.summary, 300);
     Some(rec)
@@ -378,6 +398,8 @@ pub struct Done {
     pub version: String,
     /// The version it replaced, if any.
     pub replaced: Option<String>,
+    /// The key ID the release was verified with (none for a local file).
+    pub signer: Option<String>,
 }
 
 /// Puts back what an install changed, in the reverse order, when it fails.
@@ -498,6 +520,20 @@ fn install_from(
         return Err(err(format!(
             "{} {} is already installed.",
             inner.name, inner.version
+        )));
+    }
+    // A release never goes over a newer version: a validly signed old release
+    // served as the latest must not downgrade the app. (A file the user opens
+    // themselves may: they are shown what it replaces.)
+    if opts.outer.is_some()
+        && let Some(old) = &old
+        && let (Some(have), Some(new)) =
+            (Version::parse(&old.version), Version::parse(&inner.version))
+        && new < have
+    {
+        return Err(err(format!(
+            "{} {} is older than the version you have ({}). Nothing was installed.",
+            inner.name, inner.version, old.version
         )));
     }
     if old.is_none() && fs::symlink_metadata(&app_dir).is_ok() {
@@ -662,6 +698,7 @@ fn install_from(
         name: inner.name,
         version: inner.version,
         replaced: old.map(|o| o.version),
+        signer: opts.origin.signer.clone(),
     })
 }
 

@@ -1,6 +1,12 @@
 //! What the window shows: the catalog, each connected app's latest release,
 //! and what is installed, put together; and installing a release's bundle.
 //!
+//! Nothing a release says is used before its signature has been verified with
+//! one of the keys the catalog lists for the app ([`super::sign`]): the check
+//! downloads `telamon-bundle.json` and `telamon-bundle.json.minisig`, verifies
+//! the exact bytes, and only then reads the manifest. A release older than
+//! what is installed is never offered or installed.
+//!
 //! A check asks GitHub for at most one release per connected app, and reads
 //! the cache for anything fetched less than [`TTL`] ago unless the user asked
 //! (`force`). A failure for one app does not hide the others; with no network
@@ -19,6 +25,7 @@ use super::fetch::{CATALOG_CACHE, Cache, Fetcher, release_cache_name};
 use super::github::{self, Release};
 use super::install::{self, Dirs, Installed, Origin};
 use super::manifest::{self, Host, Kind, Manifest};
+use super::sign;
 use super::version::Version;
 use super::{CATALOG_URL, Error, err, io_err};
 use crate::net::NetError;
@@ -34,18 +41,26 @@ pub struct Candidate {
     /// The release's manifest (outer).
     pub manifest: Manifest,
     pub archive_url: String,
+    /// The ID of the catalog's key whose signature this release verified with.
+    pub signer: String,
 }
 
-/// Turns a repository's release answer and its `telamon-bundle.json` into a
-/// candidate, or says why not. Pure: used for fresh and cached answers alike.
+/// Turns a repository's release answer, its `telamon-bundle.json` and the
+/// signature of that file into a candidate, or says why not. The signature is
+/// verified over the manifest's bytes as given, with the entry's keys, before
+/// the manifest is read. Pure: used for fresh and cached answers alike (the
+/// cache is read back through this, so it is verified again).
 pub fn candidate_from(
     entry: &Entry,
     release_json: &[u8],
     manifest_json: &[u8],
+    signature: &[u8],
 ) -> Result<Candidate, Error> {
     let release = Release::parse(release_json, &entry.repo)?;
-    // The manifest must be the release's own file.
+    // The manifest and its signature must be the release's own files.
     release.manifest_asset()?;
+    release.signature_asset()?;
+    let signer = sign::verify(&entry.signers, manifest_json, signature)?;
     let m = Manifest::parse(manifest_json, Kind::Outer)?;
     if m.id != entry.id {
         return Err(err(
@@ -58,6 +73,7 @@ pub fn candidate_from(
         tag: release.tag.clone(),
         archive_url: archive.url.clone(),
         manifest: m,
+        signer,
     })
 }
 
@@ -76,7 +92,7 @@ fn net_reason(e: &NetError) -> Option<String> {
 fn fetch_candidate(
     f: &dyn Fetcher,
     entry: &Entry,
-) -> Result<(Candidate, String, String), CandidateError> {
+) -> Result<(Candidate, [String; 3]), CandidateError> {
     let release = f
         .get(
             &github::latest_url(&entry.repo),
@@ -92,6 +108,11 @@ fn fetch_candidate(
         Ok(a) => a,
         Err(_) => return Err(CandidateError::NoRelease),
     };
+    // A release with a manifest but no signature is a failure worth telling,
+    // not "no release": the maintainer needs to sign it.
+    let sig_asset = parsed
+        .signature_asset()
+        .map_err(|e| CandidateError::Failed(e.0))?;
     let manifest = f
         .get(
             &asset.url,
@@ -103,13 +124,21 @@ fn fetch_candidate(
                 net_reason(&e).unwrap_or_else(|| "The release's manifest is missing.".into()),
             )
         })?;
-    let cand =
-        candidate_from(entry, &release, &manifest).map_err(|e| CandidateError::Failed(e.0))?;
-    let (r, m) = (
-        String::from_utf8_lossy(&release).into_owned(),
-        String::from_utf8_lossy(&manifest).into_owned(),
-    );
-    Ok((cand, r, m))
+    let signature = f
+        .get(
+            &sig_asset.url,
+            "application/octet-stream",
+            github::MAX_SIGNATURE_DOWNLOAD,
+        )
+        .map_err(|e| {
+            CandidateError::Failed(
+                net_reason(&e).unwrap_or_else(|| "The release's signature is missing.".into()),
+            )
+        })?;
+    let cand = candidate_from(entry, &release, &manifest, &signature)
+        .map_err(|e| CandidateError::Failed(e.0))?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    Ok((cand, [text(&release), text(&manifest), text(&signature)]))
 }
 
 enum CandidateError {
@@ -154,7 +183,21 @@ pub fn build_list(
     let mut out = Vec::new();
     for entry in entries {
         let inst = installed.iter().find(|i| i.id == entry.id).cloned();
-        let cand = candidates.get(&entry.id).cloned();
+        let mut cand = candidates.get(&entry.id).cloned();
+        // A release older than what is installed is ignored: a validly signed
+        // old release served as the latest must not look like an update, and
+        // its text must not stand in for the installed app's.
+        if let (Some(i), Some(c)) = (&inst, &cand)
+            && Version::parse(&i.version).is_some_and(|have| c.manifest.parsed_version() < have)
+        {
+            log::warn!(
+                "native apps: {}: the latest release ({}) is older than the installed version ({}); ignored",
+                entry.id,
+                c.manifest.version,
+                i.version
+            );
+            cand = None;
+        }
         match (&inst, &cand) {
             (None, None) => {}
             (None, Some(c)) => {
@@ -313,8 +356,13 @@ pub fn check(
     for entry in &catalog.apps {
         let name = release_cache_name(&entry.id);
         let cached = cache.read(&name).and_then(|(t, texts)| {
-            let c =
-                candidate_from(entry, texts.first()?.as_bytes(), texts.get(1)?.as_bytes()).ok()?;
+            let c = candidate_from(
+                entry,
+                texts.first()?.as_bytes(),
+                texts.get(1)?.as_bytes(),
+                texts.get(2)?.as_bytes(),
+            )
+            .ok()?;
             Some((c, t))
         });
         if let Some((c, t)) = &cached
@@ -326,8 +374,8 @@ pub fn check(
             continue;
         }
         match fetch_candidate(f, entry) {
-            Ok((c, release, manifest)) => {
-                cache.write(&name, now, &[&release, &manifest]);
+            Ok((c, [release, manifest, signature])) => {
+                cache.write(&name, now, &[&release, &manifest, &signature]);
                 candidates.insert(entry.id.clone(), c);
             }
             Err(CandidateError::NoRelease) => {
@@ -379,6 +427,7 @@ pub fn cached(cache: &Cache, dirs: &Dirs, host: &Host) -> Report {
                             &entry,
                             texts.first()?.as_bytes(),
                             texts.get(1)?.as_bytes(),
+                            texts.get(2)?.as_bytes(),
                         )
                         .ok()?;
                         Some((c, t))
@@ -413,6 +462,15 @@ pub fn install_candidate(
         .ok_or_else(|| err("The release names no archive."))?;
     crate::appimage::fsutil::private_dir(work)
         .map_err(|e| io_err("make the download folder", &e))?;
+    // Never over a newer version (install_bundle checks again under the lock).
+    if let Some(have) = install::read_record(dirs, &cand.entry.id)
+        && Version::parse(&have.version).is_some_and(|v| cand.manifest.parsed_version() < v)
+    {
+        return Err(err(format!(
+            "That release ({}) is older than the version you have ({}). Nothing was installed.",
+            cand.manifest.version, have.version
+        )));
+    }
     let file = work.join(format!("download-{}.tar.zst", std::process::id()));
     let result = (|| {
         let mut out = std::fs::OpenOptions::new()
@@ -446,7 +504,7 @@ pub fn install_candidate(
             &install::Options {
                 expect_id: Some(&cand.entry.id),
                 outer: Some(&cand.manifest),
-                origin: Origin::release(&cand.entry.repo, &cand.tag),
+                origin: Origin::signed_release(&cand.entry.repo, &cand.tag, &cand.signer),
                 host,
             },
         )

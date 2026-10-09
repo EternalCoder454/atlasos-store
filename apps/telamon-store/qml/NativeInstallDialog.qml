@@ -8,7 +8,10 @@ import Telamon.Ui
 // which repository, how big, that it is for this user only. From a file the
 // user opened (`showLocal`, src/native.rs looked inside it first): the same,
 // and, first, that Telamon's list does not vouch for it. Neither says the app
-// is safe: it runs as the user, as any program does. Cancel is the default;
+// is safe: it runs as the user, as any program does. A release also says which
+// key signed it (the Store checked that Telamon's list names that key for this
+// app), and, on an update, when that is not the key the installed version was
+// signed with; a file says it is not signed. Cancel is the default;
 // the dialog ignores input for its first half second. Every text is plain.
 ConfirmDialog {
     id: dlg
@@ -136,6 +139,24 @@ ConfirmDialog {
         color: TelamonStyle.text
         textFormat: Text.PlainText
     }
+    // Who vouches for it. The key ID is hex made by the Store; the rest is ours.
+    Text {
+        Layout.fillWidth: true
+        visible: !dlg.local && (dlg.app.signer ?? "").length > 0
+        text: {
+            const line = qsTr("Signed with key %1 that Telamon's list names for this app").arg(dlg.app.signer ?? "");
+            if (dlg.app.signerChanged === true) {
+                return line + ". " + qsTr("The version you have was signed with a different key (%1). Telamon's list names this one now.").arg(dlg.app.installedSigner ?? "");
+            }
+            return line;
+        }
+        wrapMode: Text.Wrap
+        font.family: TelamonStyle.fontFamily
+        font.pointSize: TelamonStyle.fontSizeCaption
+        font.bold: dlg.app.signerChanged === true
+        color: dlg.app.signerChanged === true ? TelamonStyle.warning : TelamonStyle.textMuted
+        textFormat: Text.PlainText
+    }
 
     Text {
         text: qsTr("What Happens")
@@ -150,9 +171,9 @@ ConfirmDialog {
         text: {
             const where = qsTr("It is installed for you only, in your own folder (.local/share/telamon-apps), with a menu entry. Nothing else on this computer changes.");
             if (dlg.local) {
-                return qsTr("The file %1 is unpacked and checked against its own list of files. It has no signature.").arg(dlg.detail.fileName ?? "") + " " + where;
+                return qsTr("The file %1 is unpacked and checked against its own list of files. It is not signed, so nothing shows who made it.").arg(dlg.detail.fileName ?? "") + " " + where;
             }
-            return qsTr("The Store downloads it from github.com/%1 and checks it against the checksum published with the release before installing. The checksum comes from the same place as the file, so it catches damage, not a hijacked project.").arg(dlg.app.repo ?? "") + " " + where;
+            return qsTr("The Store downloads it from github.com/%1. Before installing it checks the signature of the release's list of files against the key Telamon's list names for this app, and the download against the checksum in that signed list.").arg(dlg.app.repo ?? "") + " " + where;
         }
         wrapMode: Text.Wrap
         font.family: TelamonStyle.fontFamily
