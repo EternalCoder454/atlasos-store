@@ -63,10 +63,11 @@ pub mod qobject {
         fn plan_ready(self: Pin<&mut Jobs>, app_id: QString);
 
         /// A removal with "Also Delete App Data" stopped because the app is
-        /// running; the dialog offers to close it (`closeAndRemove`).
+        /// running; the dialog offers to close it (`closeAndRemove`). `scope`
+        /// ("user" or "system") is the installation the removal was for.
         #[qsignal]
         #[cxx_name = "removeBlocked"]
-        fn remove_blocked(self: Pin<&mut Jobs>, app_id: QString, full_ref: QString);
+        fn remove_blocked(self: Pin<&mut Jobs>, app_id: QString, full_ref: QString, scope: QString);
 
         /// The unused runtimes were listed (`count` may be 0).
         #[qsignal]
@@ -97,15 +98,28 @@ pub mod qobject {
         #[qinvokable]
         fn cancel(self: Pin<&mut Jobs>);
 
-        /// Removes an installed app, with its data only if asked.
+        /// Removes an installed app, with its data only if asked. `scope`
+        /// ("user" or "system") is the installation the dialog named: the
+        /// same ref may be installed in both, and only that one is removed.
         #[qinvokable]
-        fn remove(self: Pin<&mut Jobs>, app_id: &QString, full_ref: &QString, delete_data: bool);
+        fn remove(
+            self: Pin<&mut Jobs>,
+            app_id: &QString,
+            full_ref: &QString,
+            scope: &QString,
+            delete_data: bool,
+        );
 
         /// Closes the running app (SIGTERM, then SIGKILL after 3 s), then
         /// removes it with its data. Only after the user confirmed that.
         #[qinvokable]
         #[cxx_name = "closeAndRemove"]
-        fn close_and_remove(self: Pin<&mut Jobs>, app_id: &QString, full_ref: &QString);
+        fn close_and_remove(
+            self: Pin<&mut Jobs>,
+            app_id: &QString,
+            full_ref: &QString,
+            scope: &QString,
+        );
 
         /// Lists the unused runtimes (signals `unusedReady`).
         #[qinvokable]
@@ -252,7 +266,7 @@ struct Outcome {
     plan: Option<(InstallPlan, String)>,
     unused: Option<Vec<Unused>>,
     /// The removal stopped because the app runs: the ref to offer closing it for.
-    blocked_ref: Option<String>,
+    blocked_ref: Option<(String, Scope)>,
 }
 
 pub struct JobsRust {
@@ -359,6 +373,29 @@ fn risk_word(r: Risk) -> &'static str {
 
 fn scope_word(s: Scope) -> &'static str {
     s.label()
+}
+
+fn parse_scope(s: &str) -> Option<Scope> {
+    match s {
+        "user" => Some(Scope::User),
+        "system" => Some(Scope::System),
+        _ => None,
+    }
+}
+
+/// The installed app a removal is for: this ID, this ref, in this
+/// installation. The same ref can be installed in both, and the one the
+/// dialog named is the one to remove, never the other (the system-wide one
+/// goes without a password for an administrator).
+fn find_installed<'a>(
+    installed: &'a [Entry],
+    id: &str,
+    ref_: &str,
+    scope: Scope,
+) -> Option<&'a Entry> {
+    installed
+        .iter()
+        .find(|e| e.id == id && e.full_ref == ref_ && e.scope == scope)
 }
 
 /// `runtime/ID/arch/branch` as `ID (branch)`.
@@ -720,7 +757,9 @@ fn run_job(thread: &CxxQtThread<qobject::Jobs>, job: Job, cancel: &CancelToken) 
                         }
                         // Asked in the dialog, not shown as an error. A second
                         // AppRunning after closing is a real failure.
-                        Err(Error::AppRunning) if !close_first => out.blocked_ref = Some(ref_),
+                        Err(Error::AppRunning) if !close_first => {
+                            out.blocked_ref = Some((ref_, scope));
+                        }
                         Err(e) => fail(&mut out, &e),
                     }
                     drop(lock);
@@ -894,10 +933,11 @@ impl qobject::Jobs {
             self.as_mut().set_status(QString::default());
             self.as_mut().set_not_responding(false);
         }
-        if let Some(full_ref) = out.blocked_ref {
+        if let Some((full_ref, scope)) = out.blocked_ref {
             self.as_mut().remove_blocked(
                 QString::from(app.as_str()),
                 QString::from(full_ref.as_str()),
+                QString::from(scope_word(scope)),
             );
         }
         if let Some((plan, json)) = out.plan {
@@ -1026,18 +1066,30 @@ impl qobject::Jobs {
         self.rust().fg_cancel.cancel();
     }
 
-    pub fn remove(self: Pin<&mut Self>, app_id: &QString, full_ref: &QString, delete_data: bool) {
-        self.start_remove(app_id, full_ref, delete_data, false);
+    pub fn remove(
+        self: Pin<&mut Self>,
+        app_id: &QString,
+        full_ref: &QString,
+        scope: &QString,
+        delete_data: bool,
+    ) {
+        self.start_remove(app_id, full_ref, scope, delete_data, false);
     }
 
-    pub fn close_and_remove(self: Pin<&mut Self>, app_id: &QString, full_ref: &QString) {
-        self.start_remove(app_id, full_ref, true, true);
+    pub fn close_and_remove(
+        self: Pin<&mut Self>,
+        app_id: &QString,
+        full_ref: &QString,
+        scope: &QString,
+    ) {
+        self.start_remove(app_id, full_ref, scope, true, true);
     }
 
     fn start_remove(
         mut self: Pin<&mut Self>,
         app_id: &QString,
         full_ref: &QString,
+        scope: &QString,
         delete_data: bool,
         close_first: bool,
     ) {
@@ -1047,11 +1099,8 @@ impl qobject::Jobs {
         let id = app_id.to_string();
         let ref_ = full_ref.to_string();
         // Exactly what the dialog showed: the same ref in the same installation.
-        let found = self
-            .rust()
-            .installed
-            .iter()
-            .find(|e| e.id == id && e.full_ref == ref_)
+        let found = parse_scope(&scope.to_string())
+            .and_then(|s| find_installed(&self.rust().installed, &id, &ref_, s))
             .cloned();
         let Some(e) = found else {
             self.as_mut().set_message(
@@ -1237,5 +1286,54 @@ mod tests {
             },
         ];
         assert_eq!(blocks(&b), vec!["ab".to_string(), "1. x\n2. y".to_string()]);
+    }
+    fn entry(id: &str, scope: Scope, ref_: &str) -> Entry {
+        Entry {
+            id: id.into(),
+            name: id.into(),
+            summary: String::new(),
+            version: String::new(),
+            scope,
+            size: 0,
+            full_ref: ref_.into(),
+            arch: "x86_64".into(),
+            branch: "stable".into(),
+            icon: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_removal_is_for_the_installation_the_dialog_named() {
+        // The same ref in both installations; the list puts the system one
+        // first, so a lookup by ref alone would pick it for a user's Remove.
+        let r = "app/org.test.Hello/x86_64/stable";
+        let list = vec![
+            entry("org.test.Hello", Scope::System, r),
+            entry("org.test.Hello", Scope::User, r),
+        ];
+        let user = find_installed(&list, "org.test.Hello", r, Scope::User).unwrap();
+        assert_eq!(user.scope, Scope::User);
+        let system = find_installed(&list, "org.test.Hello", r, Scope::System).unwrap();
+        assert_eq!(system.scope, Scope::System);
+        // Nothing for an installation that has no such app, a ref it does not
+        // have, or another ID.
+        let only_system = vec![entry("org.test.Hello", Scope::System, r)];
+        assert!(find_installed(&only_system, "org.test.Hello", r, Scope::User).is_none());
+        assert!(
+            find_installed(
+                &list,
+                "org.test.Hello",
+                "app/org.test.Hello/x86_64/beta",
+                Scope::User
+            )
+            .is_none()
+        );
+        assert!(find_installed(&list, "org.test.Other", r, Scope::User).is_none());
+        // The scope word from QML is exactly "user" or "system".
+        assert_eq!(parse_scope("user"), Some(Scope::User));
+        assert_eq!(parse_scope("system"), Some(Scope::System));
+        for bad in ["", "User", "SYSTEM", "both", "user ", "--system"] {
+            assert_eq!(parse_scope(bad), None, "{bad:?}");
+        }
     }
 }

@@ -231,7 +231,20 @@ enters, in `telamon-store-core`:
 the Store's own dialog, showing the app, the remote, sizes and permissions.
 Fedora's polkit gives wheel members Flatpak installs without a password, so
 polkit is not the confirmation. System-wide changes go through flatpak's own
-polkit helper; the Store has no helper and no polkit actions of its own.
+polkit helper; the Store has no helper and no polkit actions of its own, and
+asks for no privilege itself. What the helper asks polkit for (flatpak 1.18,
+Fedora's `org.freedesktop.Flatpak.rules`): an install (`app-install`,
+`runtime-install`), an uninstall (`app-uninstall`, `runtime-uninstall`) and
+the repository upkeep around them (`modify-repo`) need no password for a
+wheel member in an active local session; adding, removing, enabling or
+disabling a system-wide source (`configure-remote`) always asks for one;
+updates (`app-update`, `runtime-update`) and the refreshes of AppStream and
+summaries (`appstream-update`, `metadata-update`, `update-remote`) need
+none for anyone in an active session. The scope of an operation is never
+read from a file or a link: it is the installation of the catalog entry's
+remote, of the installed ref, or the one the person picked in a dialog. A
+removal names its installation as well as its ref (the same ref can be
+installed in both), so the one the dialog showed is the one removed.
 A file's source is its own step: "Add Source" (remote, URL, key fingerprint or
 a warning that it is unsigned) comes before the install confirmation, and a
 declined install can take the source back (`remove_remote`: exact name and

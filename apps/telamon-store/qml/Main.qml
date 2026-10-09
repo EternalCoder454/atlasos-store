@@ -305,9 +305,9 @@ TelamonWindow {
         function onPlanReady(appId) {
             installDialog.show();
         }
-        function onRemoveBlocked(appId, fullRef) {
+        function onRemoveBlocked(appId, fullRef, scope) {
             const info = JSON.parse(root.jobs.appInfo(appId));
-            const install = (info.installs ?? []).find(i => i.ref === fullRef);
+            const install = (info.installs ?? []).find(i => i.ref === fullRef && i.scope === scope);
             if (install) {
                 removeDialog.showRunning(appId, info.name, install.scope, fullRef);
             }

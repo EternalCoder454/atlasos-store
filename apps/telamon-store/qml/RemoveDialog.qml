@@ -67,9 +67,9 @@ ConfirmDialog {
         }
         dlg.close();
         if (dlg.running) {
-            dlg.jobs.closeAndRemove(dlg.appId, dlg.fullRef);
+            dlg.jobs.closeAndRemove(dlg.appId, dlg.fullRef, dlg.scope);
         } else {
-            dlg.jobs.remove(dlg.appId, dlg.fullRef, deleteData.checked && !dlg.shared);
+            dlg.jobs.remove(dlg.appId, dlg.fullRef, dlg.scope, deleteData.checked && !dlg.shared);
         }
     }
 
