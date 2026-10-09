@@ -977,3 +977,282 @@ fn files_past_the_per_round_cap_are_found_by_the_next_round() {
     );
     assert!(r.notified.is_empty());
 }
+
+// ---- the Downloads folder is hostile ground ----
+
+#[test]
+fn names_that_hide_what_they_say_are_never_candidates() {
+    let dl = scratch("dl-hidden-names");
+    build::write(&dl, "Good.AppImage", &build::normal());
+    // A newline, a right-to-left override, a zero-width space, a bell.
+    for name in [
+        "Evil\n.AppImage",
+        "Evil\u{202e}gpj.AppImage",
+        "Evil\u{200b}.AppImage",
+        "Evil\u{7}.AppImage",
+    ] {
+        build::write(&dl, name, &build::normal());
+    }
+    let names: Vec<String> = check::candidates(&dl, &fast(), SystemTime::now())
+        .iter()
+        .map(|c| c.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["Good.AppImage"], "{names:?}");
+}
+
+#[test]
+fn a_pipe_a_device_link_and_a_crowded_folder_never_block_or_pass() {
+    let dl = scratch("dl-nasty");
+    let good = build::write(&dl, "Good.AppImage", &build::normal());
+    // A named pipe with nobody writing: opening it for reading would block.
+    let fifo = dl.join("Pipe.AppImage");
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: mkfifo with a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    symlink("/dev/zero", dl.join("Zero.AppImage")).unwrap();
+    symlink("/dev/null", dl.join("Null.AppImage")).unwrap();
+    // A named socket.
+    let sock = dl.join("Sock.AppImage");
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let (dl2, started) = (dl.clone(), std::time::Instant::now());
+    let found = std::thread::spawn(move || check::candidates(&dl2, &fast(), SystemTime::now()))
+        .join()
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10), "it blocked");
+    let names: Vec<String> = found
+        .iter()
+        .map(|c| c.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["Good.AppImage"], "{names:?}");
+    // Named in the request, they are no more files than in a folder.
+    for odd in [
+        "Pipe.AppImage",
+        "Zero.AppImage",
+        "Null.AppImage",
+        "Sock.AppImage",
+    ] {
+        assert!(
+            check::candidates(&dl.join(odd), &fast(), SystemTime::now()).is_empty(),
+            "{odd}"
+        );
+    }
+    // And the inspection (which opens by path) refuses what is swapped in
+    // between: a pipe, a device and a folder are "not a regular file".
+    for odd in ["Pipe.AppImage", "Zero.AppImage", "Null.AppImage"] {
+        let e = inspect(&dl.join(odd), &Limits::default()).unwrap_err();
+        assert_eq!(e, InspectError::NotAFile, "{odd}");
+    }
+    let _ = good;
+}
+
+#[test]
+fn a_folder_with_a_great_many_entries_is_read_only_so_far() {
+    let dl = scratch("dl-crowd");
+    let good = build::write(&dl, "Good.AppImage", &build::normal());
+    // 3000 more candidates (hard links to one file cost nothing): a run looks
+    // at no more than `max_entries` of them.
+    for i in 0..3000 {
+        std::fs::hard_link(&good, dl.join(format!("Copy-{i}.AppImage"))).unwrap();
+    }
+    let cfg = Config {
+        max_entries: 100,
+        ..fast()
+    };
+    let found = check::candidates(&dl, &cfg, SystemTime::now());
+    assert!(
+        (1..=100).contains(&found.len()),
+        "{} candidates from the first 100 entries",
+        found.len()
+    );
+}
+
+// ---- install: the places and the names ----
+
+#[test]
+fn a_home_folder_the_menu_cannot_spell_gets_nothing_installed() {
+    let (src, insp) = fixture("badhome-src", &build::normal());
+    let root = scratch("badhome");
+    for home in ["ho\nme", "ho\tme", "ho\u{7}me"] {
+        let d = Dirs {
+            applications: root.join(home).join("Applications"),
+            data: root.join("data"),
+            fuse_libs: vec![],
+        };
+        let plan = install::plan(&d, &insp).unwrap();
+        let e = install::install(&d, &src, &insp, &plan).unwrap_err();
+        assert!(e.0.contains("can't hold"), "{home:?}: {e}");
+        assert!(!root.join(home).exists(), "{home:?}: nothing was made");
+    }
+    // A name that is not UTF-8 is not written as another.
+    use std::os::unix::ffi::OsStrExt;
+    let odd = std::ffi::OsStr::from_bytes(b"ho\xffme");
+    let d = Dirs {
+        applications: root.join(odd).join("Applications"),
+        data: root.join("data"),
+        fuse_libs: vec![],
+    };
+    let plan = install::plan(&d, &insp).unwrap();
+    assert!(install::install(&d, &src, &insp, &plan).is_err());
+}
+
+#[test]
+fn an_applications_folder_anyone_can_write_in_is_not_installed_to() {
+    let d = dirs("worldw");
+    let (src, insp) = fixture("worldw-src", &build::normal());
+    std::fs::create_dir_all(&d.applications).unwrap();
+    std::fs::set_permissions(&d.applications, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let plan = install::plan(&d, &insp).unwrap();
+    let e = install::install(&d, &src, &insp, &plan).unwrap_err();
+    assert!(e.0.contains("anyone can change"), "{e}");
+    assert_eq!(std::fs::read_dir(&d.applications).unwrap().count(), 0);
+    // Group-writable (the umask of a private group) is still fine.
+    std::fs::set_permissions(&d.applications, std::fs::Permissions::from_mode(0o775)).unwrap();
+    install::install(&d, &src, &insp, &plan).unwrap();
+}
+
+#[test]
+fn a_new_file_is_never_written_over_one_that_is_there() {
+    use telamon_store_core::appimage::fsutil::write_atomic_new;
+    let dir = scratch("atomic-new");
+    let p = dir.join("a.desktop");
+    write_atomic_new(&p, b"first", 0o644).unwrap();
+    let e = write_atomic_new(&p, b"second", 0o644).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&p).unwrap(), b"first");
+    // A link is not written through, and no temporary is left.
+    let target = build::write(&dir, "target", b"precious");
+    let l = dir.join("link.desktop");
+    symlink(&target, &l).unwrap();
+    assert!(write_atomic_new(&l, b"x", 0o644).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.iter().all(|n| !n.ends_with(".tmp")), "{left:?}");
+}
+
+#[test]
+fn system_programs_are_found_in_the_systems_folders_only() {
+    use telamon_store_core::appimage::fsutil::system_program;
+    let sh = system_program("sh").expect("a shell");
+    assert!(
+        sh.starts_with("/usr/bin") || sh.starts_with("/bin"),
+        "{sh:?}"
+    );
+    assert_eq!(system_program("no-such-program-anywhere"), None);
+    assert_eq!(system_program("../bin/sh"), None);
+    assert_eq!(system_program(""), None);
+    // `PATH` is not consulted: a program in a folder on it is not found.
+    let dir = scratch("sysprog");
+    build::write(&dir, "planted-by-the-user", b"#!/bin/sh\n");
+    assert_eq!(system_program("planted-by-the-user"), None);
+}
+
+// ---- Exec, with any name ----
+
+/// A small deterministic generator: the test must be repeatable.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+#[test]
+fn exec_lines_round_trip_for_random_hostile_names() {
+    // Everything a path may hold that a desktop entry gives a meaning to:
+    // spaces, every reserved character of the Exec grammar, `%` and `\`,
+    // quotes, non-ASCII, combining marks and astral characters. (Control
+    // characters never reach an entry: install refuses such a home folder.)
+    let alphabet: Vec<char> = " \"'\\><~|&;$*?#()`%%\\\\$$``..-_/aZ09éß日本語𝔘🙂\u{301}=:,@!{}[]^+"
+        .chars()
+        .collect();
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for round in 0..2000 {
+        let len = 1 + (rng.next() % 40) as usize;
+        let mut name: String = (0..len)
+            .map(|_| alphabet[(rng.next() % alphabet.len() as u64) as usize])
+            .collect();
+        // `//` or a trailing `/` would be another path; keep it a plain name.
+        name = name.replace('/', "_");
+        let path = format!("/home/{name}/Applications/{name}.AppImage");
+        for extract in [false, true] {
+            let line = install::exec_line(Path::new(&path), extract);
+            let parts = install::split_exec(&line)
+                .unwrap_or_else(|| panic!("round {round}: {line:?} does not split"));
+            assert_eq!(
+                parts.last().map(String::as_str),
+                Some(path.as_str()),
+                "round {round}: {line:?}"
+            );
+            assert_eq!(parts.len(), if extract { 3 } else { 1 }, "{line:?}");
+            // Through the key file layer too, and on one line.
+            let escaped = install::escape_value(&line);
+            assert!(!escaped.contains('\n'));
+            let kf = telamon_store_core::keyfile::KeyFile::parse(
+                format!("[G]\nExec={escaped}\nP={}\n", install::escape_value(&path)).as_bytes(),
+                &Default::default(),
+            )
+            .unwrap_or_else(|e| panic!("round {round}: {escaped:?}: {e:?}"));
+            assert_eq!(kf.string("G", "Exec").unwrap().unwrap(), line, "{round}");
+            assert_eq!(kf.string("G", "P").unwrap().unwrap(), path, "{round}");
+        }
+    }
+}
+
+// ---- Open ----
+
+#[test]
+fn a_started_app_gets_no_stray_descriptors_and_only_a_valid_token() {
+    let dir = scratch("detached");
+    let leak = build::write(&dir, "leak", b"secret");
+    let f = std::fs::File::open(&leak).unwrap();
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&f);
+    // As a library that forgot close-on-exec would leave it.
+    // SAFETY: fcntl on our own descriptor.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+    let report = dir.join("report");
+    let run = |token: Option<&str>| {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            "ls /proc/$$/fd > '{r}.fds'; env > '{r}.env'",
+            r = report.display()
+        ));
+        // The caller's own, stale one is not passed on.
+        cmd.env("XDG_ACTIVATION_TOKEN", "stale")
+            .env("DESKTOP_STARTUP_ID", "stale");
+        install::run_detached(cmd, token).unwrap();
+        for _ in 0..100 {
+            if std::fs::read_to_string(format!("{}.env", report.display()))
+                .map(|t| !t.is_empty())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let fds = std::fs::read_to_string(format!("{}.fds", report.display())).unwrap();
+        let env = std::fs::read_to_string(format!("{}.env", report.display())).unwrap();
+        let _ = std::fs::remove_file(format!("{}.env", report.display()));
+        (fds, env)
+    };
+    let (fds, env) = run(Some("good-token_1"));
+    let open: Vec<&str> = fds.split_whitespace().collect();
+    assert!(
+        !open.contains(&fd.to_string().as_str()),
+        "fd {fd} leaked: {open:?}"
+    );
+    assert!(env.contains("XDG_ACTIVATION_TOKEN=good-token_1\n"), "{env}");
+    for bad in ["has a space", "new\nline", ""] {
+        let (_, env) = run(Some(bad));
+        assert!(!env.contains("XDG_ACTIVATION_TOKEN"), "{bad:?}: {env}");
+        assert!(!env.contains("DESKTOP_STARTUP_ID"), "{bad:?}: {env}");
+    }
+    let (_, env) = run(None);
+    assert!(!env.contains("stale"), "{env}");
+}

@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::appimage::fsutil;
-use crate::net::{self, NetError, Request};
+use crate::net::{self, Hosts, NetError, Request};
 
 /// Seconds for an API answer or a manifest.
 const SMALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,6 +43,7 @@ impl Fetcher for Net {
                 accept,
                 max_bytes,
                 timeout: SMALL_TIMEOUT,
+                hosts: Hosts::Only(net::GITHUB_HOSTS),
             },
         )
     }
@@ -59,6 +60,7 @@ impl Fetcher for Net {
                 accept: "application/octet-stream",
                 max_bytes,
                 timeout: DOWNLOAD_TIMEOUT,
+                hosts: Hosts::Only(net::GITHUB_HOSTS),
             },
             sink,
         )

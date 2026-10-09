@@ -7,6 +7,7 @@
 //! `flatpak run` the user would type.
 
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -143,15 +144,38 @@ pub fn valid_activation_token(token: &str) -> Option<&str> {
         .then_some(token)
 }
 
+/// Where the system keeps the `flatpak` program.
+const FLATPAK_PROGRAMS: [&str; 2] = ["/usr/bin/flatpak", "/bin/flatpak"];
+
+/// `flatpak` from the system's folders only: the `PATH` of a user session
+/// holds folders the user (and any program running as them) can write to, and
+/// a planted `flatpak` there would run on every Open.
+pub(crate) fn find_flatpak() -> Option<PathBuf> {
+    first_file(&FLATPAK_PROGRAMS)
+}
+
+fn first_file(candidates: &[&str]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .map(Path::to_path_buf)
+}
+
 /// The arguments of `flatpak run` for one app in one installation. Every part
-/// is checked, so none can be read as an option.
+/// is checked, so none can be read as an option, and `--` comes before the ID
+/// all the same.
 pub(crate) fn run_args(
     scope: Scope,
     id: &str,
     arch: &str,
     branch: &str,
 ) -> Result<Vec<String>, Error> {
-    if !text::valid_id(id) || !super::valid_arch(arch) || !super::valid_branch(branch) {
+    if !text::valid_id(id)
+        || id.starts_with('-')
+        || !super::valid_arch(arch)
+        || !super::valid_branch(branch)
+    {
         return Err(Error::Invalid("the app's ref is not valid".into()));
     }
     let installation = match scope {
@@ -163,6 +187,7 @@ pub(crate) fn run_args(
         installation.into(),
         format!("--arch={arch}"),
         format!("--branch={branch}"),
+        "--".into(),
         id.into(),
     ])
 }
@@ -192,7 +217,13 @@ pub fn launch_app(
 ) -> Result<(), Error> {
     cancel.check()?;
     let args = run_args(scope, id, arch, branch)?;
-    let mut cmd = Command::new("flatpak");
+    let Some(program) = find_flatpak() else {
+        return Err(Error::Flatpak {
+            action: "open the app",
+            message: "`flatpak` is not installed in /usr/bin".into(),
+        });
+    };
+    let mut cmd = Command::new(program);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -317,6 +348,7 @@ mod tests {
                 "--user",
                 "--arch=x86_64",
                 "--branch=stable",
+                "--",
                 "org.kde.konsole"
             ]
         );
@@ -324,6 +356,30 @@ mod tests {
         assert_eq!(sys[1], "--system");
         assert_eq!(sys[2], "--arch=aarch64");
         assert_eq!(sys[3], "--branch=24.08");
+        // The ID follows `--`, so it can never be read as an option.
+        assert_eq!(sys[4], "--");
+        assert_eq!(sys[5], "org.kde.konsole");
+    }
+
+    #[test]
+    fn flatpak_is_found_in_system_folders_never_through_path() {
+        // The only candidates are absolute system paths.
+        assert!(
+            FLATPAK_PROGRAMS
+                .iter()
+                .all(|p| p.starts_with("/usr/") || p.starts_with("/bin/"))
+        );
+        let dir = std::env::temp_dir().join(format!("telamon-flatpak-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let planted = dir.join("flatpak");
+        std::fs::write(&planted, b"#!/bin/sh\n").unwrap();
+        let missing = dir.join("nothing");
+        let (p, m) = (planted.to_str().unwrap(), missing.to_str().unwrap());
+        assert_eq!(first_file(&[m, p]), Some(planted.clone()));
+        assert_eq!(first_file(&[m]), None);
+        // A folder of that name is not the program.
+        assert_eq!(first_file(&[dir.to_str().unwrap()]), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -332,6 +388,9 @@ mod tests {
             ("--help", "x86_64", "stable"),
             ("org.kde.konsole", "--user", "stable"),
             ("org.kde.konsole", "x86_64", "--system"),
+            // A dotted name that starts with `-` passes the ID shape check.
+            ("--verbose.konsole", "x86_64", "stable"),
+            ("-h.konsole.app", "x86_64", "stable"),
             ("org.kde.konsole", "x86_64", "stable extra"),
             ("org.kde.konsole", "", "stable"),
             ("konsole", "x86_64", "stable"),

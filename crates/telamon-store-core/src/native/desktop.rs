@@ -17,20 +17,46 @@
 //!
 //! The names are the rule that keeps a bundle from replacing something that
 //! is not its own (the user's folder comes before `/usr` in every search
-//! path): a bundle can only ever write files that carry its app ID. The
-//! desktop file and the D-Bus service are rewritten: the first word of every
-//! `Exec` (a bare program name that must be a program in the bundle's `bin/`)
-//! becomes the absolute path under `<app>/current/bin/`, `TryExec`, `Path` and
-//! any `X-Telamon-Native-*` key the bundle brought are dropped, and the
-//! Store's own `X-Telamon-Native-App` and `-Version` are added.
+//! path): a bundle can only ever write files that carry its app ID. On top of
+//! the names:
+//!
+//! - **Reserved names**: an app ID or D-Bus name below `org.freedesktop.`,
+//!   `org.kde.`, `org.gnome.` and the other [`RESERVED_NAMESPACES`] is
+//!   refused.
+//! - **The system's files** ([`check_system`]): nothing is copied to a path
+//!   that exists in a system data folder, and the app ID and the D-Bus names a
+//!   bundle declares must not be claimed by a system D-Bus service file (by
+//!   its name or by the `Name` inside it).
+//! - **Text files** (desktop entry, D-Bus service, notification file) are read
+//!   strictly ([`strict_scan`]): a control character but TAB, a `\r` that is
+//!   not part of a line end, a line that starts with white space, an odd key
+//!   name, a repeated group or key refuses the file, so that GLib, KDE and the
+//!   D-Bus daemon cannot read it differently from the Store. The desktop entry
+//!   and the D-Bus service are rewritten: the first word of every `Exec` (a
+//!   bare program name that must be a program in the bundle's `bin/`) becomes
+//!   the absolute path under `<app>/current/bin/`, `TryExec`, `Path` and the
+//!   keys that load or run something of the bundle's choosing
+//!   (`X-KDE-Library`, `Implements`, `X-KDE-Wayland-Interfaces`... see
+//!   `DROPPED_KEYS`) and any marker of another tool (`X-Telamon-*`,
+//!   `X-Flatpak*`...) are dropped, and the Store's own `X-Telamon-Native-App`
+//!   and `-Version` are added. `MimeType` and the other plain metadata are
+//!   kept: a bundle may offer itself as a handler for a file type (the user's
+//!   choice in `mimeapps.list` still decides the default).
+//! - **Notification files** may not run a command (`Execute`) or write a log
+//!   (`Logfile`); **metainfo** is one `<component>` for the app's own ID that
+//!   replaces, extends and provides nothing else (read with limits, no
+//!   DOCTYPE or entity); **icons** are PNGs of a sane size in the header or
+//!   plain SVGs (`appimage::meta::icon_kind`), because Qt decodes them.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
+use super::dirfd::Dir;
 use super::manifest::Manifest;
 use super::{Error, err};
 use crate::appimage::install::{escape_value, exec_arg};
 use crate::keyfile::{KeyFile, Limits};
+use crate::launch::hidden;
 
 /// Largest file copied out of a bundle.
 const MAX_EXPORT: usize = 1024 * 1024;
@@ -41,6 +67,55 @@ const MAX_EXPORTS: usize = 200;
 /// The marker the Store writes into the desktop entry and the D-Bus service.
 pub const MARKER: &str = "X-Telamon-Native-App";
 pub const MARKER_VERSION: &str = "X-Telamon-Native-Version";
+
+/// Name spaces that belong to the desktop, the OS and other vendors' apps. An
+/// app ID or a D-Bus name below one of them is refused: the user's folders come
+/// before `/usr` in every search path and the session bus starts the first
+/// service file it finds for a name, so a bundle that took one of these names
+/// could stand in for a system component.
+pub const RESERVED_NAMESPACES: &[&str] = &[
+    "org.freedesktop.",
+    "org.kde.",
+    "org.gnome.",
+    "org.gtk.",
+    "org.mate.",
+    "org.xfce.",
+    "org.flatpak.",
+    "org.fedoraproject.",
+    "org.mozilla.",
+    "com.canonical.",
+];
+
+/// Keys of a desktop entry that make another component load or run
+/// something of the bundle's choosing, or hand the app privileges, and so are
+/// not copied (with any `[locale]` suffix): KDE's service loader
+/// (`X-KDE-Library`, `X-KDE-ServiceTypes`, `X-KDE-Protocols`, `X-KDE-Init`),
+/// GNOME's search provider hook (`Implements`), KDE's request to run as
+/// another user (`X-KDE-SubstituteUID`, `X-KDE-Username`) and its grant of
+/// privileged Wayland and D-Bus interfaces (`X-KDE-Wayland-Interfaces`,
+/// `X-KDE-DBUS-Restricted-Interfaces`).
+const DROPPED_KEYS: &[&str] = &[
+    "X-KDE-Library",
+    "X-KDE-ServiceTypes",
+    "Implements",
+    "X-KDE-Protocols",
+    "X-KDE-Init",
+    "X-KDE-SubstituteUID",
+    "X-KDE-Username",
+    "X-KDE-Wayland-Interfaces",
+    "X-KDE-DBUS-Restricted-Interfaces",
+];
+
+/// Key prefixes that are other tools' markers: the Store's own (written
+/// afresh), Flatpak's, Snap's and the AppImage tools', which could make
+/// another tool treat the entry as its own.
+const DROPPED_PREFIXES: &[&str] = &[
+    "X-Telamon-",
+    "X-Flatpak",
+    "X-Snap",
+    "X-AppImage",
+    "X-KDE-PluginInfo",
+];
 
 /// A file the Store copies out of the bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +136,8 @@ pub struct Plan {
     /// The program Open runs: `bin/<name>`, the first word of the desktop
     /// entry's `Exec`.
     pub exe: String,
+    /// The D-Bus names the bundle's service files own.
+    pub bus_names: Vec<String>,
 }
 
 fn limits() -> Limits {
@@ -128,7 +205,9 @@ fn first_word(value: &str) -> Result<(&str, &str), Error> {
 }
 
 /// The new `Exec` value: the program at `<prefix>/bin/<word>`, quoted as the
-/// Desktop Entry spec wants, then the original arguments.
+/// Desktop Entry spec wants, then the original arguments. A folder name that
+/// is not text or holds a control character cannot be quoted so that it reads
+/// back the same, and is refused.
 fn exec_value(
     value: &str,
     prefix: &Path,
@@ -141,10 +220,134 @@ fn exec_value(
         ));
     }
     let path = prefix.join("bin").join(word);
+    let Some(path) = path.to_str().filter(|p| !p.chars().any(hidden)) else {
+        return Err(err(
+            "The folder the app goes in has a name the Store cannot put in a launcher.",
+        ));
+    };
     Ok((
-        format!("{}{rest}", escape_value(&exec_arg(&path.to_string_lossy()))),
+        format!("{}{rest}", escape_value(&exec_arg(path))),
         word.to_string(),
     ))
+}
+
+/// Checks the text of a desktop entry, a D-Bus service or a notification file
+/// before anything is read from it, and refuses what different readers (GLib,
+/// KDE's `KConfig`, the D-Bus daemon, scripts that split lines their own way)
+/// could read differently, so the Store never copies one thing while a reader
+/// sees another:
+///
+/// - any control character but TAB, and a `\r` that is not part of `\r\n`,
+///   and the characters that end or hide a line (see `launch::hidden`);
+/// - a line that starts with white space;
+/// - a key that is not ASCII letters, digits and `-` (and an optional
+///   `[locale]`), a group header that is not exactly `[name]`;
+/// - the same group twice, or the same key twice in a group.
+fn strict_scan<'a>(src: &'a [u8], what: &str) -> Result<&'a str, Error> {
+    let bad = || {
+        err(format!(
+            "The bundle's {what} has a character or a line the Store won't copy."
+        ))
+    };
+    let text =
+        std::str::from_utf8(src).map_err(|_| err(format!("The bundle's {what} is not text.")))?;
+    let mut groups: HashSet<&str> = HashSet::new();
+    let mut keys: HashSet<(&str, &str)> = HashSet::new();
+    let mut group = "";
+    for raw in text.split_inclusive('\n') {
+        // A line ends with `\n` or `\r\n`; a `\r` anywhere else is refused.
+        let line = match raw.strip_suffix('\n') {
+            Some(l) => l.strip_suffix('\r').unwrap_or(l),
+            None => raw,
+        };
+        if line.contains('\r') {
+            return Err(bad());
+        }
+        // The value of a translated key (`Name[ar]=...`) may hold the marks
+        // right-to-left scripts need; nowhere else may a hidden character be.
+        let mut soft_from = line.len();
+        let mut parsed_key = None;
+        if !line.is_empty()
+            && !line.starts_with(['#', '['])
+            && let Some((key, _)) = line.split_once('=')
+        {
+            let key = key.trim_end_matches([' ', '\t']);
+            if simple_key(key) {
+                if key.contains('[') {
+                    soft_from = line.find('=').map_or(line.len(), |i| i + 1);
+                }
+                parsed_key = Some(key);
+            }
+        }
+        for (i, c) in line.char_indices() {
+            if c != '\t' && hidden(c) && !(i >= soft_from && soft_mark(c)) {
+                return Err(bad());
+            }
+        }
+        let Some(first) = line.chars().next() else {
+            continue;
+        };
+        if first.is_whitespace() {
+            return Err(bad());
+        }
+        if first == '#' {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let Some(name) = rest.strip_suffix(']') else {
+                return Err(bad());
+            };
+            if name.is_empty() || name.contains(['[', ']']) || !groups.insert(name) {
+                return Err(bad());
+            }
+            group = name;
+            continue;
+        }
+        let Some(key) = parsed_key else {
+            return Err(bad());
+        };
+        if !keys.insert((group, key)) {
+            return Err(bad());
+        }
+    }
+    Ok(text)
+}
+
+/// The marks of right-to-left and some other scripts that are normal in a
+/// translated text: the left-to-right and right-to-left marks, the variation
+/// selector-16 and the soft hyphen. (Overrides and isolates, line and
+/// paragraph separators, zero-width spaces and joiners are never allowed.)
+fn soft_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{FE0F}' | '\u{00AD}')
+}
+
+/// `Name` or `Name[locale]`: ASCII letters, digits and `-` for the name, and
+/// letters, digits and `_@.$-` for the locale (`$` for KDE's `[$e]`).
+fn simple_key(key: &str) -> bool {
+    let (name, locale) = match key.split_once('[') {
+        Some((n, l)) => match l.strip_suffix(']') {
+            Some(l) => (n, Some(l)),
+            None => return false,
+        },
+        None => (key, None),
+    };
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && locale.is_none_or(|l| {
+            !l.is_empty()
+                && l.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'@' | b'.' | b'$' | b'-')
+                })
+        })
+}
+
+/// Whether a desktop-entry key is one the Store does not copy.
+fn dropped_key(key: &str) -> bool {
+    let base = key.split('[').next().unwrap_or(key);
+    base == "TryExec"
+        || base == "Path"
+        || DROPPED_KEYS.contains(&base)
+        || DROPPED_PREFIXES.iter().any(|p| base.starts_with(p))
 }
 
 /// Rewrites the bundle's desktop entry. Returns the text and the program the
@@ -157,6 +360,7 @@ pub fn rewrite_desktop(
     programs: &BTreeSet<String>,
 ) -> Result<(Vec<u8>, String), Error> {
     let bad = |_| err("The bundle's desktop entry is not valid.");
+    let text = strict_scan(src, "desktop entry")?;
     let kf = KeyFile::parse(src, &limits()).map_err(bad)?;
     if kf.groups().next() != Some("Desktop Entry") {
         return Err(err(
@@ -166,8 +370,6 @@ pub fn rewrite_desktop(
     if kf.raw("Desktop Entry", "Type") != Some("Application") {
         return Err(err("The bundle's desktop entry is not an application."));
     }
-    let text =
-        std::str::from_utf8(src).map_err(|_| err("The bundle's desktop entry is not text."))?;
     let mut out = String::new();
     let mut group = String::new();
     let mut main_done = false;
@@ -177,9 +379,9 @@ pub fn rewrite_desktop(
         out.push_str(&format!("{MARKER}={id}\n{MARKER_VERSION}={version}\n"));
     };
     for raw in text.split_inclusive('\n') {
+        // The scan allows `\r` only in front of `\n`.
         let line = raw.trim_end_matches(['\n', '\r']);
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix('[')
+        if let Some(rest) = line.strip_prefix('[')
             && let Some(name) = rest.split(']').next()
         {
             if group == "Desktop Entry" && !main_done {
@@ -187,39 +389,34 @@ pub fn rewrite_desktop(
                 main_done = true;
             }
             group = name.to_string();
-            out.push_str(trimmed);
+            out.push_str(line);
             out.push('\n');
             continue;
         }
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            out.push_str(trimmed);
+        if line.is_empty() || line.starts_with('#') {
+            out.push_str(line);
             out.push('\n');
             continue;
         }
-        let Some((key, value)) = trimmed.split_once('=') else {
+        let Some((key, value)) = line.split_once('=') else {
             return Err(err("The bundle's desktop entry is not valid."));
         };
-        let key = key.trim_end();
-        let value = value.trim_start();
+        let key = key.trim_end_matches([' ', '\t']);
+        let value = value.trim_start_matches([' ', '\t']);
         if key.starts_with("Exec[") || key.starts_with("TryExec[") || key.starts_with("Path[") {
             return Err(err(
                 "The bundle's desktop entry has a launcher key the Store won't copy.",
             ));
         }
-        match key {
-            "TryExec" | "Path" => {}
-            k if k.starts_with("X-Telamon-Native-") => {}
-            "Exec" => {
-                let (new, word) = exec_value(value, prefix, programs)?;
-                if group == "Desktop Entry" {
-                    exe_main = Some(word.clone());
-                }
-                exe.get_or_insert(word);
-                out.push_str(&format!("Exec={new}\n"));
+        if key == "Exec" {
+            let (new, word) = exec_value(value, prefix, programs)?;
+            if group == "Desktop Entry" {
+                exe_main = Some(word.clone());
             }
-            _ => {
-                out.push_str(&format!("{key}={value}\n"));
-            }
+            exe.get_or_insert(word);
+            out.push_str(&format!("Exec={new}\n"));
+        } else if !dropped_key(key) {
+            out.push_str(&format!("{key}={value}\n"));
         }
     }
     if group == "Desktop Entry" && !main_done {
@@ -230,7 +427,9 @@ pub fn rewrite_desktop(
         .ok_or_else(|| err("The bundle's desktop entry has no Exec."))?;
     // What was written must read back as a valid entry with our marker.
     let check = KeyFile::parse(out.as_bytes(), &limits()).map_err(bad)?;
-    debug_assert_eq!(check.raw("Desktop Entry", MARKER), Some(id));
+    if check.raw("Desktop Entry", MARKER) != Some(id) {
+        return Err(err("The bundle's desktop entry is not valid."));
+    }
     Ok((out.into_bytes(), exe))
 }
 
@@ -243,6 +442,7 @@ pub fn rewrite_dbus(
     programs: &BTreeSet<String>,
 ) -> Result<(Vec<u8>, String), Error> {
     let bad = |_| err("The bundle's D-Bus service file is not valid.");
+    strict_scan(src, "D-Bus service file")?;
     let kf = KeyFile::parse(src, &limits()).map_err(bad)?;
     let name = kf
         .raw("D-BUS Service", "Name")
@@ -261,6 +461,394 @@ pub fn rewrite_dbus(
         "[D-BUS Service]\nName={name}\nExec={value}\n{MARKER}={id}\n{MARKER_VERSION}={version}\n"
     );
     Ok((text.into_bytes(), name.to_string()))
+}
+
+/// A notification file may name sounds, icons and the places a notification
+/// appears (`Popup`, `Sound`, `Taskbar`). It may not run a command
+/// (`Execute`, `Action=Execute`) or write to a file (`Logfile`): the file is
+/// read by the notification service whenever the app, or another app that
+/// shares its name, notifies.
+fn check_notifyrc(bytes: &[u8]) -> Result<(), Error> {
+    let what = "notification file";
+    let text = strict_scan(bytes, what)?;
+    let kf = KeyFile::parse(bytes, &limits())
+        .map_err(|_| err("The bundle's notification file is not valid."))?;
+    let refused = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("execute") || s.contains("logfile")
+    };
+    // A value is read as KConfig reads it (`\x65` is an `e`) before it is
+    // looked at.
+    let refused_value = |s: &str| refused(&kconfig_unescape(s));
+    // By lines as well as by the parsed keys, in case a reader splits them
+    // differently.
+    if text.lines().any(|l| {
+        l.split_once('=').is_some_and(|(k, v)| {
+            refused(k) || (k.trim().starts_with("Action") && refused_value(v))
+        })
+    }) {
+        return Err(err(
+            "The bundle's notification file runs a command or writes a log file.",
+        ));
+    }
+    let groups: Vec<String> = kf.groups().map(str::to_string).collect();
+    for g in groups {
+        for key in kf.all_keys(&g) {
+            let base = key.split('[').next().unwrap_or(key);
+            let action = base == "Action" && kf.raw(&g, key).is_some_and(refused_value);
+            if refused(base) || action {
+                return Err(err(
+                    "The bundle's notification file runs a command or writes a log file.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A value with KConfig's escapes resolved: `\s`, `\t`, `\n`, `\r`, `\\`,
+/// `\;` and `\xNN` (one or two hex digits); any other `\c` is `c`.
+fn kconfig_unescape(v: &str) -> String {
+    let mut out = String::new();
+    let mut it = v.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            None => out.push('\\'),
+            Some('s') => out.push(' '),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('x') => {
+                let mut n = 0u32;
+                let mut digits = 0;
+                while digits < 2 {
+                    match it.peek().and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            n = n * 16 + d;
+                            digits += 1;
+                            it.next();
+                        }
+                        None => break,
+                    }
+                }
+                if digits == 0 {
+                    out.push('x');
+                } else if let Some(ch) = char::from_u32(n) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => out.push(other),
+        }
+    }
+    out
+}
+
+/// A metainfo file describes the bundle's own app to software centers, which
+/// read the user's folder before the system's. It must be one `<component>`
+/// whose `<id>` is the app ID (with an optional `.desktop`), and it may only
+/// use the elements AppStream metainfo for a desktop app uses (see
+/// [`metainfo_children`]): anything else is refused with its name, among them
+/// `<replaces>`, `<extends>`, `<bundle>`, `<pkgname>` and a `<launchable>` that
+/// is not `desktop-id` with the app's own `<id>.desktop`. It provides only
+/// its own IDs and bus names. Read with limits: at most 1 MiB, 32 levels
+/// deep, no DOCTYPE, no entity but the predefined five, no processing
+/// instruction, and the XML declaration says no encoding or UTF-8.
+fn check_metainfo(bytes: &[u8], id: &str) -> Result<(), Error> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    if bytes.len() > MAX_EXPORT {
+        return Err(metainfo_bad("is too large"));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| metainfo_bad("is not text"))?;
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return Err(metainfo_bad("has a control character"));
+    }
+    let mut rd = Reader::from_str(text);
+    let mut st = MetaState {
+        id,
+        stack: Vec::new(),
+        roots: 0,
+        component_id: false,
+        capture: None,
+    };
+    loop {
+        match rd
+            .read_event()
+            .map_err(|_| metainfo_bad("is not valid XML"))?
+        {
+            Event::Eof => break,
+            Event::DocType(_) => return Err(metainfo_bad("has a DOCTYPE")),
+            Event::PI(_) => return Err(metainfo_bad("has a processing instruction")),
+            Event::Comment(_) => {}
+            Event::Decl(d) => match d.encoding() {
+                None => {}
+                Some(Ok(enc)) if enc.eq_ignore_ascii_case("utf-8") => {}
+                Some(_) => return Err(metainfo_bad("is not UTF-8")),
+            },
+            Event::GeneralRef(r) => {
+                if st.capture.is_some() {
+                    return Err(metainfo_bad("has an entity where an ID is read"));
+                }
+                if !r.is_char_ref() && quick_xml::escape::resolve_predefined_entity(&r).is_none() {
+                    return Err(metainfo_bad("has an entity"));
+                }
+            }
+            Event::Text(t) => {
+                if let Some((_, c)) = st.capture.as_mut() {
+                    c.push_str(&t);
+                }
+            }
+            Event::CData(t) => {
+                if let Some((_, c)) = st.capture.as_mut() {
+                    c.push_str(&t);
+                }
+            }
+            Event::Start(e) => st.start(&e)?,
+            Event::Empty(e) => {
+                st.start(&e)?;
+                st.finish()?;
+            }
+            Event::End(_) => st.finish()?,
+        }
+    }
+    if st.roots != 1 || !st.component_id {
+        return Err(metainfo_bad("must be one <component> with the app's ID"));
+    }
+    Ok(())
+}
+
+/// The elements of AppStream metainfo that a desktop app uses, and what each
+/// may hold. `None`: not an element the Store copies. An empty list: text only.
+/// Not on it, so refused: `bundle`, `pkgname`, `source_pkgname`, `replaces`,
+/// `extends`, `suggests`, `artifacts`, `reviews`, `agreement`, `tags`, `info`...
+fn metainfo_children(element: &str) -> Option<&'static [&'static str]> {
+    Some(match element {
+        "component" => &[
+            "id",
+            "name",
+            "summary",
+            "description",
+            "developer",
+            "developer_name",
+            "metadata_license",
+            "project_license",
+            "url",
+            "launchable",
+            "provides",
+            "categories",
+            "keywords",
+            "screenshots",
+            "releases",
+            "content_rating",
+            "branding",
+            "requires",
+            "recommends",
+            "supports",
+            "custom",
+            "translation",
+            "icon",
+            "name_variant_suffix",
+            "project_group",
+            "update_contact",
+            "compulsory_for_desktop",
+            "languages",
+        ],
+        "description" => &["p", "ul", "ol"],
+        "p" | "li" => &["em", "code"],
+        "ul" | "ol" => &["li"],
+        "developer" => &["name"],
+        "provides" => &["id", "binary", "dbus", "mediatype"],
+        "categories" => &["category"],
+        "keywords" => &["keyword"],
+        "screenshots" => &["screenshot"],
+        "screenshot" => &["image", "video", "caption"],
+        "releases" => &["release"],
+        "release" => &["description", "url", "issues"],
+        "issues" => &["issue"],
+        "content_rating" => &["content_attribute"],
+        "branding" => &["color"],
+        "requires" | "recommends" | "supports" => {
+            &["control", "display_length", "internet", "memory", "kernel"]
+        }
+        "custom" => &["value"],
+        "languages" => &["lang"],
+        // Text only.
+        "id"
+        | "name"
+        | "summary"
+        | "developer_name"
+        | "metadata_license"
+        | "project_license"
+        | "url"
+        | "launchable"
+        | "binary"
+        | "dbus"
+        | "mediatype"
+        | "category"
+        | "keyword"
+        | "image"
+        | "video"
+        | "caption"
+        | "issue"
+        | "content_attribute"
+        | "color"
+        | "control"
+        | "display_length"
+        | "internet"
+        | "memory"
+        | "kernel"
+        | "value"
+        | "translation"
+        | "icon"
+        | "name_variant_suffix"
+        | "project_group"
+        | "update_contact"
+        | "compulsory_for_desktop"
+        | "lang"
+        | "em"
+        | "code" => &[],
+        _ => return None,
+    })
+}
+
+fn metainfo_bad(why: &str) -> Error {
+    err(format!("The bundle's metainfo file {why}."))
+}
+
+/// Where `check_metainfo` is in the document.
+struct MetaState<'a> {
+    id: &'a str,
+    stack: Vec<String>,
+    roots: usize,
+    component_id: bool,
+    /// What the text of the open element is for, and the text so far.
+    capture: Option<(&'static str, String)>,
+}
+
+impl MetaState<'_> {
+    fn own(&self, s: &str) -> bool {
+        s == self.id || s.strip_suffix(".desktop") == Some(self.id)
+    }
+
+    fn own_bus(&self, s: &str) -> bool {
+        s == self.id || s.strip_prefix(self.id).is_some_and(|r| r.starts_with('.'))
+    }
+
+    fn start(&mut self, e: &quick_xml::events::BytesStart<'_>) -> Result<(), Error> {
+        let name = e.name().as_ref().to_string();
+        if self.capture.is_some() {
+            return Err(metainfo_bad("has markup where an ID is read"));
+        }
+        if self.stack.len() >= 32 {
+            return Err(metainfo_bad("is nested too deeply"));
+        }
+        let shown = crate::text::clean(&name, 40);
+        match self.stack.last() {
+            None => {
+                self.roots += 1;
+                if name != "component" || self.roots > 1 {
+                    return Err(metainfo_bad("must be one <component>"));
+                }
+            }
+            Some(parent) => {
+                let allowed = metainfo_children(parent).is_some_and(|c| c.contains(&name.as_str()));
+                if !allowed {
+                    return Err(if metainfo_children(&name).is_some() {
+                        metainfo_bad(&format!("has <{shown}> where it does not belong"))
+                    } else {
+                        metainfo_bad(&format!(
+                            "has an element the Store does not copy (<{shown}>)"
+                        ))
+                    });
+                }
+            }
+        }
+        let path: Vec<&str> = self.stack.iter().map(String::as_str).collect();
+        let attr = |key: &str| -> Result<Option<String>, Error> {
+            for a in e.attributes().flatten() {
+                if a.key.as_ref() == key {
+                    if a.value.contains('&') {
+                        return Err(metainfo_bad("has an entity where an ID is read"));
+                    }
+                    return Ok(Some(a.value.to_string()));
+                }
+            }
+            Ok(None)
+        };
+        self.capture = match (path.as_slice(), name.as_str()) {
+            (["component"], "id") => Some(("id", String::new())),
+            (["component", "provides"], "id") => Some(("provides-id", String::new())),
+            (["component", "provides"], "dbus") => Some(("dbus", String::new())),
+            (["component"], "launchable") => {
+                if attr("type")?.as_deref() != Some("desktop-id") {
+                    return Err(metainfo_bad("launches something that is not the app"));
+                }
+                Some(("launchable", String::new()))
+            }
+            (["component"], "icon") => {
+                if attr("type")?.as_deref() == Some("local") {
+                    return Err(metainfo_bad("names an icon by a file path"));
+                }
+                None
+            }
+            _ => None,
+        };
+        self.stack.push(name);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), Error> {
+        self.stack.pop();
+        let Some((kind, text)) = self.capture.take() else {
+            return Ok(());
+        };
+        let text = text.trim();
+        match kind {
+            "id" => {
+                if self.component_id || !self.own(text) {
+                    return Err(metainfo_bad("must name the app's own ID"));
+                }
+                self.component_id = true;
+            }
+            "provides-id" if !self.own(text) => {
+                return Err(metainfo_bad("provides an ID that is not the app's"));
+            }
+            "dbus" if !self.own_bus(text) => {
+                return Err(metainfo_bad("provides a bus name that is not the app's"));
+            }
+            "launchable" if text != format!("{}.desktop", self.id) => {
+                return Err(metainfo_bad("launches something that is not the app"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Icons are decoded by Qt in the Store and in the desktop shell: a PNG with
+/// a sane size in its header, or a small plain SVG (the checks of
+/// `appimage::meta::icon_kind`), and the file extension says which.
+fn check_icon(file: &str, bytes: &[u8]) -> Result<(), Error> {
+    use crate::appimage::meta::{IconKind, icon_kind};
+    let want = if file.ends_with(".png") {
+        IconKind::Png
+    } else {
+        IconKind::Svg
+    };
+    if icon_kind(bytes) == Some(want) {
+        Ok(())
+    } else {
+        Err(err(
+            "An icon in the bundle is not a plain PNG (up to 2048 pixels each way) or a plain SVG.",
+        ))
+    }
 }
 
 /// `telamon-<last part of the ID>.notifyrc`, optionally with a `-` or `_`
@@ -299,20 +887,32 @@ fn icon_dir_ok(dir: &str) -> bool {
         })
 }
 
-/// Decides what is copied out of the bundle at `tree`, and reads and rewrites
-/// it. `prefix` is the app's folder as the desktop will run it
+/// Whether `name` is in one of the [`RESERVED_NAMESPACES`].
+pub fn reserved_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    RESERVED_NAMESPACES.iter().any(|p| lower.starts_with(p))
+}
+
+/// Decides what is copied out of the bundle at `tree` (an open folder: every
+/// file is read through it without following a link), and reads, checks and
+/// rewrites it. `prefix` is the app's folder as the desktop will run it
 /// (`<data>/telamon-apps/<id>/current`). Errors name the first thing that is
 /// not allowed.
-pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
+pub fn plan(tree: &Dir, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
     let id = &m.id;
+    if reserved_name(id) {
+        return Err(err(format!(
+            "The app ID {id} is in a name space that belongs to the desktop or another vendor."
+        )));
+    }
     let progs = programs(m);
     let mut exports = Vec::new();
+    let mut bus_names = Vec::new();
     let mut exe = None;
     let mut icons = 0usize;
     let mut desktop = false;
     let read = |rel: &str, max: usize| -> Result<Vec<u8>, Error> {
-        let file = tree.join(rel);
-        match crate::appimage::fsutil::read_private(&file, max as u64) {
+        match tree.read_at(rel, max as u64) {
             Ok(Some(b)) => Ok(b),
             _ => Err(err("A file the bundle shows the desktop cannot be read.")),
         }
@@ -355,10 +955,12 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
                 if icons > MAX_ICONS {
                     return Err(err("The bundle has too many icons."));
                 }
+                let bytes = read(path, MAX_EXPORT)?;
+                check_icon(file, &bytes)?;
                 exports.push(Export {
                     from: path.into(),
                     to: format!("icons/hicolor/{dir}/apps/{file}"),
-                    bytes: read(path, MAX_EXPORT)?,
+                    bytes,
                 });
             }
             ["icons", ..] => {
@@ -374,10 +976,12 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
                         "The bundle's share/metainfo may hold only <app ID>.metainfo.xml.",
                     ));
                 }
+                let bytes = read(path, MAX_EXPORT)?;
+                check_metainfo(&bytes, id)?;
                 exports.push(Export {
                     from: path.into(),
                     to: format!("metainfo/{file}"),
-                    bytes: read(path, MAX_EXPORT)?,
+                    bytes,
                 });
             }
             ["dbus-1", "services", file] => {
@@ -396,6 +1000,12 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
                         "The bundle's D-Bus service file is not named after its bus name.",
                     ));
                 }
+                if reserved_name(&bus) {
+                    return Err(err(format!(
+                        "The D-Bus name {bus} is in a name space that belongs to the desktop or another vendor."
+                    )));
+                }
+                bus_names.push(bus);
                 exports.push(Export {
                     from: path.into(),
                     to: format!("dbus-1/services/{file}"),
@@ -413,10 +1023,12 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
                         "The bundle's share/knotifications6 may hold only telamon-<app name>.notifyrc files named after the app.",
                     ));
                 }
+                let bytes = read(path, MAX_EXPORT)?;
+                check_notifyrc(&bytes)?;
                 exports.push(Export {
                     from: path.into(),
                     to: format!("knotifications6/{file}"),
-                    bytes: read(path, MAX_EXPORT)?,
+                    bytes,
                 });
             }
             _ => {}
@@ -425,16 +1037,125 @@ pub fn plan(tree: &Path, m: &Manifest, prefix: &Path) -> Result<Plan, Error> {
     if exports.len() > MAX_EXPORTS {
         return Err(err("The bundle shows the desktop too many files."));
     }
-    if !desktop {
+    let (true, Some(exe)) = (desktop, exe) else {
         return Err(err(
             "The bundle has no desktop entry (share/applications/<app ID>.desktop).",
         ));
-    }
+    };
     exports.sort_by(|a, b| a.to.cmp(&b.to));
+    bus_names.sort();
     Ok(Plan {
         exports,
-        exe: format!("bin/{}", exe.expect("set with the desktop entry")),
+        exe: format!("bin/{exe}"),
+        bus_names,
     })
+}
+
+/// Most `.service` files read from the system's D-Bus folders, and the most
+/// bytes of each.
+const MAX_SYSTEM_SERVICES: usize = 2000;
+const MAX_SYSTEM_SERVICE_BYTES: u64 = 64 * 1024;
+
+/// The bundle must not stand in for something the system already provides.
+/// The user's data folder comes first in every search path, so a file of the
+/// bundle with the same relative path as one in a system data folder would
+/// replace it, and the session bus starts the first service file it finds for
+/// a name. Refused when:
+///
+/// - any file the bundle would copy exists, at the same relative path, in a
+///   system data folder (`dirs`: `/usr/share`, `/usr/local/share`, Flatpak's
+///   exports...);
+/// - the app ID, or a D-Bus name the bundle declares, is claimed (by file name
+///   or by the `Name` inside) by a system `dbus-1/services/*.service` file;
+///   a service file the Store cannot read or understand claims nothing, and
+///   more than 2000 of them are too many to check (refused).
+pub fn check_system(plan: &Plan, id: &str, system: &[PathBuf]) -> Result<(), Error> {
+    for dir in system {
+        if dir
+            .join("applications")
+            .join(format!("{id}.desktop"))
+            .exists()
+            || dir
+                .join("dbus-1/services")
+                .join(format!("{id}.service"))
+                .exists()
+        {
+            return Err(err(format!(
+                "An app with the ID {id} is already on this computer. The Store won't install over it."
+            )));
+        }
+        for e in &plan.exports {
+            if std::fs::symlink_metadata(dir.join(&e.to)).is_ok() {
+                return Err(err(format!(
+                    "{} is already provided by the system. The Store won't install over it.",
+                    e.to
+                )));
+            }
+        }
+    }
+    let mut names: Vec<&str> = vec![id];
+    names.extend(plan.bus_names.iter().map(String::as_str));
+    let mut seen = 0usize;
+    for dir in system {
+        let svc = dir.join("dbus-1/services");
+        let Ok(rd) = std::fs::read_dir(&svc) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let Some(stem) = file.strip_suffix(".service") else {
+                continue;
+            };
+            seen += 1;
+            if seen > MAX_SYSTEM_SERVICES {
+                return Err(err(
+                    "There are too many D-Bus services on this computer to check the app's name against.",
+                ));
+            }
+            if names.contains(&stem) {
+                return Err(err(format!(
+                    "The D-Bus name {stem} is already used by a service on this computer."
+                )));
+            }
+            let Some(claimed) = system_service_name(&entry.path()) else {
+                continue;
+            };
+            if names.contains(&claimed.as_str()) {
+                return Err(err(format!(
+                    "The D-Bus name {claimed} is already used by a service on this computer."
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `Name` of a system D-Bus service file, if it can be read (at most
+/// 64 KiB; links are followed, Flatpak's exports are links). Opened without
+/// waiting and only a regular file is read: one of the folders is the user's
+/// (`~/.local/share/flatpak/exports/share`), where a FIFO could be planted
+/// to hold the install, which has the lock, for ever.
+fn system_service_name(path: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SYSTEM_SERVICE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SYSTEM_SERVICE_BYTES {
+        return None;
+    }
+    let kf = KeyFile::parse(&bytes, &limits()).ok()?;
+    kf.raw("D-BUS Service", "Name").map(str::to_string)
 }
 
 #[cfg(test)]
@@ -617,5 +1338,683 @@ mod tests {
                 && !icon_dir_ok("../x")
                 && !icon_dir_ok("48")
         );
+    }
+
+    // ---- the text the Store copies is read the same by everyone ----
+
+    #[test]
+    fn control_characters_and_odd_line_ends_are_refused() {
+        for (what, text) in [
+            (
+                "vertical tab",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=a\x0Bb\n",
+            ),
+            (
+                "form feed",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=a\x0Cb\n",
+            ),
+            (
+                "lone CR in a comment",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n# a\rExec=sh\n",
+            ),
+            (
+                "lone CR before a key",
+                "[Desktop Entry]\rType=Application\nName=X\nExec=telamon-gates\n",
+            ),
+            (
+                "CR at the end",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\r",
+            ),
+            (
+                "escape",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=\x1b[2J\n",
+            ),
+            (
+                "DEL",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=\x7f\n",
+            ),
+            (
+                "NEL",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=a\u{85}Exec=sh\n",
+            ),
+            (
+                "line separator",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nComment=a\u{2028}Exec=sh\n",
+            ),
+            (
+                "paragraph separator",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n#a\u{2029}Exec=sh\n",
+            ),
+            (
+                "byte order mark",
+                "\u{feff}[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n",
+            ),
+            (
+                "bidi override",
+                "[Desktop Entry]\nType=Application\nName=X\u{202e}\nExec=telamon-gates\n",
+            ),
+            (
+                "NBSP before a key",
+                "[Desktop Entry]\nType=Application\nName=X\n\u{a0}Exec=telamon-gates\n",
+            ),
+            (
+                "space before a key",
+                "[Desktop Entry]\nType=Application\nName=X\n Exec=telamon-gates\n",
+            ),
+            (
+                "tab before a key",
+                "[Desktop Entry]\nType=Application\nName=X\n\tExec=telamon-gates\n",
+            ),
+            (
+                "space before a group",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n [Other]\nExec=sh\n",
+            ),
+        ] {
+            assert!(rewrite(text).is_err(), "{what}");
+        }
+        // TAB and CRLF are fine.
+        let ok = "[Desktop Entry]\r\nType=Application\r\nName=\tX\r\nExec=telamon-gates\r\n";
+        assert!(rewrite(ok).is_ok());
+        // A TAB in the folder name cannot be written in a launcher.
+        assert!(rewrite_desktop(GOOD.as_bytes(), ID, "1", Path::new("/a\tb"), &progs()).is_err());
+    }
+
+    #[test]
+    fn a_service_file_with_control_characters_is_refused() {
+        for bad in [
+            "[D-BUS Service]\nName=net.eterneon.telamon.gates\nExec=telamon-gates\n# x\rExec=sh\n",
+            "[D-BUS Service]\nName=net.eterneon.telamon.gates\nExec=telamon-gates\x0B\n",
+            "[D-BUS Service]\nName=net.eterneon.telamon.gates\nExec=telamon-gates\n\u{a0}User=root\n",
+            "[D-BUS Service]\nName=net.eterneon.telamon.gates\nName=net.eterneon.telamon.gates.Other\nExec=telamon-gates\n",
+            "[D-BUS Service]\nName=net.eterneon.telamon.gates\nExec=telamon-gates\n[D-BUS Service]\nExec=sh\n",
+        ] {
+            assert!(
+                rewrite_dbus(bad.as_bytes(), ID, "1", Path::new("/p"), &progs()).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_groups_and_keys_and_odd_keys_are_refused() {
+        for (what, text) in [
+            (
+                "two main groups",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Desktop Entry]\nName=Y\n",
+            ),
+            (
+                "two groups of another name",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Other]\na=1\n[Other]\nb=2\n",
+            ),
+            (
+                "a repeated key",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nName=Y\n",
+            ),
+            (
+                "a repeated Exec",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nExec=telamon-gates --x\n",
+            ),
+            (
+                "a key with a space",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nExec [de]=sh\n",
+            ),
+            (
+                "a key with a dot",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nA.B=1\n",
+            ),
+            (
+                "a key with a non-ASCII letter",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\nÉxec=1\n",
+            ),
+            (
+                "a group header with text after it",
+                "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Other] x\n",
+            ),
+        ] {
+            assert!(rewrite(text).is_err(), "{what}");
+        }
+        // Spaces around the equals sign, a locale and a TAB value are fine.
+        assert!(
+            rewrite("[Desktop Entry]\nType = Application\nName[zh_CN]=Z\nName = X\nExec =\ttelamon-gates\n").is_ok()
+        );
+    }
+
+    #[test]
+    fn an_exec_in_any_group_is_rewritten_or_refused() {
+        let ok = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[X-Other Thing]\nExec=telamon-gates --y\n";
+        let (text, _) = rewrite(ok).unwrap();
+        assert_eq!(text.matches("Exec=/home/u/").count(), 2, "{text}");
+        let bad = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[X-Other Thing]\nExec=sh -c evil\n";
+        assert!(rewrite(bad).is_err());
+        let bad = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Desktop Action a]\nExec[de]=sh\n";
+        assert!(rewrite(bad).is_err());
+    }
+
+    #[test]
+    fn keys_that_load_or_run_something_are_not_copied() {
+        let text = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n\
+            X-KDE-Library=evil\nX-KDE-Library[de]=evil\nX-KDE-ServiceTypes=KParts/ReadOnlyPart\nImplements=org.gnome.Shell.SearchProvider2\n\
+            X-KDE-Protocols=http,https\nX-KDE-Init=evil\nX-KDE-SubstituteUID=true\nX-KDE-Username=root\n\
+            X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input\nX-KDE-DBUS-Restricted-Interfaces=org.kde.kwin.Screenshot\n\
+            X-Flatpak=org.mozilla.firefox\nX-Flatpak-Tags=x\nX-SnapInstanceName=x\nX-AppImage-Version=1\nX-Telamon-AppImage=true\n\
+            X-KDE-PluginInfo-Name=x\n\
+            MimeType=text/plain;\nKeywords=a;b;\nX-KDE-StartupNotify=true\nCategories=Utility;\nStartupNotify=true\n";
+        let (out, _) = rewrite(text).unwrap();
+        for dropped in [
+            "X-KDE-Library",
+            "X-KDE-ServiceTypes",
+            "Implements",
+            "X-KDE-Protocols",
+            "X-KDE-Init",
+            "X-KDE-SubstituteUID",
+            "X-KDE-Username",
+            "X-KDE-Wayland-Interfaces",
+            "X-KDE-DBUS-Restricted-Interfaces",
+            "X-Flatpak",
+            "X-SnapInstanceName",
+            "X-AppImage",
+            "X-Telamon-AppImage",
+            "X-KDE-PluginInfo",
+        ] {
+            assert!(!out.contains(dropped), "{dropped} was copied:\n{out}");
+        }
+        for kept in [
+            "MimeType=text/plain;",
+            "Keywords=a;b;",
+            "X-KDE-StartupNotify=true",
+            "Categories=Utility;",
+            "StartupNotify=true",
+        ] {
+            assert!(out.contains(kept), "{kept} was dropped:\n{out}");
+        }
+        // The Store's marker is the only X-Telamon key.
+        assert_eq!(out.matches("X-Telamon-").count(), 2, "{out}");
+    }
+
+    // ---- the quoted program path, against two independent readers ----
+
+    /// The Desktop Entry specification's unquoting of an `Exec` value (after
+    /// the key-file string was unescaped): double quotes group, inside them a
+    /// backslash makes the next character literal, `%%` is a `%`.
+    fn unquote_spec(v: &str) -> Option<Vec<String>> {
+        let mut args = Vec::new();
+        let mut cur = String::new();
+        let mut started = false;
+        let mut quoted = false;
+        let mut it = v.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '"' => {
+                    quoted = !quoted;
+                    started = true;
+                }
+                '\\' if quoted => cur.push(it.next()?),
+                '%' if it.peek() == Some(&'%') => {
+                    it.next();
+                    cur.push('%');
+                    started = true;
+                }
+                ' ' | '\t' if !quoted => {
+                    if started {
+                        args.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    started = true;
+                }
+            }
+        }
+        if quoted {
+            return None;
+        }
+        if started {
+            args.push(cur);
+        }
+        Some(args)
+    }
+
+    /// GLib's `g_shell_parse_argv` (what GIO's launcher uses) after the same
+    /// `%%` step: in double quotes a backslash escapes only `$`, `` ` ``, `"`,
+    /// `\` and a newline, otherwise it stays; outside quotes it escapes
+    /// anything; single quotes are literal.
+    fn unquote_glib(v: &str) -> Option<Vec<String>> {
+        let v = v.replace("%%", "%");
+        let mut args = Vec::new();
+        let mut cur = String::new();
+        let mut started = false;
+        let mut it = v.chars();
+        while let Some(c) = it.next() {
+            match c {
+                ' ' | '\t' | '\n' => {
+                    if started {
+                        args.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                '\'' => {
+                    started = true;
+                    loop {
+                        match it.next()? {
+                            '\'' => break,
+                            c => cur.push(c),
+                        }
+                    }
+                }
+                '"' => {
+                    started = true;
+                    loop {
+                        match it.next()? {
+                            '"' => break,
+                            '\\' => match it.next()? {
+                                c @ ('$' | '`' | '"' | '\\') => cur.push(c),
+                                '\n' => {}
+                                c => {
+                                    cur.push('\\');
+                                    cur.push(c);
+                                }
+                            },
+                            c => cur.push(c),
+                        }
+                    }
+                }
+                '\\' => {
+                    started = true;
+                    cur.push(it.next()?);
+                }
+                c => {
+                    started = true;
+                    cur.push(c);
+                }
+            }
+        }
+        if started {
+            args.push(cur);
+        }
+        Some(args)
+    }
+
+    /// xorshift: a few thousand reproducible random folder names.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn the_program_path_always_comes_back_as_one_argument() {
+        const ALPHABET: &[char] = &[
+            ' ', ' ', '"', '\'', '$', '`', '\\', '\\', '%', '%', ';', 'é', '日', '#', '~', '(',
+            ')', '>', '<', '|', '&', '*', '?', '{', '}', '!', '=', ',', '[', ']', 'a', 'b', 'Z',
+            '1', '-', '.', '_',
+        ];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut prefixes: Vec<String> = Vec::new();
+        for _ in 0..3000 {
+            let parts = 1 + rng.next() % 4;
+            let mut p = String::new();
+            for _ in 0..parts {
+                p.push('/');
+                let n = 1 + rng.next() % 12;
+                for _ in 0..n {
+                    p.push(ALPHABET[(rng.next() % ALPHABET.len() as u64) as usize]);
+                }
+            }
+            prefixes.push(p);
+        }
+        // Long ones: 2000 characters of everything awkward, and a deep one.
+        prefixes.push(format!("/{}", "a b\"$`\\%;é".repeat(180)));
+        prefixes.push(
+            format!("/{}", "x/".repeat(900))
+                .trim_end_matches('/')
+                .to_string(),
+        );
+        let mut done = 0;
+        for prefix in prefixes {
+            let (bytes, _) =
+                match rewrite_desktop(GOOD.as_bytes(), ID, "1", Path::new(&prefix), &progs()) {
+                    Ok(v) => v,
+                    Err(e) => panic!("{prefix:?}: {e}"),
+                };
+            let text = String::from_utf8(bytes).unwrap();
+            for line in text.lines().filter(|l| l.starts_with("Exec=")) {
+                let kf_text = format!("[Desktop Entry]\n{line}\n");
+                let exec = KeyFile::parse(kf_text.as_bytes(), &limits())
+                    .unwrap()
+                    .string("Desktop Entry", "Exec")
+                    .unwrap()
+                    .unwrap();
+                let a = unquote_spec(&exec).unwrap();
+                let b = unquote_glib(&exec).unwrap();
+                assert_eq!(a, b, "{exec:?}");
+                assert_eq!(a[0], format!("{prefix}/bin/telamon-gates"), "{line}");
+                assert_eq!(a.len(), 2, "{line}");
+                assert!(a[1] == "%U" || a[1] == "--new", "{line}");
+            }
+            done += 1;
+        }
+        assert_eq!(done, 3002);
+    }
+
+    #[test]
+    fn a_folder_name_that_cannot_be_quoted_is_refused_not_changed() {
+        for prefix in [
+            "/home/a\nb/x",
+            "/home/a\tb\x07/x",
+            "/home/\u{202e}x",
+            "/home/a\u{2028}b",
+        ] {
+            assert!(
+                rewrite_desktop(GOOD.as_bytes(), ID, "1", Path::new(prefix), &progs()).is_err(),
+                "{prefix:?}"
+            );
+        }
+        // Not text.
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(std::ffi::OsStr::from_bytes(b"/home/\xffx"));
+        assert!(rewrite_desktop(GOOD.as_bytes(), ID, "1", odd, &progs()).is_err());
+        // Too long to read back (the key-file value limit): an error, never a wrong path.
+        let long = format!("/{}", "\\".repeat(5000));
+        assert!(rewrite_desktop(GOOD.as_bytes(), ID, "1", Path::new(&long), &progs()).is_err());
+    }
+
+    // ---- notification files and metainfo ----
+
+    #[test]
+    fn a_notification_file_may_not_run_a_command_or_write_a_log() {
+        let ok = b"[Global]\nIconName=x\nComment=Telamon Gates\n\n[Event/m]\nName=Message\nAction=Popup|Sound\nSound=message-new\n";
+        assert!(check_notifyrc(ok).is_ok());
+        for bad in [
+            "[Event/m]\nAction=Execute\nExecute=/usr/bin/konsole\n",
+            "[Event/m]\nAction=Popup|Execute\n",
+            "[Event/m]\nAction=popup|EXECUTE\n",
+            "[Event/m]\nExecute=sh\n",
+            "[Event/m]\nExecute[de]=sh\n",
+            "[Event/m]\nexecute=sh\n",
+            "[Event/m]\nAction[$e]=Execute\n",
+            "[Event/m]\nAction=Logfile\nLogfile=/home/u/.bashrc\n",
+            "[Event/m]\nLogfile=/home/u/.bashrc\n",
+            "[Event/m]\nAction=Popup\n[Event/m]\nAction=Execute\n",
+            "[Event/m]\nAction=Popup\n# x\rExecute=sh\n",
+            "not a key file\n",
+            "Action=Popup\n",
+        ] {
+            assert!(check_notifyrc(bad.as_bytes()).is_err(), "{bad:?}");
+        }
+    }
+
+    fn meta(body: &str) -> Vec<u8> {
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<component type=\"desktop-application\">{body}</component>\n").into_bytes()
+    }
+
+    #[test]
+    fn metainfo_is_one_component_with_the_apps_own_id() {
+        for ok in [
+            meta(&format!("<id>{ID}</id><name>x</name>")),
+            meta(&format!("<id>{ID}.desktop</id>")),
+            meta(&format!(
+                "<id>{ID}</id><provides><id>{ID}.desktop</id><dbus type=\"session\">{ID}.Service</dbus><binary>telamon-gates</binary></provides><launchable type=\"desktop-id\">{ID}.desktop</launchable>"
+            )),
+            meta(&format!("<id><![CDATA[{ID}]]></id>")),
+            meta(&format!(
+                "<id>{ID}</id><description><p>a &amp; b &lt; &#65;</p></description><launchable type=\"desktop-id\">{ID}.desktop</launchable>"
+            )),
+        ] {
+            check_metainfo(&ok, ID)
+                .unwrap_or_else(|e| panic!("{}: {e}", String::from_utf8_lossy(&ok)));
+        }
+        let deep = format!("<id>{ID}</id>{}", "<a>".repeat(40) + &"</a>".repeat(40));
+        let huge = format!(
+            "<id>{ID}</id><description>{}</description>",
+            "x".repeat(1024 * 1024)
+        );
+        let nested = |inner: &str| meta(&format!("<id>{ID}</id>{inner}"));
+        for (what, bad) in [
+            ("no id", meta("<name>x</name>")),
+            ("another id", meta("<id>org.mozilla.firefox</id>")),
+            ("an id that only starts with ours", meta(&format!("<id>{ID}x</id>"))),
+            ("two ids", meta(&format!("<id>{ID}</id><id>{ID}</id>"))),
+            ("an id with a child", meta(&format!("<id>{ID}<b>x</b></id>"))),
+            ("an id with an entity", meta(&format!("<id>{ID}&#x2e;x</id>"))),
+            ("replaces", nested("<replaces><id>org.kde.dolphin</id></replaces>")),
+            ("extends", nested("<extends>org.kde.dolphin</extends>")),
+            ("a foreign provided id", nested("<provides><id>org.kde.dolphin</id></provides>")),
+            ("a foreign provided bus name", nested("<provides><dbus type=\"session\">org.freedesktop.Notifications</dbus></provides>")),
+            ("a foreign launchable", nested("<launchable type=\"desktop-id\">org.kde.dolphin.desktop</launchable>")),
+            ("a launchable type hidden in an entity", nested("<launchable type=\"desktop&#45;id\">org.kde.dolphin.desktop</launchable>")),
+            ("a component in a component", nested("<component><id>x</id></component>")),
+            ("a package name", nested("<pkgname>coreutils</pkgname>")),
+            ("a source package name", nested("<source_pkgname>coreutils</source_pkgname>")),
+            ("a bundle", nested("<bundle type=\"flatpak\">app/org.mozilla.firefox/x86_64/stable</bundle>")),
+            ("a launchable of another type", nested("<launchable type=\"service\">x.service</launchable>")),
+            ("a launchable with no type", nested(&format!("<launchable>{ID}.desktop</launchable>"))),
+            ("a launchable of a service for a foreign app", nested("<launchable type=\"cockpit-manifest\">x</launchable>")),
+            ("suggests", nested("<suggests><id>org.kde.dolphin</id></suggests>")),
+            ("an id in requires", nested("<requires><id>org.kde.dolphin</id></requires>")),
+            ("artifacts", nested("<releases><release version=\"1\"><artifacts><artifact type=\"binary\"><location>https://evil/x</location></artifact></artifacts></release></releases>")),
+            ("an unknown element", nested("<frobnicate>x</frobnicate>")),
+            ("a known element in the wrong place", nested("<categories><url>x</url></categories>")),
+            ("markup in a leaf", nested("<name>x<b>y</b></name>")),
+            ("an icon by a file path", nested("<icon type=\"local\">/etc/passwd</icon>")),
+            ("a foreign launchable in a provided id", nested("<provides><mediatype>text/x-foo</mediatype><id>org.kde.dolphin.desktop</id></provides>")),
+            ("another encoding", b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><component><id>net.eterneon.telamon.gates</id></component>".to_vec()),
+            ("another encoding in capitals", b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><component><id>net.eterneon.telamon.gates</id></component>".to_vec()),
+            ("too deep", meta(&deep)),
+            ("too large", meta(&huge)),
+            ("a doctype", format!("<?xml version=\"1.0\"?><!DOCTYPE component SYSTEM \"http://evil/x.dtd\"><component><id>{ID}</id></component>").into_bytes()),
+            ("an internal entity", format!("<?xml version=\"1.0\"?><!DOCTYPE c [<!ENTITY e \"x\">]><component><id>{ID}</id><name>&e;</name></component>").into_bytes()),
+            ("an undefined entity", meta(&format!("<id>{ID}</id><name>&e;</name>"))),
+            ("a processing instruction", format!("<?xml version=\"1.0\"?><?xml-stylesheet href=\"http://evil/s.xsl\"?><component><id>{ID}</id></component>").into_bytes()),
+            ("two roots", format!("<component><id>{ID}</id></component><component><id>{ID}</id></component>").into_bytes()),
+            ("a root that is not a component", format!("<components><component><id>{ID}</id></component></components>").into_bytes()),
+            ("not XML", b"<component><id>".to_vec()),
+            ("mismatched tags", meta(&format!("<id>{ID}</ide>"))),
+            ("not text", vec![0xff, 0xfe, b'<']),
+            ("a NUL", meta(&format!("<id>{ID}</id><name>a\0b</name>"))),
+        ] {
+            assert!(check_metainfo(&bad, ID).is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn utf8_declarations_and_none_are_accepted() {
+        for decl in [
+            "",
+            "<?xml version=\"1.0\"?>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+            "<?xml version='1.0' encoding='Utf-8'?>",
+        ] {
+            let xml = format!("{decl}<component><id>{ID}</id></component>");
+            check_metainfo(xml.as_bytes(), ID).unwrap_or_else(|e| panic!("{decl}: {e}"));
+        }
+    }
+
+    #[test]
+    fn what_real_and_specified_metainfo_files_use_is_accepted() {
+        let fixtures: [(&str, &str); 6] = [
+            (
+                "Telamon Gates",
+                include_str!(
+                    "../../tests/fixtures/native/gates-files/net.eterneon.telamon.gates.metainfo.xml"
+                ),
+            ),
+            (
+                "a Qt app",
+                include_str!("../../tests/fixtures/native/metainfo/qt-app.metainfo.xml"),
+            ),
+            (
+                "release notes",
+                include_str!("../../tests/fixtures/native/metainfo/release-notes.metainfo.xml"),
+            ),
+            (
+                "screenshots",
+                include_str!("../../tests/fixtures/native/metainfo/screenshots.metainfo.xml"),
+            ),
+            (
+                "content rating and requirements",
+                include_str!(
+                    "../../tests/fixtures/native/metainfo/content-rating-requires.metainfo.xml"
+                ),
+            ),
+            (
+                "the template",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<component type=\"desktop-application\"><id>net.eterneon.telamon.gates</id><name>x</name></component>",
+            ),
+        ];
+        for (what, xml) in fixtures {
+            check_metainfo(xml.as_bytes(), ID).unwrap_or_else(|e| panic!("{what}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_refused_element_is_named() {
+        let xml = meta(&format!("<id>{ID}</id><pkgname>coreutils</pkgname>"));
+        let e = check_metainfo(&xml, ID).unwrap_err().0;
+        assert!(e.contains("pkgname"), "{e}");
+        let xml = meta(&format!("<id>{ID}</id><bundle>x</bundle>"));
+        assert!(check_metainfo(&xml, ID).unwrap_err().0.contains("bundle"));
+    }
+
+    // ---- translated texts may carry the marks right-to-left scripts need ----
+
+    #[test]
+    fn marks_of_right_to_left_scripts_are_allowed_only_in_translated_values() {
+        let entry = |line: &str| {
+            format!("[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n{line}\n")
+        };
+        // Allowed: LRM, RLM, VS-16 and soft hyphen in the value of Key[locale].
+        for ok in [
+            "Name[ar]=\u{200F}\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}\u{200F}",
+            "Comment[he]=\u{200E}shalom\u{200E}",
+            "Comment[de]=Zu\u{00AD}sammen",
+            "Keywords[ja]=\u{2764}\u{FE0F};\u{FE0F}",
+            "GenericName[fa]=a\u{200F}b",
+        ] {
+            assert!(rewrite(&entry(ok)).is_ok(), "{ok:?}");
+        }
+        // Refused everywhere else.
+        for bad in [
+            "Name=\u{200F}x",
+            "Comment=Zu\u{00AD}sammen",
+            "Comment=\u{FE0F}",
+            "Name[ar]\u{200F}=x",
+            "N\u{200E}ame[ar]=x",
+            "Name[a\u{200F}r]=x",
+            "Exec[ar]=\u{200F}telamon-gates",
+            "# \u{200F} a comment",
+        ] {
+            assert!(rewrite(&entry(bad)).is_err(), "{bad:?}");
+        }
+        let group = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon-gates\n[Desktop Action a\u{200F}]\nName=y\n";
+        assert!(rewrite(group).is_err());
+        let exec = "[Desktop Entry]\nType=Application\nName=X\nExec=telamon\u{200F}-gates\n";
+        assert!(rewrite(exec).is_err());
+        // Still refused in translated values: overrides and isolates, line and
+        // paragraph separators, zero-width space and word joiner.
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{2028}', '\u{2029}', '\u{200B}', '\u{2060}', '\u{FEFF}',
+            '\u{0085}', '\u{034F}',
+        ] {
+            let line = format!("Name[ar]=a{c}b");
+            assert!(rewrite(&entry(&line)).is_err(), "{c:?}");
+        }
+        // The same holds for notification and service files.
+        let rc = "[Global]\nName[ar]=\u{200F}x\n[Event/m]\nAction=Popup\n";
+        assert!(check_notifyrc(rc.as_bytes()).is_ok());
+        assert!(check_notifyrc("[Global]\nName=\u{200F}x\n".as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_marks_survive_the_rewrite() {
+        let text = "[Desktop Entry]\nType=Application\nName=X\nName[ar]=\u{200F}\u{0645}\u{200F}\nExec=telamon-gates\n";
+        let (out, _) = rewrite(text).unwrap();
+        assert!(out.contains("Name[ar]=\u{200F}\u{0645}\u{200F}\n"), "{out}");
+    }
+
+    // ---- notification actions are read as KConfig reads them ----
+
+    #[test]
+    fn escaped_spellings_of_execute_are_still_execute() {
+        for bad in [
+            "Action=Popup|Ex\\x65cute",
+            "Action=Popup|\\x45xecute",
+            "Action=Popup|E\\x78\\x65cute",
+            "Action=Log\\x66ile",
+            "Action=Popup|EXECUT\\x45",
+            "Action=\\x45\\x58\\x45\\x43\\x55\\x54\\x45",
+            "Action=Ex\\ecute",
+            "Action[$e]=Ex\\x65cute",
+        ] {
+            let rc = format!("[Event/m]\n{bad}\n");
+            assert!(check_notifyrc(rc.as_bytes()).is_err(), "{bad}");
+        }
+        assert_eq!(
+            kconfig_unescape("a\\x65b\\s\\t\\n\\\\\\;\\q\\x"),
+            "aeb \t\n\\;qx"
+        );
+        assert_eq!(kconfig_unescape("\\x4"), "\u{4}");
+        assert!(check_notifyrc(b"[Event/m]\nAction=Popup|Sound|Taskbar\n").is_ok());
+        assert!(check_notifyrc(b"[Event/m]\nAction=Pop\\x75p\n").is_ok());
+    }
+
+    #[test]
+    fn icons_are_checked_for_what_qt_will_decode() {
+        let png = |w: u32, h: u32| {
+            let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+            b.extend_from_slice(&w.to_be_bytes());
+            b.extend_from_slice(&h.to_be_bytes());
+            b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        };
+        assert!(check_icon("a.png", &png(512, 512)).is_ok());
+        assert!(check_icon("a.png", &png(2048, 2048)).is_ok());
+        for (what, name, bytes) in [
+            ("too wide", "a.png", png(2049, 16)),
+            ("a huge image", "a.png", png(60_000, 60_000)),
+            ("an empty image", "a.png", png(0, 16)),
+            ("not an image", "a.png", b"png".to_vec()),
+            ("an SVG named png", "a.png", b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            ("a PNG named svg", "a.svg", png(16, 16)),
+            ("an SVG that loads a file", "a.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///etc/passwd\"/></svg>".to_vec()),
+            ("an SVG with a script", "a.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x</script></svg>".to_vec()),
+            ("an SVG with an entity", "a.svg", b"<!DOCTYPE svg [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><svg/>".to_vec()),
+            ("empty", "a.svg", Vec::new()),
+        ] {
+            assert!(check_icon(name, &bytes).is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn reserved_names() {
+        for r in [
+            "org.freedesktop.portal",
+            "org.freedesktop.portal.Desktop",
+            "org.kde.dolphin",
+            "ORG.GNOME.Shell",
+            "org.gtk.Settings",
+            "org.mate.x",
+            "org.xfce.x",
+            "org.flatpak.Helper",
+            "org.fedoraproject.x.y",
+            "org.mozilla.firefox",
+            "com.canonical.x.y",
+        ] {
+            assert!(reserved_name(r), "{r}");
+        }
+        for ok in [
+            "net.eterneon.telamon.gates",
+            "org.example.App",
+            "org.kdex.a.b",
+            "io.github.x.y",
+        ] {
+            assert!(!reserved_name(ok), "{ok}");
+        }
     }
 }

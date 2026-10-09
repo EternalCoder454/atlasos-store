@@ -375,6 +375,7 @@ pub fn http_fetch(url: &str) -> Result<Vec<u8>, NetError> {
             accept: "application/json",
             max_bytes: MAX_BODY,
             timeout: TIMEOUT,
+            hosts: net::Hosts::Only(net::FLATHUB_HOSTS),
         },
     )
 }

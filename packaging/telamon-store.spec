@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-store
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Telamon Store, the app store of Telamon OS
 License:        MIT
@@ -21,6 +21,8 @@ BuildRequires:  rust
 BuildRequires:  rust-srpm-macros
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
+# readelf, for scripts/check-hardening.sh in %%check
+BuildRequires:  binutils
 BuildRequires:  cmake
 BuildRequires:  ninja-build
 BuildRequires:  corrosion
@@ -92,7 +94,12 @@ export CARGO_HOME=${CARGO_HOME:-%{_builddir}/cargo-home}
 # are Fedora's plus the same remap for the C++ CMake builds, so that two
 # builds of one commit give the same build ID. These flags split on spaces,
 # so _topdir must have none (build-rpm.sh's hasn't).
-export RUSTFLAGS="%{build_rustflags} --remap-path-prefix=$PWD=. --remap-path-prefix=$CARGO_HOME=cargo"
+# -Crelocation-model=pic is rustc's default on x86_64 Linux, set here so the
+# staticlib stays position independent (the executable is PIE) whatever
+# Fedora's macro does. RELRO, BIND_NOW, the non-executable stack and PIE are
+# decided by the final link, which is the C++ one: CMake takes %%{build_ldflags}
+# (-z relro -z now, the hardened specs) from LDFLAGS; %%check proves it.
+export RUSTFLAGS="%{build_rustflags} -Crelocation-model=pic --remap-path-prefix=$PWD=. --remap-path-prefix=$CARGO_HOME=cargo"
 export HOST_CXXFLAGS="-ffile-prefix-map=$PWD=. -ffile-prefix-map=$CARGO_HOME=cargo"
 export CFLAGS="%{build_cflags} -ffile-prefix-map=$PWD=."
 export CXXFLAGS="%{build_cxxflags} -ffile-prefix-map=$PWD=."
@@ -137,6 +144,9 @@ if [ "$rc" != 1 ]; then
     echo "telamon-store holds the build path %{_builddir} (grep status $rc)" >&2
     exit 1
 fi
+# PIE, full RELRO (BIND_NOW), non-executable stack, no text relocations,
+# stack protector: the build fails if the link lost any of them.
+scripts/check-hardening.sh %{buildroot}%{_bindir}/telamon-store
 desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.telamon.store.desktop
 desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.store.desktop
 test "$(readlink %{buildroot}%{_bindir}/atlas-store)" = telamon-store
@@ -160,6 +170,22 @@ appstream-util validate-relax --nonet \
 %{_datadir}/knotifications6/telamon-store.notifyrc
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.5.0-1
+- Secure phase. Native Telamon apps now need a signature: a release is offered
+  and installed only when its telamon-bundle.json carries a minisign signature
+  from a key the catalog lists for that app, and never over a newer version.
+  Bundles are unpacked and installed through open directories (no symlink
+  races), cannot shadow system menu entries, D-Bus services or notification
+  files, and have their desktop, metainfo and notification files checked.
+  The AppImage inspector runs under a seccomp allowlist, gpgv under a syscall
+  denylist; SVG icons are tokenized and checked. Fetches go only to GitHub's
+  and Flathub's hosts, redirects included. flatpak and systemd-run are started
+  from /usr/bin, a removal acts on the installation the dialog named, and only
+  Flathub's own address can mark an app Verified. The RPM is checked for
+  PIE/BIND_NOW/RELRO, release builds check integer overflow, CI runs
+  cargo-deny, property tests and fuzz targets for the parsers. See
+  docs/SECURITY.md.
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.0-1
 - Native Telamon apps: apps that are not in the OS image (Telamon Gates) are
   installed for the user from the GitHub release of their repository, with no

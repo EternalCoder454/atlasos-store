@@ -135,6 +135,59 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     result
 }
 
+/// Like [`write_atomic`], but never over a file that is already there: the
+/// rename fails with `AlreadyExists` and the temporary is removed.
+pub fn write_atomic_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let tmp = temp_sibling(path);
+    let result = (|| {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        rename_noreplace(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// A program of the system by name, from the system's folders only
+/// (`/usr/bin`, `/bin`): the `PATH` of a user session holds folders the user
+/// (and any program running as them) can write to, and a planted program of
+/// the same name there must not be the one that runs. `None` when it is not
+/// installed.
+pub fn system_program(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    ["/usr/bin", "/bin"]
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+/// Marks every descriptor from `first` up close-on-exec, so a program started
+/// next does not inherit what the Store (or a library in it) left open. Only
+/// system calls, so it is safe between fork and exec (`pre_exec`). Kernels
+/// before 5.11 lack the call: nothing happens there.
+pub fn cloexec_from(first: u32) {
+    // CLOSE_RANGE_CLOEXEC = 4.
+    // SAFETY: close_range only changes flags of this process's descriptors.
+    unsafe {
+        libc::syscall(libc::SYS_close_range, first, u32::MAX, 4u32);
+    }
+}
+
 /// An open regular file, not through a link, for reading.
 pub fn open_regular(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()

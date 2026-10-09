@@ -1,15 +1,20 @@
 name: Audit
 
-# Known vulnerabilities, unmaintained and yanked crates in the locked
-# dependencies (RustSec), and crates only from crates.io and atlas-framework
-# (settings in deny.toml). Weekly too, so a new
-# advisory against an unchanged lock is still seen.
+# The locked dependencies against four checks (settings in deny.toml): known
+# vulnerabilities, unmaintained and yanked crates (RustSec); banned crates
+# (no OpenSSL; no `*` requirements); licences; and crates only from
+# crates.io and atlas-framework's and Telamon Updater's repositories.
+# Weekly too, so a new advisory against an unchanged lock is still seen.
+#
+# `cargo audit` is not run as well: it reads the same RustSec database as
+# `cargo deny`, so it would find the same advisories, and it is not packaged
+# for Fedora (building it takes minutes and adds a tool compiled in CI).
 on:
   push:
     branches: [main, beta]
-    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'deny.toml', '.github/workflows/audit.yml']
+    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'fuzz/Cargo.lock', 'deny.toml', '.github/workflows/audit.yml']
   pull_request:
-    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'deny.toml', '.github/workflows/audit.yml']
+    paths: ['Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'fuzz/Cargo.lock', 'deny.toml', '.github/workflows/audit.yml']
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
@@ -35,5 +40,10 @@ jobs:
           persist-credentials: false
       # A fresh container has no advisory database: if it can't be fetched,
       # the check fails rather than passing.
-      - name: cargo deny
-        run: cargo deny --locked check advisories sources
+      - name: cargo deny, all four checks
+        run: cargo deny --locked check advisories bans licenses sources
+      # The fuzz crate is not shipped and has its own lock: its licences
+      # (libFuzzer's NCSA) are not the package's, but a vulnerable or
+      # yanked crate or a stray source there is still reported.
+      - name: cargo deny, fuzz crate
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check --config deny.toml advisories sources

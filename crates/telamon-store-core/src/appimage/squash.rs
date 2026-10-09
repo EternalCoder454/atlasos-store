@@ -167,8 +167,11 @@ pub fn check_superblock(
     if !COMPRESSORS.contains(&compressor) {
         return Err(SquashError::Unsupported);
     }
+    // `block_log` is a 16-bit field of the file: shifting by it unchecked
+    // panics (or wraps) for anything over 63.
     if !(4096..=1 << 20).contains(&block_size)
         || !block_size.is_power_of_two()
+        || block_log > 20
         || (1u64 << block_log) != block_size
     {
         return Err(SquashError::Damaged("block size"));
@@ -197,6 +200,66 @@ pub fn check_superblock(
         .unwrap_or(used);
     walk_meta(file, base, inode_table, dir_table, limits.max_meta_blocks)?;
     walk_meta(file, base, dir_table, after_dirs, limits.max_meta_blocks)?;
+    // The id and fragment tables are arrays of offsets of metadata blocks;
+    // backhand seeks to each of them, adding the squashfs's start in the file
+    // with a plain `+`, so an offset near u64::MAX panics (overflow checks on).
+    check_lookup(file, base, id_table, le16(&sb[26..]), 4, used)?;
+    check_lookup(file, base, frag_table, frags, 16, used)?;
+    // backhand reads directory blocks from `dir_table` until it reaches a
+    // pointer it takes from a lookup table: the first entry of the fragment
+    // table, else of the export table (when the superblock says there is
+    // one), else of the id table. A pointer that is not on a block boundary of
+    // the directory table makes it read on, block after block, past the image.
+    let flags = le16(&sb[24..]);
+    let chosen = if frags > 0 && frag_table != absent {
+        frag_table
+    } else if flags & 0x0080 != 0 && export_table != absent {
+        export_table
+    } else {
+        id_table
+    };
+    if chosen.checked_add(8).is_none_or(|e| e > used) {
+        return Err(SquashError::Damaged("lookup table"));
+    }
+    let mut p = [0u8; 8];
+    file.read_exact_at(&mut p, base + chosen)
+        .map_err(|_| SquashError::Damaged("lookup table"))?;
+    let end_ptr = u64::from_le_bytes(p);
+    if !(dir_table + 1..=used).contains(&end_ptr) {
+        return Err(SquashError::Damaged("directory table"));
+    }
+    walk_meta(file, base, dir_table, end_ptr, limits.max_meta_blocks)?;
+    Ok(())
+}
+
+/// A lookup table of `count` entries of `entry` bytes: at `table` an array of
+/// one little-endian u64 per 8 KiB metadata block, each pointing inside the
+/// image (`used` bytes from `base`).
+fn check_lookup(
+    file: &File,
+    base: u64,
+    table: u64,
+    count: u64,
+    entry: u64,
+    used: u64,
+) -> Result<(), SquashError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let blocks = count.div_ceil(META_MAX / entry);
+    let bad = SquashError::Damaged("lookup table");
+    if !(SUPERBLOCK as u64..used).contains(&table) || table + blocks * 8 > used {
+        return Err(bad);
+    }
+    for i in 0..blocks {
+        let mut p = [0u8; 8];
+        file.read_exact_at(&mut p, base + table + i * 8)
+            .map_err(|_| SquashError::Damaged("lookup table"))?;
+        let at = u64::from_le_bytes(p);
+        if !(SUPERBLOCK as u64..used).contains(&at) {
+            return Err(bad);
+        }
+    }
     Ok(())
 }
 
@@ -303,6 +366,40 @@ impl<'a> Tree<'a> {
         if size > cap {
             return Err(SquashError::TooLarge("file"));
         }
+        // backhand allocates every block as big as its size field says before it
+        // reads it, and that field is 31 bits of the file's own: a block is never
+        // larger than the squashfs block size, so an image that says otherwise
+        // (up to 4 GiB) is refused here.
+        let block_max = u64::from(self.fs.block_size);
+        let fragment = self
+            .fs
+            .fragments
+            .as_ref()
+            .and_then(|f| f.get(file.frag_index()));
+        if file
+            .block_sizes()
+            .iter()
+            .any(|b| u64::from(b.size()) > block_max)
+            || fragment.is_some_and(|f| u64::from(f.size.size()) > block_max)
+        {
+            return Err(SquashError::Damaged("block size"));
+        }
+        // backhand slices the decompressed fragment with `block_offset ..
+        // block_offset + (size - blocks * block_size)` without checking either
+        // against the file or the fragment: both come from the image. A file
+        // with a fragment must have its full blocks inside its size and its
+        // tail inside one block.
+        if file.frag_index() != u32::MAX as usize {
+            if fragment.is_none() {
+                return Err(SquashError::Damaged("fragment"));
+            }
+            let full = (file.block_sizes().len() as u64).checked_mul(block_max);
+            let tail = full.and_then(|f| size.checked_sub(f));
+            let end = tail.and_then(|t| t.checked_add(u64::from(file.block_offset())));
+            if end.is_none_or(|e| e > block_max) {
+                return Err(SquashError::Damaged("fragment"));
+            }
+        }
         let used = self.total.get().saturating_add(size);
         if used > self.limits.max_total {
             return Err(SquashError::TooLarge("all files read"));
@@ -310,12 +407,20 @@ impl<'a> Tree<'a> {
         self.total.set(used);
         let mut out = Vec::with_capacity(size as usize);
         // One byte more than the size would show a reader that lies.
-        self.fs
-            .file(file)
-            .reader()
-            .take(size + 1)
-            .read_to_end(&mut out)
-            .map_err(|_| SquashError::Damaged("file data"))?;
+        // backhand's reader slices and subtracts with numbers from the image
+        // that the checks above cannot all know (the decompressed length of a
+        // fragment, for one); a panic there is a damaged image, not a crash.
+        let read = contained(|| {
+            self.fs
+                .file(file)
+                .reader()
+                .take(size + 1)
+                .read_to_end(&mut out)
+        });
+        match read {
+            Some(Ok(_)) => {}
+            _ => return Err(SquashError::Damaged("file data")),
+        }
         if out.len() as u64 != size {
             return Err(SquashError::Damaged("file size"));
         }
@@ -332,6 +437,64 @@ fn map_error(e: &backhand::BackhandError) -> SquashError {
     }
 }
 
+thread_local! {
+    /// How many calls into backhand, whose panics are caught, are running on
+    /// this thread.
+    static IN_BACKHAND: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Whether this thread is inside a call into backhand whose panic is caught
+/// and turned into "damaged" (so a panic hook, such as a fuzzer's, can tell it
+/// from a panic of the Store's own code).
+pub fn in_contained_backhand_call() -> bool {
+    IN_BACKHAND.with(|c| c.get() > 0)
+}
+
+/// Runs `f` (a call into backhand) and turns its panic into `None`.
+fn contained<T>(f: impl FnOnce() -> T) -> Option<T> {
+    IN_BACKHAND.with(|c| c.set(c.get() + 1));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    IN_BACKHAND.with(|c| c.set(c.get() - 1));
+    r.ok()
+}
+
+/// The part of a file from `base` to its end, as a reader of its own: reads
+/// and seeks never overflow, and a position past the end reads nothing.
+struct Window {
+    file: File,
+    base: u64,
+    len: u64,
+    pos: u64,
+}
+
+impl std::io::Read for Window {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let want =
+            usize::try_from(self.len - self.pos).map_or(buf.len(), |left| left.min(buf.len()));
+        // base + pos < base + len <= the file's length: no overflow.
+        let n = self.file.read_at(&mut buf[..want], self.base + self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Window {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::{Error, ErrorKind, SeekFrom};
+        let invalid = || Error::new(ErrorKind::InvalidInput, "seek outside the squashfs");
+        let pos = match to {
+            SeekFrom::Start(n) => n,
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d).ok_or_else(invalid)?,
+            SeekFrom::End(d) => self.len.checked_add_signed(d).ok_or_else(invalid)?,
+        };
+        self.pos = pos;
+        Ok(pos)
+    }
+}
+
 /// Opens the squashfs at `base` in the file and hands its tree to `f`.
 /// `len` is the file's length.
 pub fn with_tree<T>(
@@ -343,9 +506,20 @@ pub fn with_tree<T>(
 ) -> Result<T, SquashError> {
     check_superblock(file, base, len, limits)?;
     let dup = file.try_clone().map_err(|_| SquashError::Io)?;
-    let fs =
-        FilesystemReader::from_reader_with_offset(BufReader::with_capacity(64 << 10, dup), base)
-            .map_err(|e| map_error(&e))?;
+    // backhand adds the squashfs's start (`base`) to every offset it reads from
+    // the file with a plain `+`, which overflows for an offset near u64::MAX
+    // (and panics now that the release profile checks overflow). It is given
+    // a window that starts at 0 instead, whose arithmetic is checked here.
+    let window = Window {
+        file: dup,
+        base,
+        len: len.saturating_sub(base),
+        pos: 0,
+    };
+    let reader = BufReader::with_capacity(64 << 10, window);
+    let fs = contained(|| FilesystemReader::from_reader(reader))
+        .ok_or(SquashError::Damaged("squashfs"))?
+        .map_err(|e| map_error(&e))?;
     let mut nodes: HashMap<String, &Node<SquashfsFileReader>> = HashMap::new();
     for node in fs.files() {
         let path = normalize(&node.fullpath);

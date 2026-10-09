@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.gates</id>
+  <name>Requirements Example</name>
+  <summary>An app with a content rating and requirements</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <launchable type="desktop-id">net.eterneon.telamon.gates.desktop</launchable>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">mild</content_attribute>
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+  <requires>
+    <display_length compare="ge">360</display_length>
+    <memory>2048</memory>
+    <internet>offline-only</internet>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <display_length compare="ge">768</display_length>
+    <internet bandwidth_mbitps="2">always</internet>
+  </recommends>
+  <supports>
+    <control>touch</control>
+    <control>gamepad</control>
+  </supports>
+  <custom>
+    <value key="Purism::form_factor">workstation</value>
+  </custom>
+  <translation type="gettext">foobar</translation>
+  <developer id="net.eterneon">
+    <name>Eterneon</name>
+  </developer>
+</component>

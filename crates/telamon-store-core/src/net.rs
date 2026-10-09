@@ -14,6 +14,10 @@
 //!   otherwise non-global address, so a name that points at the local
 //!   network is refused when the connection is made, not only when the URL is
 //!   read (a DNS answer can change between the two);
+//! - optionally (a [`Hosts`] policy in the request) a list of hosts the
+//!   request, and every redirect it is sent on to, may go to: GitHub's for the
+//!   native apps, Flathub's for its API. A redirect off the list is refused
+//!   before any connection is made;
 //! - a timeout for the whole request and a cap on the body;
 //! - no proxy from the environment (a proxy is not subject to the address
 //!   rule above), no cookies, no credentials, a User-Agent that names the
@@ -33,6 +37,50 @@ use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 /// Redirects followed before giving up.
 pub const MAX_REDIRECTS: u32 = 3;
 
+/// The hosts GitHub serves a repository's catalog, API answers and release
+/// files from: `raw.githubusercontent.com` (the catalog), `api.github.com`
+/// (releases), `github.com` (a release file's address) and the hosts it
+/// redirects a download to (`objects.githubusercontent.com`, and
+/// `release-assets.githubusercontent.com`, which GitHub moved release
+/// downloads to in 2025).
+pub const GITHUB_HOSTS: &[&str] = &[
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Flathub's website (the API, `/api/v2`) and its download host.
+pub const FLATHUB_HOSTS: &[&str] = &["flathub.org", "dl.flathub.org"];
+
+/// Which hosts a request may go to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hosts<'a> {
+    /// Any public https host (a `.flatpakrepo` the user was given a link to).
+    Any,
+    /// Only these exact (lowercase) host names, for the first address and for
+    /// every redirect.
+    Only(&'a [&'a str]),
+}
+
+impl Hosts<'_> {
+    /// Whether `url` (already through [`crate::launch::https_url`], so its
+    /// host is lowercase and has no port) may be fetched.
+    pub fn allows(&self, url: &str) -> bool {
+        match self {
+            Hosts::Any => true,
+            Hosts::Only(list) => host_of(url).is_some_and(|h| list.contains(&h)),
+        }
+    }
+}
+
+/// The host of an address that passed `https_url`.
+fn host_of(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    Some(&rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())])
+}
+
 /// What to ask for and how much to accept.
 #[derive(Clone, Copy, Debug)]
 pub struct Request<'a> {
@@ -42,6 +90,8 @@ pub struct Request<'a> {
     pub max_bytes: u64,
     /// The whole request, connecting and reading.
     pub timeout: Duration,
+    /// Where it, and its redirects, may go.
+    pub hosts: Hosts<'a>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +104,8 @@ pub enum NetError {
     TooLarge,
     /// A redirect without a usable target, or too many.
     Redirect,
+    /// The address (or a redirect's) is a host this request is not for.
+    HostNotAllowed,
     /// The name resolves only to addresses the Store does not connect to.
     NotPublic,
     /// No answer in time.
@@ -69,6 +121,9 @@ impl fmt::Display for NetError {
             NetError::Status(code) => write!(f, "The server answered with an error ({code})."),
             NetError::TooLarge => f.write_str("The answer is larger than the Store accepts."),
             NetError::Redirect => f.write_str("The server sent the Store somewhere it won't go."),
+            NetError::HostNotAllowed => {
+                f.write_str("The address is not on a server the Store fetches this from.")
+            }
             NetError::NotPublic => f.write_str(
                 "The address leads to this computer or its local network, not the internet.",
             ),
@@ -194,6 +249,9 @@ fn open(url: &str, request: &Request<'_>) -> Result<ureq::http::Response<ureq::B
     let agent = agent();
     let deadline = std::time::Instant::now() + request.timeout;
     let mut url = crate::launch::https_url(url).ok_or(NetError::BadUrl)?;
+    if !request.hosts.allows(&url) {
+        return Err(NetError::HostNotAllowed);
+    }
     for _ in 0..=MAX_REDIRECTS {
         let left = deadline
             .checked_duration_since(std::time::Instant::now())
@@ -214,7 +272,7 @@ fn open(url: &str, request: &Request<'_>) -> Result<ureq::http::Response<ureq::B
                 .get("location")
                 .and_then(|v| v.to_str().ok())
                 .ok_or(NetError::Redirect)?;
-            url = redirect_target(&url, location).ok_or(NetError::Redirect)?;
+            url = next_hop(&url, location, &request.hosts)?;
             continue;
         }
         if !(200..300).contains(&status) {
@@ -288,6 +346,18 @@ fn map_error(e: ureq::Error) -> NetError {
     }
 }
 
+/// Where a redirect from `base` to `location` goes, checked before anything
+/// connects there (so a redirect off the host list is never contacted, nor
+/// its name resolved).
+pub fn next_hop(base: &str, location: &str, hosts: &Hosts<'_>) -> Result<String, NetError> {
+    let target = redirect_target(base, location).ok_or(NetError::Redirect)?;
+    if hosts.allows(&target) {
+        Ok(target)
+    } else {
+        Err(NetError::HostNotAllowed)
+    }
+}
+
 /// The URL a redirect from `base` leads to, if it is acceptable: an absolute
 /// https address, or a path on the same host. Anything else (another
 /// scheme, a `//host` reference, a path with `..`) is refused, and so is
@@ -297,7 +367,11 @@ pub fn redirect_target(base: &str, location: &str) -> Option<String> {
         return None;
     }
     let target = if location.starts_with('/') {
-        let host_end = base[8..]
+        // A base that is too short or cuts a character (`get` is None) would
+        // panic on a slice; the fetcher only passes URLs it fetched, but this
+        // function is public.
+        let host_end = base
+            .get(8..)?
             .find(['/', '?', '#'])
             .map_or(base.len(), |i| i + 8);
         format!("{}{}", &base[..host_end], location)
@@ -409,6 +483,7 @@ mod tests {
             accept: "*/*",
             max_bytes: 10,
             timeout: Duration::from_secs(1),
+            hosts: Hosts::Any,
         };
         for bad in [
             "http://example.org/",
@@ -428,6 +503,7 @@ mod tests {
             NetError::Status(404),
             NetError::TooLarge,
             NetError::Redirect,
+            NetError::HostNotAllowed,
             NetError::NotPublic,
             NetError::TimedOut,
             NetError::Failed("no route".into()),
@@ -435,5 +511,78 @@ mod tests {
             let text = e.to_string();
             assert!(text.ends_with('.') || text.contains("no route"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_host_list_binds_the_first_address_and_every_redirect() {
+        let github = Hosts::Only(GITHUB_HOSTS);
+        for ok in [
+            "https://github.com/o/r/releases/download/v1/a",
+            "https://api.github.com/repos/o/r/releases/latest",
+            "https://raw.githubusercontent.com/o/r/main/c.json",
+            "https://objects.githubusercontent.com/x?y=1",
+            "https://release-assets.githubusercontent.com/x",
+        ] {
+            assert!(github.allows(ok), "{ok}");
+        }
+        for bad in [
+            "https://evil.example.net/github.com",
+            "https://github.com.evil.example.net/",
+            "https://notgithub.com/",
+            "https://githubusercontent.com/",
+            "https://gist.githubusercontent.com/x",
+            "https://codeload.github.com/x",
+            "https://flathub.org/",
+        ] {
+            assert!(!github.allows(bad), "{bad}");
+        }
+        assert!(
+            Hosts::Only(FLATHUB_HOSTS).allows("https://dl.flathub.org/repo/appstream/x.xml.gz")
+        );
+        assert!(!Hosts::Only(FLATHUB_HOSTS).allows("https://github.com/"));
+        assert!(Hosts::Any.allows("https://anything.example.org/"));
+
+        let base = "https://github.com/o/r/releases/download/v1/a";
+        assert_eq!(
+            next_hop(base, "https://objects.githubusercontent.com/z", &github).as_deref(),
+            Ok("https://objects.githubusercontent.com/z")
+        );
+        assert_eq!(
+            next_hop(base, "/o/r/other", &github).as_deref(),
+            Ok("https://github.com/o/r/other")
+        );
+        // A redirect off the list, or to something that is not acceptable at
+        // all, ends the request.
+        assert_eq!(
+            next_hop(base, "https://evil.example.net/z", &github),
+            Err(NetError::HostNotAllowed)
+        );
+        assert_eq!(
+            next_hop(
+                base,
+                "https://objects.githubusercontent.com:8443/z",
+                &github
+            ),
+            Err(NetError::Redirect)
+        );
+        assert_eq!(
+            next_hop(base, "http://objects.githubusercontent.com/z", &github),
+            Err(NetError::Redirect)
+        );
+        assert_eq!(
+            next_hop(base, "//evil.example.net/z", &github),
+            Err(NetError::Redirect)
+        );
+        // The first address is checked before any connection too.
+        let request = Request {
+            accept: "*/*",
+            max_bytes: 10,
+            timeout: Duration::from_secs(1),
+            hosts: github,
+        };
+        assert_eq!(
+            get("https://evil.example.net/x", &request),
+            Err(NetError::HostNotAllowed)
+        );
     }
 }

@@ -74,7 +74,9 @@ pub mod qobject {
         /// Downloads, checks and installs (or updates to) the release the
         /// last check found for `id`. The caller has asked the user.
         #[qinvokable]
-        fn install(self: Pin<&mut NativeApps>, id: &QString, version: &QString);
+        /// `version` and `signer` (the key ID) are what the dialog showed; a
+        /// release that differs in either is not installed.
+        fn install(self: Pin<&mut NativeApps>, id: &QString, version: &QString, signer: &QString);
 
         /// Removes an app the Store installed.
         #[qinvokable]
@@ -227,6 +229,37 @@ struct Outcome {
     changed: bool,
 }
 
+/// The app to install for what the dialog showed (`version` and the key ID
+/// `signer`), or why not. The version and the key the user was shown are the
+/// ones that install: a check that ran while the dialog was open may have put
+/// another release (or the same version signed by another listed key) in the
+/// list, and that one needs a new question.
+fn install_choice(
+    listed: &[Listed],
+    id: &str,
+    version: &str,
+    signer: &str,
+) -> Result<Listed, &'static str> {
+    match listed.iter().find(|l| l.id == id) {
+        Some(l)
+            if l.candidate
+                .as_ref()
+                .is_some_and(|c| c.manifest.version != version) =>
+        {
+            Err("A different version came out while you were deciding. Look at it again.")
+        }
+        Some(l) if l.candidate.as_ref().is_some_and(|c| c.signer != signer) => {
+            Err("The release changed while the question was open. Look at it again.")
+        }
+        Some(l)
+            if l.candidate.is_some() && matches!(l.status, Status::Available | Status::Update) =>
+        {
+            Ok(l.clone())
+        }
+        _ => Err("There is nothing to install for this app. Check for updates and try again."),
+    }
+}
+
 const BUSY: &str = "The Store is busy with another Telamon app. Try again in a moment.";
 
 fn now() -> u64 {
@@ -249,6 +282,12 @@ fn rows(list: &[Listed]) -> Value {
                     }
                 };
                 let inst = l.installed.as_ref();
+                // The key the release being offered verified with, the key
+                // the installed copy was installed on (none for a local file
+                // or an install from before releases were signed), and
+                // whether those are two keys.
+                let signer = l.candidate.as_ref().map(|c| c.signer.clone()).unwrap_or_default();
+                let installed_signer = inst.and_then(|i| i.origin.signer.clone()).unwrap_or_default();
                 json!({
                     "id": l.id,
                     "name": l.name,
@@ -261,6 +300,9 @@ fn rows(list: &[Listed]) -> Value {
                     "installedVersion": inst.map(|i| i.version.clone()).unwrap_or_default(),
                     "availableVersion": l.candidate.as_ref().map(|c| c.manifest.version.clone()).unwrap_or_default(),
                     "size": l.candidate.as_ref().and_then(|c| c.manifest.archive.as_ref()).map(|a| human_size(a.size)).unwrap_or_default(),
+                    "signer": signer,
+                    "installedSigner": installed_signer,
+                    "signerChanged": !installed_signer.is_empty() && !signer.is_empty() && installed_signer != signer,
                     "installedSize": inst.map(|i| human_size(i.size)).unwrap_or_default(),
                     "installed": inst.is_some(),
                     "present": inst.is_none_or(|i| i.present),
@@ -391,6 +433,8 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
                             "fileName": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                             "size": human_size(size),
                             "sha256": sha,
+                            // A file the user opened has no signature to check.
+                            "signed": false,
                             "files": m.files.len(),
                             "replaces": installed.is_some(),
                             "installedVersion": installed.as_ref().map(|r| r.version.clone()).unwrap_or_default(),
@@ -560,38 +604,18 @@ impl qobject::NativeApps {
         self.submit(Job::Check { force }, "checking", "");
     }
 
-    pub fn install(mut self: Pin<&mut Self>, id: &QString, version: &QString) {
+    pub fn install(mut self: Pin<&mut Self>, id: &QString, version: &QString, signer: &QString) {
         if !self.idle() {
             self.as_mut().set_result_text(QString::default());
             self.as_mut().set_error_text(QString::from(BUSY));
             return;
         }
         let id = id.to_string();
-        let version = version.to_string();
-        let found = self.listed.iter().find(|l| l.id == id).cloned();
-        match found {
-            // The version the user was shown is the one that installs.
-            Some(l)
-                if l.candidate
-                    .as_ref()
-                    .is_some_and(|c| c.manifest.version != version) =>
-            {
+        match install_choice(&self.listed, &id, &version.to_string(), &signer.to_string()) {
+            Ok(l) => self.submit(Job::Install(Box::new(l)), "installing", &id),
+            Err(why) => {
                 self.as_mut().set_result_text(QString::default());
-                self.as_mut().set_error_text(QString::from(
-                    "A different version came out while you were deciding. Look at it again.",
-                ));
-            }
-            Some(l)
-                if l.candidate.is_some()
-                    && matches!(l.status, Status::Available | Status::Update) =>
-            {
-                self.submit(Job::Install(Box::new(l)), "installing", &id);
-            }
-            _ => {
-                self.as_mut().set_result_text(QString::default());
-                self.as_mut().set_error_text(QString::from(
-                    "There is nothing to install for this app. Check for updates and try again.",
-                ));
+                self.as_mut().set_error_text(QString::from(why));
             }
         }
     }
@@ -662,7 +686,7 @@ impl qobject::NativeApps {
 mod tests {
     use super::*;
     use telamon_store_core::native::check::build_list;
-    use telamon_store_core::native::fake::{BundleBuilder, Fake};
+    use telamon_store_core::native::fake::{BundleBuilder, Fake, Signing, TestKey, default_key};
     use telamon_store_core::native::version::Version;
 
     fn host() -> Host {
@@ -702,6 +726,10 @@ mod tests {
         assert_eq!(row["state"], "available");
         assert_eq!(row["availableVersion"], "0.2.0");
         assert_eq!(row["installed"], false);
+        // Who vouches for it: the key that verified, and nothing to compare.
+        assert_eq!(row["signer"], default_key().key_id());
+        assert_eq!(row["installedSigner"], "");
+        assert_eq!(row["signerChanged"], false);
         assert!(
             row["size"].as_str().unwrap().ends_with("kB")
                 || row["size"].as_str().unwrap().ends_with(" B")
@@ -710,6 +738,108 @@ mod tests {
             rows(&build_list(&[], &[], &Default::default(), &host())),
             json!([])
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rows_say_when_the_signing_key_changed() {
+        let id = "net.eterneon.telamon.gates";
+        let repo = "EternalCoder454/telamon-gates";
+        let (old, new) = (TestKey::new(1), TestKey::new(2));
+        let fake = Fake::new();
+        let bundle = |v: &str| {
+            BundleBuilder::new(id, "Telamon Gates", v)
+                .exe("telamon-gates")
+                .build()
+        };
+        let root = std::env::temp_dir().join(format!("native-rows-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs = Dirs {
+            data: root.join("data"),
+            home: root.join("home"),
+            system: Vec::new(),
+        };
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        std::fs::create_dir_all(&dirs.home).unwrap();
+        let cache = Cache::new(root.join("cache"));
+        // Installed on a release signed with the old key.
+        fake.catalog_with_keys(&[(id, repo, vec![&old, &new])]);
+        fake.publish_with(repo, "v0.1.0", &bundle("0.1.0"), Signing::With(&old));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_000, false);
+        let cand = report.apps[0].candidate.clone().unwrap();
+        check::install_candidate(
+            &fake,
+            &dirs,
+            &host(),
+            &cand,
+            &root.join("work"),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        // The next release is signed with the same key: nothing to say.
+        fake.publish_with(repo, "v0.2.0", &bundle("0.2.0"), Signing::With(&old));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_100, true);
+        let row = &rows(&report.apps)[0];
+        assert_eq!(row["state"], "update");
+        assert_eq!(row["installedSigner"], old.key_id());
+        assert_eq!(row["signer"], old.key_id());
+        assert_eq!(row["signerChanged"], false);
+        // Signed with the other listed key (a rotation): the dialog says so.
+        fake.publish_with(repo, "v0.3.0", &bundle("0.3.0"), Signing::With(&new));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_200, true);
+        let row = &rows(&report.apps)[0];
+        assert_eq!(row["state"], "update");
+        assert_eq!(row["signer"], new.key_id());
+        assert_eq!(row["signerChanged"], true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn what_installs_is_the_version_and_the_key_the_dialog_showed() {
+        let id = "net.eterneon.telamon.gates";
+        let repo = "EternalCoder454/telamon-gates";
+        let (a, b) = (TestKey::new(1), TestKey::new(2));
+        let fake = Fake::new();
+        fake.catalog_with_keys(&[(id, repo, vec![&a, &b])]);
+        let bundle = BundleBuilder::new(id, "Telamon Gates", "0.2.0")
+            .exe("telamon-gates")
+            .build();
+        let root = std::env::temp_dir().join(format!("native-choice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs = Dirs {
+            data: root.join("data"),
+            home: root.join("home"),
+            system: Vec::new(),
+        };
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        let cache = Cache::new(root.join("cache"));
+        let check_now =
+            |t: u64| check::check(&fake, &cache, &dirs, &host(), 1_800_000_000 + t, true).apps;
+        // The dialog was opened for 0.2.0 signed with key A.
+        fake.publish_with(repo, "v0.2.0", &bundle, Signing::With(&a));
+        let shown = check_now(0);
+        let ok = install_choice(&shown, id, "0.2.0", &a.key_id()).unwrap();
+        assert_eq!(ok.id, id);
+        // A check while it was open: the same version, signed by the other
+        // listed key. The click on the old question does not install it.
+        fake.publish_with(repo, "v0.2.0", &bundle, Signing::With(&b));
+        let now = check_now(10);
+        assert_eq!(now[0].candidate.as_ref().unwrap().signer, b.key_id());
+        assert_eq!(
+            install_choice(&now, id, "0.2.0", &a.key_id()).unwrap_err(),
+            "The release changed while the question was open. Look at it again."
+        );
+        // A question asked again with what the list shows now goes through.
+        assert!(install_choice(&now, id, "0.2.0", &b.key_id()).is_ok());
+        // No key given (an old caller) is not the key shown; another version
+        // and an unknown app keep their own refusals.
+        assert!(install_choice(&now, id, "0.2.0", "").is_err());
+        assert!(
+            install_choice(&now, id, "0.3.0", &b.key_id())
+                .unwrap_err()
+                .contains("different version")
+        );
+        assert!(install_choice(&now, "a.b.c", "0.2.0", &b.key_id()).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

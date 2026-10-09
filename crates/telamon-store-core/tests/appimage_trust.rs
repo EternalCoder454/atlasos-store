@@ -300,6 +300,7 @@ fn flathub_library() -> Library {
         .unwrap()
     };
     let src = |remote: &str| CatalogSource {
+        url: String::new(),
         scope: Scope::User,
         remote: remote.into(),
         title: remote.into(),
@@ -351,6 +352,7 @@ fn only_the_flathub_remote_counts() {
         let cat = parse(xml.as_bytes(), &ParseOptions::default()).unwrap();
         Library::new(vec![(
             CatalogSource {
+                url: String::new(),
                 scope: Scope::User,
                 remote: "fedora".into(),
                 title: "Fedora".into(),
@@ -371,6 +373,28 @@ fn header(json: &str, icon: &[u8]) -> Vec<u8> {
     let mut v = json.as_bytes().to_vec();
     v.push(b'\n');
     v.extend_from_slice(icon);
+    v
+}
+
+/// The helper's first record (the facts stage 1 computed), as JSON.
+fn facts_json(extra: &str) -> String {
+    format!(
+        r#"{{"format":"type2","size":5000,"sha256":"{}","file_name":"f.AppImage","signature":{{"state":"none"}},"origin":{{"kind":"unknown"}}{extra}}}"#,
+        "a".repeat(64)
+    )
+}
+
+/// The second record (what stage 2 read), as JSON.
+fn contents_json(name: &str, extra: &str) -> String {
+    format!(
+        r#"{{"inspected":true,"note":"","name":{name},"version":"1","publisher":"p","summary":"s","app_id":"not an id!","icon_kind":null{extra}}}"#
+    )
+}
+
+/// Both records and the icon's bytes.
+fn answer(facts: &str, contents: &str, icon: &[u8]) -> Vec<u8> {
+    let mut v = header(facts, b"");
+    v.extend(header(contents, icon));
     v
 }
 
@@ -400,6 +424,200 @@ fn svg_icons_may_refer_inside_themselves_only() {
 }
 
 #[test]
+fn svg_icons_that_hide_a_way_out_are_refused() {
+    use telamon_store_core::appimage::meta::icon_kind;
+    let wrap = |body: &str| {
+        format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' xmlns:s='http://www.w3.org/2000/svg'>{body}</svg>"
+        )
+    };
+    // What the earlier substring check let through, and the usual tricks.
+    for bad in [
+        // A closing tag that is not the open element's (not XML; parsers differ).
+        "<scriptRRR>alert(1)</script>",
+        "<g><rect></g></rect>",
+        "<g></g></g>",
+        // A namespace prefix on the element.
+        "<s:script>alert(1)</s:script>",
+        "<s:style>rect{fill:url(http://x/y)}</s:style>",
+        "<s:iframe src='x'/>",
+        "<S:SCRIPT>1</S:SCRIPT>",
+        // Event handlers.
+        "<rect onclick='x()'/>",
+        "<rect ONLOAD = \"x()\"/>",
+        "<g s:onmouseover='x'/>",
+        // References in CSS and presentation attributes.
+        "<rect style='fill:url(file:///etc/passwd)'/>",
+        "<rect fill=\"url('http://x/y.svg#a') red\"/>",
+        "<rect style='background:URL( \"x.png\" )'/>",
+        "<rect filter='url(other.svg#f)'/>",
+        "<rect style='background-image:image-set(\"x.png\" 1x)'/>",
+        "<rect style='fill:u\\72l(x)'/>",
+        "<rect style='@import \"x\"'/>",
+        // Character references that spell a name or a scheme.
+        "<animate attributeName='x&#108;ink:h&#114;ef' values='file:///x'/>",
+        "<linearGradient xlink:href='&#102;ile:///etc/passwd'/>",
+        "<linearGradient xlink:href='&#x23;a'/>",
+        "<rect fill='&unknown;'/>",
+        // Animation can set an href.
+        "<animate attributeName='xlink:href' values='x.svg'/>",
+        "<set attributeName='href' to='x.svg'/>",
+        "<s:set attributeName='href' to='x.svg'/>",
+        // Other ways in.
+        "<foreignObject><body xmlns='http://www.w3.org/1999/xhtml'/></foreignObject>",
+        "<s:foreignObject/>",
+        "<linearGradient xlink:href=' #a'/>",
+        "<linearGradient xlink:href='\nfile:///x'/>",
+        "<linearGradient href=\"javascript:alert(1)\"/>",
+        "<rect x='data:text/html,x'/>",
+        "<g xml:base='file:///etc/'/>",
+        "<handler type='application/ecmascript'>1</handler>",
+        "<tref xlink:href='#t'/>",
+        "<!DOCTYPE svg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><g/>",
+        "<?xml-stylesheet href='#a' type='text/css'?>",
+        "<![CDATA[ <script> ]]><script/>",
+        // Not well formed enough to know.
+        "<rect fill=red/>",
+        "<rect fill='a'fill='b'/>",
+        "<rect <script/>",
+        "<g><g></g>",
+        "</g>",
+        "<",
+        "<g",
+        "<g a",
+        "<g a=",
+        "<g a='x",
+        "<?>",
+        "<!-- unclosed",
+        "<!-- a -- b --><g/>",
+    ] {
+        assert_eq!(icon_kind(wrap(bad).as_bytes()), None, "{bad}");
+    }
+    // An ASCII document may declare an encoding that reads the same as UTF-8;
+    // one with other bytes may not. Character references stay refused.
+    let svg_in = |enc: &str, body: &str| {
+        format!(
+            "<?xml version='1.0' encoding='{enc}'?><svg xmlns='http://www.w3.org/2000/svg'>{body}</svg>"
+        )
+    };
+    for enc in [
+        "US-ASCII",
+        "iso-8859-1",
+        "ISO-8859-1",
+        "Latin1",
+        "windows-1252",
+        "UTF-8",
+        "utf-8",
+    ] {
+        assert_eq!(
+            icon_kind(svg_in(enc, "<path d='M0 0'/>").as_bytes()),
+            Some(IconKind::Svg),
+            "{enc}"
+        );
+    }
+    for enc in ["us-ascii", "iso-8859-1", "latin1", "windows-1252"] {
+        assert_eq!(
+            icon_kind(svg_in(enc, "<text>caf\u{e9}</text>").as_bytes()),
+            None,
+            "{enc} with a non-ASCII byte"
+        );
+        assert_eq!(
+            icon_kind(svg_in(enc, "<g>&#60;</g>").as_bytes()),
+            None,
+            "{enc}"
+        );
+    }
+    assert_eq!(
+        icon_kind(svg_in("utf-8", "<text>caf\u{e9}</text>").as_bytes()),
+        Some(IconKind::Svg)
+    );
+    for enc in [
+        "utf-16",
+        "UTF-7",
+        "shift_jis",
+        "iso-8859-2",
+        "ebcdic",
+        "utf8",
+        "",
+    ] {
+        assert_eq!(icon_kind(svg_in(enc, "<g/>").as_bytes()), None, "{enc}");
+    }
+    // The declaration: UTF-8 only, and only first.
+    for bad in [
+        "<?xml version='1.0' encoding='UTF-7'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<?xml version='1.0' encoding='utf-16'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<?xml version='1.0' encoding=utf-8?><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'/><?xml version='1.0'?>",
+        "<g/><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'/><svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<html><svg xmlns='http://www.w3.org/2000/svg'/></html>",
+    ] {
+        assert_eq!(icon_kind(bad.as_bytes()), None, "{bad}");
+    }
+    // Nesting and size: a renderer recurses on the first.
+    let deep = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'>{}{}</svg>",
+        "<g>".repeat(2000),
+        "</g>".repeat(2000)
+    );
+    assert_eq!(icon_kind(deep.as_bytes()), None);
+    let many = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'>{}</svg>",
+        "<g/>".repeat(30_000)
+    );
+    assert_eq!(icon_kind(many.as_bytes()), None);
+    // What a real icon has still passes.
+    for good in [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<!-- Created with a tool -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"48\" height=\"48\" viewBox=\"0 0 48 48\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#fff\"/></linearGradient><linearGradient id=\"b\" xlink:href=\"#a\"/><filter id=\"f\"><feGaussianBlur stdDeviation=\"2\"/></filter></defs><g filter=\"url(#f)\"><rect fill=\"url(#b)\" width=\"48\" height=\"48\" rx=\"4\" style=\"opacity:.5;fill:url( &quot;#a&quot; )\"/><path d=\"M1 1h2z\"/><text x=\"1\" y=\"2\">A &amp; B &lt; C</text></g><metadata><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\"/></rdf:RDF></metadata><![CDATA[ plain ]]></svg>",
+        "\u{feff}<svg xmlns='http://www.w3.org/2000/svg'/>",
+        "<svg xmlns='http://www.w3.org/2000/svg'><animateTransform attributeName='transform' type='rotate' from='0' to='360' dur='1s'/></svg>",
+    ] {
+        assert_eq!(icon_kind(good.as_bytes()), Some(IconKind::Svg), "{good}");
+    }
+}
+
+#[test]
+fn a_png_header_must_be_a_real_one() {
+    use telamon_store_core::appimage::meta::icon_kind;
+    let png = |w: u32, h: u32, tail: [u8; 5]| {
+        let mut b = build::fake_png(w, h);
+        b[24..29].copy_from_slice(&tail);
+        b
+    };
+    assert_eq!(
+        icon_kind(&png(256, 256, [8, 6, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+    assert_eq!(
+        icon_kind(&png(2048, 2048, [16, 6, 0, 0, 1])),
+        Some(IconKind::Png)
+    );
+    // Over the pixel cap, empty, impossible depth or colour type, an unknown
+    // compression, filter or interlace method.
+    assert_eq!(icon_kind(&png(2049, 1, [8, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(0, 5, [8, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [7, 6, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 5, 0, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 3, 1, 0, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 6, 0, 1, 0])), None);
+    assert_eq!(icon_kind(&png(16, 16, [8, 6, 0, 0, 2])), None);
+    // A header whose length is not 13.
+    let mut b = build::fake_png(16, 16);
+    b[8..12].copy_from_slice(&14u32.to_be_bytes());
+    assert_eq!(icon_kind(&b), None);
+    // Colour type and depth go together.
+    assert_eq!(icon_kind(&png(16, 16, [16, 3, 0, 0, 0])), None);
+    assert_eq!(
+        icon_kind(&png(16, 16, [1, 0, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+    assert_eq!(
+        icon_kind(&png(16, 16, [4, 3, 0, 0, 0])),
+        Some(IconKind::Png)
+    );
+}
+
+#[test]
 fn the_helpers_answer_round_trips() {
     let i = sample();
     let back = Inspection::decode(&i.encode()).unwrap();
@@ -409,19 +627,19 @@ fn the_helpers_answer_round_trips() {
 
 #[test]
 fn a_hostile_answer_is_cleaned_or_refused() {
-    let base = |name: &str, extra: &str| {
-        format!(
-            r#"{{"format":"type2","size":5000,"sha256":"{}","file_name":"f.AppImage","inspected":true,"note":"","name":{name},"version":"1","publisher":"p","summary":"s","app_id":"not an id!","icon_kind":null,"signature":{{"state":"none"}},"origin":{{"kind":"unknown"}}{extra}}}"#,
-            "a".repeat(64)
-        )
-    };
+    let facts = facts_json("");
+    let ok = |contents: &str, icon: &[u8]| Inspection::decode(&answer(&facts, contents, icon));
     // Control and bidi characters in a name are removed, an invalid ID is dropped.
-    let ok = Inspection::decode(&header(&base("\"Evil\\u202eApp\\n\\u0007x\"", ""), b"")).unwrap();
-    assert_eq!(ok.name, "EvilApp x");
-    assert_eq!(ok.app_id, "");
-    // Unknown fields, a bad shape, no newline: refused.
+    let i = ok(&contents_json("\"Evil\\u202eApp\\n\\u0007x\"", ""), b"").unwrap();
+    assert_eq!(i.name, "EvilApp x");
+    assert_eq!(i.app_id, "");
+    // An unknown field in the facts, a bad shape, no newline: refused.
     assert!(matches!(
-        Inspection::decode(&header(&base("\"x\"", ",\"extra\":1"), b"")),
+        Inspection::decode(&answer(
+            &facts_json(",\"extra\":1"),
+            &contents_json("\"x\"", ""),
+            b""
+        )),
         Err(InspectError::Helper(_))
     ));
     assert!(matches!(
@@ -433,44 +651,40 @@ fn a_hostile_answer_is_cleaned_or_refused() {
         Err(InspectError::Helper(_))
     ));
     // An icon that is not an image is dropped, even when declared.
-    let with_icon = base("\"x\"", "").replace("\"icon_kind\":null", "\"icon_kind\":\"png\"");
-    let i = Inspection::decode(&header(&with_icon, b"<html>not a png")).unwrap();
+    let with_icon =
+        contents_json("\"x\"", "").replace("\"icon_kind\":null", "\"icon_kind\":\"png\"");
+    let i = ok(&with_icon, b"<html>not a png").unwrap();
     assert!(i.icon.is_none() && i.icon_kind.is_none());
-    let i = Inspection::decode(&header(&with_icon, &build::fake_png(64, 64))).unwrap();
+    let i = ok(&with_icon, &build::fake_png(64, 64)).unwrap();
     assert_eq!(i.icon_kind, Some(IconKind::Png));
     // A declared kind that the bytes do not have.
     let svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>";
-    assert!(
-        Inspection::decode(&header(&with_icon, svg))
-            .unwrap()
-            .icon
-            .is_none()
-    );
+    assert!(ok(&with_icon, svg).unwrap().icon.is_none());
     // A huge PNG, and an SVG with a script, are not icons.
     assert!(
-        Inspection::decode(&header(&with_icon, &build::fake_png(50_000, 50_000)))
+        ok(&with_icon, &build::fake_png(50_000, 50_000))
             .unwrap()
             .icon
             .is_none()
     );
     let evil_svg = with_icon.replace("\"png\"", "\"svg\"");
     assert!(
-        Inspection::decode(&header(&evil_svg, b"<svg><script>alert(1)</script></svg>"))
+        ok(&evil_svg, b"<svg><script>alert(1)</script></svg>")
             .unwrap()
             .icon
             .is_none()
     );
     assert!(
-        Inspection::decode(&header(
+        ok(
             &evil_svg,
             b"<svg xmlns='http://www.w3.org/2000/svg'><circle r='4'/></svg>"
-        ))
+        )
         .unwrap()
         .icon
         .is_some()
     );
     // A bad hash, host and fingerprint are dropped, not shown.
-    let bad = base("\"x\"", "")
+    let bad = facts
         .replace(&"a".repeat(64), "ZZ")
         .replace(
             "{\"kind\":\"unknown\"}",
@@ -480,7 +694,7 @@ fn a_hostile_answer_is_cleaned_or_refused() {
             "{\"state\":\"none\"}",
             "{\"state\":\"signed\",\"fingerprint\":\"nothex\"}",
         );
-    let i = Inspection::decode(&header(&bad, b"")).unwrap();
+    let i = Inspection::decode(&answer(&bad, &contents_json("\"x\"", ""), b"")).unwrap();
     assert_eq!(i.sha256, "");
     assert_eq!(i.origin, Origin::Other);
     assert_eq!(i.signature, Signature::Unchecked);
@@ -489,4 +703,71 @@ fn a_hostile_answer_is_cleaned_or_refused() {
         Inspection::decode(b"ERROR The file could not be read (permission denied).\n").unwrap_err(),
         InspectError::Helper("The file could not be read (permission denied).".into())
     );
+}
+
+#[test]
+fn what_the_sandboxed_stage_says_cannot_change_what_stage_one_computed() {
+    let facts = facts_json("");
+    let good = Inspection::decode(&answer(&facts, &contents_json("\"Real\"", ""), b"")).unwrap();
+    assert!(good.inspected);
+    assert_eq!(good.name, "Real");
+    assert_eq!(good.sha256, "a".repeat(64));
+    // A second record that claims other facts: the extra fields are not read.
+    let forged = contents_json(
+        "\"Real\"",
+        &format!(
+            r#","sha256":"{}","size":1,"format":"type1","file_name":"evil","origin":{{"kind":"https","host":"example.org"}},"signature":{{"state":"signed","fingerprint":"{}"}}"#,
+            "b".repeat(64),
+            "A".repeat(40)
+        ),
+    );
+    let got = Inspection::decode(&answer(&facts, &forged, b"")).unwrap();
+    assert_eq!(got, good);
+    // A third record, or text, after the second does not become the facts.
+    let mut more = answer(&facts, &contents_json("\"Real\"", ""), b"");
+    more.extend(header(
+        &facts_json("").replace(&"a".repeat(64), &"c".repeat(64)),
+        b"",
+    ));
+    let got = Inspection::decode(&more).unwrap();
+    assert_eq!(got.sha256, "a".repeat(64));
+    assert!(got.icon.is_none());
+    // Nothing after the first record: not looked into, facts kept.
+    for cut in [
+        header(&facts, b""),
+        // Not a record: no newline, not JSON, the wrong shape, cut short.
+        [header(&facts, b""), b"{\"inspected\":true".to_vec()].concat(),
+        [header(&facts, b""), b"garbage\n".to_vec()].concat(),
+        [header(&facts, b""), b"{}\n".to_vec()].concat(),
+        [header(&facts, b""), b"[1,2]\n".to_vec()].concat(),
+        [header(&facts, b""), b"\n".to_vec()].concat(),
+        [
+            header(&facts, b""),
+            contents_json("\"Real\"", "").as_bytes()[..40].to_vec(),
+        ]
+        .concat(),
+    ] {
+        let got = Inspection::decode(&cut).unwrap();
+        assert!(!got.inspected, "{:?}", String::from_utf8_lossy(&cut));
+        assert_eq!(got.note, "Telamon couldn't look inside this file.");
+        assert_eq!(got.sha256, "a".repeat(64));
+        assert_eq!(got.file_name, "f.AppImage");
+        assert_eq!(got.name, "f");
+        assert!(got.icon.is_none() && got.app_id.is_empty());
+    }
+    // No first record at all is a failure.
+    assert!(matches!(
+        Inspection::decode(&header(&contents_json("\"Real\"", ""), b"")),
+        Err(InspectError::Helper(_))
+    ));
+    assert!(Inspection::decode(b"").is_err());
+    // A second record cannot be read as the first: a stage 2 that writes only
+    // a facts-shaped line gets nothing in.
+    let only_forged_facts = header(&facts, b"");
+    let got = Inspection::decode(&[only_forged_facts.clone(), only_forged_facts].concat()).unwrap();
+    assert!(!got.inspected);
+    // The encoder and decoder agree.
+    let i = sample();
+    assert_eq!(Inspection::decode(&i.encode()).unwrap(), i);
+    assert!(i.encode_facts().iter().filter(|b| **b == b'\n').count() == 1);
 }

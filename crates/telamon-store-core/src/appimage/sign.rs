@@ -14,6 +14,7 @@
 
 use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -25,6 +26,8 @@ pub const MAX_SIG: u64 = 16 * 1024;
 pub const MAX_KEY: u64 = 64 * 1024;
 /// How long `gpgv` may run.
 const GPGV_TIMEOUT: Duration = Duration::from_secs(10);
+/// Most of `gpgv`'s status output read.
+const MAX_STATUS: u64 = 64 * 1024;
 
 /// What is known about the file's signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,13 +165,25 @@ fn temp_dir() -> Option<PathBuf> {
 /// Checks `signature` (armored or binary) over `message` with `key` (armored
 /// or binary) using `gpgv`. `digest_hex` is the message: the hex digest.
 pub fn verify(gpgv: &Path, signature: &[u8], key: &[u8], message: &str) -> Signature {
+    verify_within(gpgv, signature, key, message, GPGV_TIMEOUT)
+}
+
+/// [`verify`] with a time limit of the caller's choosing.
+pub fn verify_within(
+    gpgv: &Path,
+    signature: &[u8],
+    key: &[u8],
+    message: &str,
+    timeout: Duration,
+) -> Signature {
     let (Some(sig), Some(key)) = (trimmed_nonempty(signature), dearmor(trimmed(key))) else {
         return Signature::Unchecked;
     };
     let Some(dir) = temp_dir() else {
         return Signature::Unchecked;
     };
-    let result = run_gpgv(gpgv, &dir, sig, &key, message);
+    let result = run_gpgv(gpgv, &dir, sig, &key, message, timeout);
+    // On every path, a timeout included: the folder holds the file's key.
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
@@ -178,7 +193,40 @@ fn trimmed_nonempty(b: &[u8]) -> Option<&[u8]> {
     (!t.is_empty()).then_some(t)
 }
 
-fn run_gpgv(gpgv: &Path, dir: &Path, sig: &[u8], key: &[u8], message: &str) -> Signature {
+/// Limits for the `gpgv` child, set between fork and exec (only system calls
+/// that are safe there): its input is a stranger's key and signature.
+fn limit_gpgv() {
+    let set = |resource: libc::__rlimit_resource_t, value: libc::rlim_t| {
+        let lim = libc::rlimit {
+            rlim_cur: value,
+            rlim_max: value,
+        };
+        // SAFETY: setrlimit reads the struct; a failure only leaves the
+        // limit as it was.
+        unsafe { libc::setrlimit(resource, &lim) };
+    };
+    set(libc::RLIMIT_CORE, 0);
+    // It writes nothing bigger than a lock file.
+    set(libc::RLIMIT_FSIZE, 1 << 20);
+    set(libc::RLIMIT_CPU, 20);
+    set(libc::RLIMIT_AS, 1 << 30);
+    set(libc::RLIMIT_NOFILE, 64);
+    // SAFETY: prctl with these arguments only sets a flag on this process:
+    // it dies with the helper that started it, whatever happens to that.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    }
+}
+
+fn run_gpgv(
+    gpgv: &Path,
+    dir: &Path,
+    sig: &[u8],
+    key: &[u8],
+    message: &str,
+    timeout: Duration,
+) -> Signature {
     let (kr, sf, df, home) = (
         dir.join("keyring.gpg"),
         dir.join("sig"),
@@ -192,8 +240,12 @@ fn run_gpgv(gpgv: &Path, dir: &Path, sig: &[u8], key: &[u8], message: &str) -> S
     if wrote.is_err() {
         return Signature::Unchecked;
     }
-    let child = Command::new(gpgv)
-        .env_clear()
+    // By argv, an empty environment (no agent socket, no proxy, no config
+    // folder of the user's), a private home, no input, its own process group
+    // and resource limits. `gpgv` has no config file and never talks to an
+    // agent or the network; the keyring is the file given.
+    let mut cmd = Command::new(gpgv);
+    cmd.env_clear()
         .env("LC_ALL", "C")
         .env("GNUPGHOME", &home)
         .arg("--homedir")
@@ -205,28 +257,51 @@ fn run_gpgv(gpgv: &Path, dir: &Path, sig: &[u8], key: &[u8], message: &str) -> S
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
+        .process_group(0);
+    // A denylist of the system calls it has no use for, built here (it
+    // allocates) and put on in the child, so `gpgv` inherits it across exec:
+    // the parsers of the key and the signature run with no sockets, no
+    // tracing, no keyring, no mounts. Where it cannot be put on, `gpgv` is
+    // not run.
+    let filter = super::sandbox::gpgv_filter();
+    // SAFETY: the closure only calls setrlimit, prctl and seccomp, which are
+    // safe between fork and exec (the filter was built before the fork).
+    unsafe {
+        cmd.pre_exec(move || {
+            limit_gpgv();
+            match &filter {
+                Some(f) => f.install(),
+                None => Ok(()),
+            }
+        });
+    }
+    let Ok(mut child) = cmd.spawn() else {
         return Signature::Unchecked;
     };
+    // Read as it writes: a full pipe must not stall it, and what is read is
+    // capped (the rest of a talkative `gpgv` gets SIGPIPE).
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = (&mut stdout).take(MAX_STATUS).read_to_end(&mut out);
+        out
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < GPGV_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             _ => {
+                // The whole group, not only the child: whatever it started.
+                super::helper::kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return Signature::Unchecked;
             }
         }
     }
-    let mut out = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        let _ = so.by_ref().take(64 * 1024).read_to_end(&mut out);
-    }
+    let out = reader.join().unwrap_or_default();
     parse_status(&String::from_utf8_lossy(&out))
 }
 

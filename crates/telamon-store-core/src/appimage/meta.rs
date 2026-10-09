@@ -54,6 +54,23 @@ pub fn png_size(b: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+/// The rest of a PNG's header (`IHDR`, which `png_size` found): 13 bytes of
+/// data, a bit depth that the colour type allows, and the only compression
+/// and filter methods PNG has. A decoder sizes its buffers from this.
+fn png_header_ok(b: &[u8]) -> bool {
+    if b.len() < 29 || b[8..12] != 13u32.to_be_bytes() {
+        return false;
+    }
+    let (depth, color, compression, filter, interlace) = (b[24], b[25], b[26], b[27], b[28]);
+    let depth_ok = match color {
+        0 => matches!(depth, 1 | 2 | 4 | 8 | 16),
+        3 => matches!(depth, 1 | 2 | 4 | 8),
+        2 | 4 | 6 => matches!(depth, 8 | 16),
+        _ => false,
+    };
+    depth_ok && compression == 0 && filter == 0 && interlace <= 1
+}
+
 /// Whether `bytes` is an icon the Store will keep: a PNG of a sane size, or a
 /// small plain SVG without anything that pulls in another file or script.
 pub fn icon_kind(bytes: &[u8]) -> Option<IconKind> {
@@ -61,61 +78,321 @@ pub fn icon_kind(bytes: &[u8]) -> Option<IconKind> {
         return None;
     }
     if let Some((w, h)) = png_size(bytes) {
-        return ((1..=MAX_ICON_SIDE).contains(&w) && (1..=MAX_ICON_SIDE).contains(&h))
-            .then_some(IconKind::Png);
+        return ((1..=MAX_ICON_SIDE).contains(&w)
+            && (1..=MAX_ICON_SIDE).contains(&h)
+            && png_header_ok(bytes))
+        .then_some(IconKind::Png);
     }
     if bytes.len() > 512 << 10 || bytes.contains(&0) {
         return None;
     }
     let text = std::str::from_utf8(bytes).ok()?;
-    let lower = text.to_ascii_lowercase();
-    let head = lower.trim_start_matches('\u{feff}').trim_start();
-    if !(head.starts_with("<?xml") || head.starts_with("<svg") || head.starts_with("<!--"))
-        || !lower.contains("<svg")
+    svg_ok(text).then_some(IconKind::Svg)
+}
+
+/// Elements (by local name, whatever their prefix) an icon may not have:
+/// they pull in another file, run code, or can retarget any attribute (the
+/// animation elements can set an `href`).
+const REFUSED_ELEMENTS: [&str; 30] = [
+    "script",
+    "style",
+    "image",
+    "use",
+    "a",
+    "feimage",
+    "foreignobject",
+    "iframe",
+    "embed",
+    "object",
+    "applet",
+    "link",
+    "base",
+    "meta",
+    "animate",
+    "set",
+    "handler",
+    "listener",
+    "audio",
+    "video",
+    "canvas",
+    "html",
+    "head",
+    "body",
+    "form",
+    "input",
+    "cursor",
+    "font-face-uri",
+    "color-profile",
+    "tref",
+];
+/// ... and `mpath` and `discard`, which refer to other elements by `href`.
+const REFUSED_MORE: [&str; 2] = ["mpath", "discard"];
+/// Deepest element nesting and most elements accepted: a renderer recurses
+/// on the first and walks all of the second.
+const SVG_MAX_DEPTH: usize = 64;
+const SVG_MAX_ELEMENTS: usize = 20_000;
+
+/// Reads the SVG as XML, tag by tag, and accepts it only when nothing in it
+/// can load another file, run code or hide from this check. It is a
+/// tokenizer, not a parser: anything it does not understand is refused, so
+/// a document that a real XML parser would read differently is refused too.
+///
+/// - the only entities are the five predefined ones (no `&#..;` that could
+///   spell a name, no DOCTYPE to define more);
+/// - the only declaration is `<?xml ...?>` at the very start, and its
+///   encoding, if it names one, is UTF-8 (a parser that honored UTF-7 would
+///   read other tags than these);
+/// - no element of `REFUSED_ELEMENTS`, with any prefix, in any case;
+/// - no attribute that is an event handler (`on...`), none with a backslash
+///   (a CSS escape), `javascript:`, `data:` or `vbscript:`; every `href`
+///   (any prefix) is `#id` and every `url(...)` points at `#id`.
+fn svg_ok(text: &str) -> bool {
+    if !entities_ok(text) {
+        return false;
+    }
+    let start = if text.starts_with('\u{feff}') { 3 } else { 0 };
+    let mut at = start;
+    // The names of the elements still open: a closing tag must be the last
+    // one's (a mismatch is not XML, and parsers differ in what they do with it).
+    let mut open: Vec<&str> = Vec::new();
+    let mut elements = 0usize;
+    let mut root = false;
+    while let Some(off) = text[at..].find('<') {
+        at += off;
+        let rest = &text[at..];
+        if let Some(body) = rest.strip_prefix("<!--") {
+            let Some(end) = body.find("-->") else {
+                return false;
+            };
+            // `--` inside a comment is not XML.
+            if body[..end].contains("--") || body[..end].ends_with('-') {
+                return false;
+            }
+            at += 4 + end + 3;
+        } else if rest.starts_with("<![CDATA[") {
+            let Some(end) = rest.find("]]>") else {
+                return false;
+            };
+            at += end + 3;
+        } else if rest.starts_with("<?") {
+            // Only the XML declaration, only first.
+            let Some(len) = xml_declaration(rest, text.is_ascii()).filter(|_| at == start) else {
+                return false;
+            };
+            at += len;
+        } else if rest.starts_with("<!") {
+            return false;
+        } else if let Some(close) = rest.strip_prefix("</") {
+            let end = close.find('>').unwrap_or(close.len());
+            if end == close.len() || !close[..end].trim_end().bytes().all(name_byte) {
+                return false;
+            }
+            if open.pop() != Some(close[..end].trim_end()) {
+                return false;
+            }
+            at += 2 + end + 1;
+        } else {
+            let Some((len, name, empty)) = open_tag(rest) else {
+                return false;
+            };
+            let local = name
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if local.is_empty()
+                || REFUSED_ELEMENTS.contains(&local.as_str())
+                || REFUSED_MORE.contains(&local.as_str())
+            {
+                return false;
+            }
+            // One root, and it is the svg.
+            if open.is_empty() {
+                if root || local != "svg" {
+                    return false;
+                }
+                root = true;
+            }
+            elements += 1;
+            if elements > SVG_MAX_ELEMENTS {
+                return false;
+            }
+            if !empty {
+                open.push(name);
+                if open.len() > SVG_MAX_DEPTH {
+                    return false;
+                }
+            }
+            at += len;
+        }
+    }
+    root && open.is_empty()
+}
+
+/// Only `&amp; &lt; &gt; &quot; &apos;`.
+fn entities_ok(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(i) = rest.find('&') {
+        rest = &rest[i + 1..];
+        if !["amp;", "lt;", "gt;", "quot;", "apos;"]
+            .iter()
+            .any(|e| rest.starts_with(e))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'-' | b'.')
+}
+
+/// `<?xml version="1.0" encoding="UTF-8" standalone="no"?>`: its length in
+/// bytes when it is well formed and the encoding, if it names one, reads these
+/// bytes as the text they are. UTF-8 does. US-ASCII, ISO-8859-1 (`latin1`) and
+/// windows-1252 give the same text as UTF-8 when the whole document is ASCII
+/// (`ascii`), and only then: a file with other bytes would read differently.
+/// Any other encoding is refused (a parser that honored UTF-7 or UTF-16 would
+/// read other tags than these). Numeric character references stay refused
+/// (`entities_ok`), whatever the encoding: they can spell a name.
+fn xml_declaration(rest: &str, ascii: bool) -> Option<usize> {
+    let end = rest.get(2..)?.find("?>")? + 2;
+    let decl = rest[2..end].to_ascii_lowercase();
+    if !decl.starts_with("xml") || decl.contains('<') || !decl[3..].starts_with(char::is_whitespace)
     {
         return None;
     }
-    // Anything that can pull in another file or run: scripts, entities,
-    // external references (`href` in any form, `<use>`, `<image>`, with or
-    // without a namespace prefix), styles that can import, embedded HTML.
-    const REFUSED: [&str; 15] = [
-        "<script",
-        "<!entity",
-        "<!doctype",
-        "<image",
-        ":image",
-        "feimage",
-        "<use",
-        ":use",
-        "foreignobject",
-        "<style",
-        "@import",
-        "<a ",
-        ":a ",
-        "javascript:",
-        "<iframe",
-    ];
-    if REFUSED.iter().any(|r| lower.contains(r)) || external_href(&lower) {
-        return None;
+    if let Some(i) = decl.find("encoding") {
+        let value = decl[i + 8..].trim_start().strip_prefix('=')?.trim_start();
+        let quote = value.chars().next().filter(|q| matches!(q, '"' | '\''))?;
+        let name = value[1..].split(quote).next()?;
+        let same_as_utf8 = match name {
+            "utf-8" => true,
+            "us-ascii" | "iso-8859-1" | "latin1" | "windows-1252" => ascii,
+            _ => false,
+        };
+        if !same_as_utf8 {
+            return None;
+        }
     }
-    Some(IconKind::Svg)
+    Some(end + 2)
 }
 
-/// Whether some `href` points anywhere but inside the document (`#id`):
-/// gradients and clips refer that way, a file or a URL is not allowed.
-fn external_href(lower: &str) -> bool {
-    let mut rest = lower;
-    while let Some(i) = rest.find("href") {
-        let after = rest[i + 4..].trim_start();
-        let Some(value) = after.strip_prefix('=').map(str::trim_start) else {
-            return true;
-        };
-        if !(value.starts_with("\"#") || value.starts_with("'#")) {
-            return true;
-        }
-        rest = &rest[i + 4..];
+/// Reads `<name attr="v" ...>` or `.../>` at the start of `rest`: how many
+/// bytes it takes, the name, whether it is empty (`/>`). `None` for anything
+/// malformed or any attribute the icon may not have.
+fn open_tag(rest: &str) -> Option<(usize, &str, bool)> {
+    let b = rest.as_bytes();
+    let mut i = 1;
+    while i < b.len() && name_byte(b[i]) {
+        i += 1;
     }
-    false
+    let name = &rest[1..i];
+    if name.is_empty() || !(b[1].is_ascii_alphabetic() || b[1] == b'_' || b[1] == b':') {
+        return None;
+    }
+    loop {
+        let ws = b[i..]
+            .iter()
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        i += ws;
+        match b.get(i)? {
+            b'>' => return Some((i + 1, name, false)),
+            b'/' => {
+                return (b.get(i + 1) == Some(&b'>')).then_some((i + 2, name, true));
+            }
+            _ => {}
+        }
+        // An attribute needs space before it.
+        if ws == 0 {
+            return None;
+        }
+        let start = i;
+        while i < b.len() && name_byte(b[i]) {
+            i += 1;
+        }
+        let attr = &rest[start..i];
+        if attr.is_empty() || !(b[start].is_ascii_alphabetic() || matches!(b[start], b'_' | b':')) {
+            return None;
+        }
+        i += b[i..]
+            .iter()
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        if b.get(i) != Some(&b'=') {
+            return None;
+        }
+        i += 1;
+        i += b[i..]
+            .iter()
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        let quote = *b.get(i)?;
+        if quote != b'"' && quote != b'\'' {
+            return None;
+        }
+        let value_start = i + 1;
+        let len = b[value_start..].iter().position(|c| *c == quote)?;
+        let value = &rest[value_start..value_start + len];
+        if !attribute_ok(attr, value) {
+            return None;
+        }
+        i = value_start + len + 1;
+    }
+}
+
+/// Whether an attribute may be in an icon.
+fn attribute_ok(name: &str, value: &str) -> bool {
+    let local = name
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // Event handlers (`onload`, `onclick`, `onbegin`...); the base of every
+    // relative reference.
+    if local.starts_with("on") || local == "base" {
+        return false;
+    }
+    if value.contains('<') || value.contains('\\') {
+        return false;
+    }
+    // Quotes written as entities read as quotes.
+    let v = value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .to_ascii_lowercase();
+    if local == "href" && !v.starts_with('#') {
+        return false;
+    }
+    for scheme in ["javascript:", "vbscript:", "data:", "@import"] {
+        if v.contains(scheme) {
+            return false;
+        }
+    }
+    // Every CSS reference points inside the document.
+    for func in [
+        "url(",
+        "image(",
+        "image-set(",
+        "src(",
+        "element(",
+        "cross-fade(",
+    ] {
+        let mut rest = v.as_str();
+        while let Some(i) = rest.find(func) {
+            rest = rest[i + func.len()..].trim_start();
+            if func != "url(" {
+                return false;
+            }
+            let inner = rest.strip_prefix(['"', '\'']).unwrap_or(rest).trim_start();
+            if !inner.starts_with('#') {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// A name that may be looked up as an icon inside the image.

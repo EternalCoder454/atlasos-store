@@ -512,15 +512,22 @@ fn remote_names() {
     assert_eq!(f.suggest_remote_name, "a.b-origin");
     // No valid remote name from `<Name>-origin`: refused, never cut or replaced.
     let base = "[Flatpak Ref]\nUrl=https://h.example.org\n";
-    for n in [format!("org.{}", "x".repeat(60)), "-a.b".to_string()] {
-        let e = r(&format!("{base}Name={n}\n")).unwrap_err();
-        assert_eq!(e.reason, Reason::RemoteName);
-        assert!(e.to_string().contains("too long"));
-        // ...unless the file suggests a valid one.
-        assert!(r(&format!("{base}Name={n}\nSuggestRemoteName=mine\n")).is_ok());
-    }
+    let n = format!("org.{}", "x".repeat(60));
+    let e = r(&format!("{base}Name={n}\n")).unwrap_err();
+    assert_eq!(e.reason, Reason::RemoteName);
+    assert!(e.to_string().contains("too long"));
+    // ...unless the file suggests a valid one.
+    assert!(r(&format!("{base}Name={n}\nSuggestRemoteName=mine\n")).is_ok());
     let n = format!("org.{}", "x".repeat(50));
     assert!(r(&format!("{base}Name={n}\n")).is_ok());
+    // An ID never starts with a dash (it would be an option on a command
+    // line), whatever remote name the file suggests.
+    for n in ["-a.b", "--help.x"] {
+        for extra in ["", "SuggestRemoteName=mine\n"] {
+            let e = r(&format!("{base}Name={n}\n{extra}")).unwrap_err();
+            assert_eq!(e.reason, Reason::Invalid("Name"), "{n}");
+        }
+    }
 }
 
 #[test]

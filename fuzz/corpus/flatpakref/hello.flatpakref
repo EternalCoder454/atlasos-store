@@ -1,0 +1,8 @@
+[Flatpak Ref]
+Title=Hello
+Name=org.test.Hello
+Branch=stable
+Url=https://dl.example.org/test/repo/
+IsRuntime=false
+GPGKey=mDMEasNkWxYJKwYBBAHaRw8BAQdA42glmLcBxZVmXT/k6tVkDCfch1JxcmCvs0MdEbLLxwa0K0F0bGFzIFN0b3JlIEZpeHR1cmUgPGZpeHR1cmVAYXRsYXMuaW52YWxpZD6IkwQTFgoAOxYhBP2OeFggwyd/fbOL9Gbscuf4lkDgBQJqw2RbAhsDBQsJCAcCAiICBhUKCQgLAgQWAgMBAh4HAheAAAoJEGbscuf4lkDgGX0BAIvj2tgNSVsHbBkRWblO8lmAgiNIlTTRloWdK/+WUyaZAP4tSG8jzutKzVIdMR3FeYonyddgHZJr9XmvNwSf63RcDA==
+RuntimeRepo=https://dl.example.org/test/test.flatpakrepo

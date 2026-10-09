@@ -30,6 +30,11 @@
     <control>touch</control>
   </supports>
   <releases>
+    <release version="0.5.0" date="2026-10-08">
+      <description>
+        <p>Security hardening: Telamon's own apps are installed only when their release is signed by a key Telamon lists, apps cannot replace system menu entries or services, and the AppImage checker and the downloads it makes are locked down further.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-08">
       <description>
         <p>Telamon's own apps that are not part of the system, such as Telamon Gates, install for you from their GitHub releases, with no Flatpak, and update from the Updates page. Every install asks first and says the app is not sandboxed.</p>

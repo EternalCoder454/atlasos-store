@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use telamon_store_core::native::fake::{Built, BundleBuilder};
+use telamon_store_core::native::fake::{Built, BundleBuilder, default_key};
 use telamon_store_core::native::install::{Dirs, Options, Origin, install_bundle};
 use telamon_store_core::native::manifest::Host;
 
@@ -38,6 +38,7 @@ fn publish(root: &Path, repo: &str, tag: &str, b: &Built) {
     for url in [
         telamon_store_core::native::github::latest_url(repo),
         format!("{base}/telamon-bundle.json"),
+        format!("{base}/telamon-bundle.json.minisig"),
         format!("{base}/{archive}"),
     ] {
         let body = fake.get(&url, "*/*", u64::MAX).unwrap();
@@ -68,9 +69,12 @@ fn main() {
     );
     std::fs::create_dir_all(root).unwrap();
     // The catalog, at the address the Store asks for.
+    // Each app lists the fake GitHub's test key as its signer; the releases
+    // below are signed with it (`Fake::publish`).
+    let signers = serde_json::json!([{"type": "minisign", "key": default_key().public()}]);
     let catalog = serde_json::json!({"schema": 1, "apps": [
-        {"id": GATES, "repo": GATES_REPO, "channel": "releases"},
-        {"id": SCRATCH, "repo": SCRATCH_REPO, "channel": "releases"},
+        {"id": GATES, "repo": GATES_REPO, "channel": "releases", "signers": signers},
+        {"id": SCRATCH, "repo": SCRATCH_REPO, "channel": "releases", "signers": signers},
     ]});
     write(
         root,
@@ -107,7 +111,7 @@ fn main() {
         &Options {
             expect_id: Some(GATES),
             outer: Some(&old.outer),
-            origin: Origin::release(GATES_REPO, "v0.1.0"),
+            origin: Origin::signed_release(GATES_REPO, "v0.1.0", &default_key().key_id()),
             host: &host,
         },
     )

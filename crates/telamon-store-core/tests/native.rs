@@ -8,10 +8,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use telamon_store_core::native::check::{self, Status, TTL};
-use telamon_store_core::native::fake::{Built, BundleBuilder, Fake, Raw};
+use telamon_store_core::native::fake::{Built, BundleBuilder, Fake, Raw, default_key};
 use telamon_store_core::native::fetch::Cache;
 use telamon_store_core::native::install::{self, Dirs, Options, Origin};
 use telamon_store_core::native::manifest::{Host, Kind, Manifest};
+use telamon_store_core::native::sign::Signer;
 use telamon_store_core::native::version::Version;
 use telamon_store_core::native::{archive, catalog::Entry};
 use telamon_store_core::net::NetError;
@@ -58,6 +59,16 @@ fn host() -> Host {
 
 fn gates(version: &str) -> BundleBuilder {
     BundleBuilder::new(ID, "Telamon Gates", version).exe("telamon-gates")
+}
+
+/// The start of a PNG: enough for the Store's check of an icon (the signature
+/// and the header's size), which is all it reads.
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    b.extend_from_slice(&w.to_be_bytes());
+    b.extend_from_slice(&h.to_be_bytes());
+    b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b
 }
 
 fn write_archive(root: &Path, built: &Built) -> PathBuf {
@@ -294,7 +305,7 @@ fn the_outer_manifest_must_match_the_one_inside() {
         &Options {
             expect_id: Some(ID),
             outer: Some(&outer),
-            origin: Origin::local(),
+            origin: Origin::signed_release(REPO, "v1.0.0", &default_key().key_id()),
             host: &h,
         },
     )
@@ -307,7 +318,7 @@ fn the_outer_manifest_must_match_the_one_inside() {
         &Options {
             expect_id: Some(ID),
             outer: Some(&built.outer),
-            origin: Origin::local(),
+            origin: Origin::signed_release(REPO, "v1.0.0", &default_key().key_id()),
             host: &h,
         },
     )
@@ -450,7 +461,7 @@ fn an_update_that_drops_a_file_removes_its_copy() {
         &gates("0.1.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"png",
+                &png(48, 48),
                 false,
             )
             .build(),
@@ -472,7 +483,7 @@ fn a_failed_update_leaves_the_old_version_working() {
         &gates("0.1.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"old icon",
+                &png(48, 48),
                 false,
             )
             .build(),
@@ -498,12 +509,12 @@ fn a_failed_update_leaves_the_old_version_working() {
         let new = gates("0.2.0")
             .file(
                 &format!("share/icons/hicolor/48x48/apps/{ID}.png"),
-                b"new icon",
+                &png(49, 49),
                 false,
             )
             .file(
                 &format!("share/icons/hicolor/64x64/apps/{ID}.png"),
-                b"new 64",
+                &png(64, 64),
                 false,
             )
             .build();
@@ -522,7 +533,7 @@ fn a_failed_update_leaves_the_old_version_working() {
         assert_eq!(fs::read(&desktop).unwrap(), before_desktop, "{step}");
         assert_eq!(
             fs::read(d.data.join(format!("icons/hicolor/48x48/apps/{ID}.png"))).unwrap(),
-            b"old icon",
+            png(48, 48),
             "{step}"
         );
         assert!(
@@ -808,6 +819,7 @@ fn entry() -> Entry {
         id: ID.into(),
         repo: REPO.into(),
         channel: "releases".into(),
+        signers: vec![Signer::minisign(&default_key().public()).unwrap()],
     }
 }
 
@@ -859,7 +871,10 @@ fn a_newer_release_is_an_update_and_installs() {
     check::install_candidate(&fake, &d, &h, &cand, &work, &mut |a, b| seen.push((a, b))).unwrap();
     assert!(seen.last().is_some_and(|(a, b)| a == b && *a > 0));
     let rec = install::read_record(&d, ID).unwrap();
-    assert_eq!(rec.origin, Origin::release(REPO, "v0.1.0"));
+    assert_eq!(
+        rec.origin,
+        Origin::signed_release(REPO, "v0.1.0", &default_key().key_id())
+    );
     assert!(
         fs::read_dir(&work).map(|r| r.count() == 0).unwrap_or(true),
         "the download was removed"
@@ -892,8 +907,8 @@ fn the_cache_spares_github_until_it_expires_or_the_user_asks() {
     let first = fake.requests().len();
     assert_eq!(
         first,
-        3,
-        "catalog, release, manifest: {:?}",
+        4,
+        "catalog, release, manifest, signature: {:?}",
         fake.requests()
     );
     check::check(&fake, &cache, &d, &host(), NOW + 60, false);
@@ -903,9 +918,9 @@ fn the_cache_spares_github_until_it_expires_or_the_user_asks() {
         "nothing asked within the cache time"
     );
     check::check(&fake, &cache, &d, &host(), NOW + TTL + 1, false);
-    assert_eq!(fake.requests().len(), first + 3, "asked again once expired");
+    assert_eq!(fake.requests().len(), first + 4, "asked again once expired");
     check::check(&fake, &cache, &d, &host(), NOW + TTL + 2, true);
-    assert_eq!(fake.requests().len(), first + 6, "force asks again");
+    assert_eq!(fake.requests().len(), first + 8, "force asks again");
 }
 
 #[test]
@@ -1152,7 +1167,11 @@ fn real_bundles_from_the_framework_tool_install() {
             &Options {
                 expect_id: Some(&m.id),
                 outer: outer.as_ref(),
-                origin: Origin::local(),
+                origin: if outer.is_some() {
+                    Origin::signed_release(REPO, "v0.0.0", &default_key().key_id())
+                } else {
+                    Origin::local()
+                },
                 host: &h,
             },
         )
@@ -1246,9 +1265,11 @@ fn an_update_does_not_overwrite_a_file_the_user_edited() {
 #[test]
 fn a_bundle_cannot_take_another_apps_notification_file() {
     let (d, root) = dirs("notifyrc");
-    let b = gates("1.0.0").file("share/knotifications6/telamon-store.notifyrc", b"x", false);
+    let rc: &[u8] =
+        b"[Global]\nIconName=telamon-gates\n\n[Event/message]\nName=Message\nAction=Popup\n";
+    let b = gates("1.0.0").file("share/knotifications6/telamon-store.notifyrc", rc, false);
     assert!(install_local(&d, &root, &b.build()).is_err());
-    let ok = gates("1.0.0").file("share/knotifications6/telamon-gates.notifyrc", b"x", false);
+    let ok = gates("1.0.0").file("share/knotifications6/telamon-gates.notifyrc", rc, false);
     install_local(&d, &root, &ok.build()).unwrap();
     assert!(
         d.data
@@ -1279,4 +1300,411 @@ fn a_local_bundle_is_installed_from_the_copy_that_was_looked_at() {
         },
     )
     .unwrap();
+}
+
+// ---- release signatures: what is offered and installed rests on them ----
+
+use telamon_store_core::native::fake::{Signing, TestKey};
+use telamon_store_core::native::fetch::{Fetcher as _, release_cache_name};
+use telamon_store_core::native::sign::SIGNATURE_NAME;
+
+fn url(tag: &str, name: &str) -> String {
+    format!("https://github.com/{REPO}/releases/download/{tag}/{name}")
+}
+
+/// One problem, mentioning `words`, and nothing offered.
+fn refused(r: &check::Report, words: &str) {
+    assert!(r.apps.is_empty(), "offered: {:?}", r.apps);
+    assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
+    assert!(
+        r.problems[0].text.contains(words),
+        "wanted {words:?} in {:?}",
+        r.problems
+    );
+}
+
+#[test]
+fn a_release_without_a_signature_is_not_offered() {
+    let (d, _root, cache, fake) = world("unsigned");
+    fake.publish_with(REPO, "v0.1.0", &gates("0.1.0").build(), Signing::Unsigned);
+    let r = check::check(&fake, &cache, &d, &host(), NOW, false);
+    refused(&r, "not signed");
+    // Nothing but the catalog, the release and the manifest was asked for.
+    assert!(
+        fake.requests().iter().all(|u| !u.ends_with(".tar.zst")),
+        "{:?}",
+        fake.requests()
+    );
+}
+
+#[test]
+fn a_release_signed_by_a_key_the_catalog_does_not_list_is_not_offered() {
+    let (d, _root, cache, fake) = world("unlisted");
+    let stranger = TestKey::new(9);
+    fake.publish_with(
+        REPO,
+        "v0.1.0",
+        &gates("0.1.0").build(),
+        Signing::With(&stranger),
+    );
+    let r = check::check(&fake, &cache, &d, &host(), NOW, false);
+    refused(&r, "not signed by a key that Telamon's list names");
+}
+
+#[test]
+fn a_manifest_changed_after_it_was_signed_is_not_offered() {
+    // The attack the signature is for: the manifest and the archive are
+    // replaced together, so the hashes still agree with each other.
+    let (d, _root, cache, fake) = world("tampered");
+    let good = gates("0.1.0").build();
+    fake.publish(REPO, "v0.1.0", &good);
+    let evil = gates("0.1.0")
+        .file("share/net.eterneon.telamon.gates/data.txt", b"evil", false)
+        .build();
+    let mut m = evil.outer.clone();
+    m.summary = "evil".into();
+    fake.set(
+        &url("v0.1.0", "telamon-bundle.json"),
+        serde_json::to_vec_pretty(&m).unwrap(),
+    );
+    fake.set(
+        &url("v0.1.0", good.outer.archive.as_ref().unwrap().name.as_str()),
+        evil.archive.clone(),
+    );
+    let r = check::check(&fake, &cache, &d, &host(), NOW, false);
+    refused(&r, "does not match its manifest");
+}
+
+#[test]
+fn a_garbled_or_oversize_signature_is_not_offered() {
+    let (d, _root, cache, fake) = world("garbled");
+    fake.publish(REPO, "v0.1.0", &gates("0.1.0").build());
+    let sig = url("v0.1.0", SIGNATURE_NAME);
+    let good = fake.get(&sig, "x", 1 << 20).unwrap();
+    for bad in [
+        good[..good.len() / 2].to_vec(),
+        b"not a signature".to_vec(),
+        vec![0xff; 300],
+    ] {
+        fake.set(&sig, bad);
+        let r = check::check(&fake, &cache, &d, &host(), NOW, true);
+        refused(&r, "signature is not valid");
+    }
+    // Larger than the limit: refused by the size the release declares, and
+    // by the cap on what is read.
+    fake.set(&sig, vec![b'\n'; 5000]);
+    let r = check::check(&fake, &cache, &d, &host(), NOW, true);
+    assert!(r.apps.is_empty() && r.problems.len() == 1, "{r:?}");
+}
+
+#[test]
+fn a_key_can_be_rotated_by_the_catalog() {
+    let (d, _root, cache, fake) = world("rotation");
+    let (old, new) = (TestKey::new(1), TestKey::new(2));
+    let id = |k: &TestKey| k.key_id();
+    // Both keys are listed: either one's releases are offered, with the key
+    // that verified named.
+    fake.catalog_with_keys(&[(ID, REPO, vec![&old, &new])]);
+    fake.publish_with(REPO, "v0.1.0", &gates("0.1.0").build(), Signing::With(&old));
+    let r = check::check(&fake, &cache, &d, &host(), NOW, true);
+    assert_eq!(r.apps[0].candidate.as_ref().unwrap().signer, id(&old));
+    fake.publish_with(REPO, "v0.2.0", &gates("0.2.0").build(), Signing::With(&new));
+    let r = check::check(&fake, &cache, &d, &host(), NOW + 1, true);
+    assert_eq!(r.apps[0].candidate.as_ref().unwrap().signer, id(&new));
+    fake.publish_with(REPO, "v0.2.1", &gates("0.2.1").build(), Signing::With(&old));
+    let r = check::check(&fake, &cache, &d, &host(), NOW + 2, true);
+    assert_eq!(r.apps[0].candidate.as_ref().unwrap().signer, id(&old));
+
+    // The old key is dropped from the entry: what it signed is refused, even
+    // the answer the cache holds, and the new key's releases go on.
+    fake.catalog_with_keys(&[(ID, REPO, vec![&new])]);
+    let r = check::check(&fake, &cache, &d, &host(), NOW + 3, true);
+    refused(&r, "not signed by a key that Telamon's list names");
+    let r = check::cached(&cache, &d, &host());
+    assert!(r.apps.is_empty(), "{:?}", r.apps);
+    fake.publish_with(REPO, "v0.3.0", &gates("0.3.0").build(), Signing::With(&new));
+    let r = check::check(&fake, &cache, &d, &host(), NOW + 4, true);
+    assert_eq!(r.apps[0].candidate.as_ref().unwrap().signer, id(&new));
+}
+
+#[test]
+fn a_signed_manifest_for_another_app_is_refused_under_this_entry() {
+    // One key signs for both apps; the manifest of app A is offered at app
+    // B's repository, signature and all.
+    const OTHER: &str = "net.eterneon.telamon.other";
+    const OTHER_REPO: &str = "EternalCoder454/telamon-other";
+    let (d, _root, cache, fake) = world("binding");
+    fake.catalog(&[(OTHER, OTHER_REPO)]);
+    fake.publish(OTHER_REPO, "v0.1.0", &gates("0.1.0").build());
+    let r = check::check(&fake, &cache, &d, &host(), NOW, false);
+    assert!(r.apps.is_empty(), "{:?}", r.apps);
+    assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
+    assert!(
+        r.problems[0].text.contains("different app"),
+        "{:?}",
+        r.problems
+    );
+}
+
+#[test]
+fn a_signature_over_an_older_version_cannot_be_replayed_under_a_newer_tag() {
+    let (d, _root, cache, fake) = world("replay");
+    let old = gates("0.2.0").build();
+    fake.publish(REPO, "v0.2.0", &old);
+    let old_manifest = fake
+        .get(&url("v0.2.0", "telamon-bundle.json"), "x", 1 << 20)
+        .unwrap();
+    let old_sig = fake
+        .get(&url("v0.2.0", SIGNATURE_NAME), "x", 1 << 20)
+        .unwrap();
+    let new = gates("0.3.0").build();
+    fake.publish(REPO, "v0.3.0", &new);
+    let new_manifest = fake
+        .get(&url("v0.3.0", "telamon-bundle.json"), "x", 1 << 20)
+        .unwrap();
+
+    // The old, validly signed manifest and signature, at the new tag.
+    fake.set(&url("v0.3.0", "telamon-bundle.json"), old_manifest);
+    fake.set(&url("v0.3.0", SIGNATURE_NAME), old_sig.clone());
+    let r = check::check(&fake, &cache, &d, &host(), NOW, true);
+    refused(&r, "tagged v0.3.0 but the bundle is version 0.2.0");
+
+    // The old signature on the new manifest.
+    fake.set(&url("v0.3.0", "telamon-bundle.json"), new_manifest);
+    let r = check::check(&fake, &cache, &d, &host(), NOW + 1, true);
+    refused(&r, "does not match its manifest");
+}
+
+#[test]
+fn a_signed_old_release_served_as_the_latest_does_not_downgrade() {
+    let h = host();
+    let (d, root, cache, fake) = world("downgrade");
+    let work = root.join("work");
+    fake.publish(REPO, "v0.2.0", &gates("0.2.0").build());
+    let r = check::check(&fake, &cache, &d, &h, NOW, false);
+    let cand = r.apps[0].candidate.clone().unwrap();
+    check::install_candidate(&fake, &d, &h, &cand, &work, &mut |_, _| {}).unwrap();
+
+    // The latest release is now an older one (a replayed or re-promoted
+    // release), correctly signed, tag and manifest agreeing.
+    let old = gates("0.1.0").build();
+    fake.publish(REPO, "v0.1.0", &old);
+    let r = check::check(&fake, &cache, &d, &h, NOW + 10, true);
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    assert_eq!(r.apps[0].status, Status::UpToDate);
+    assert!(
+        r.apps[0].candidate.is_none(),
+        "an older release is not kept"
+    );
+    assert_eq!(r.apps[0].installed.as_ref().unwrap().version, "0.2.0");
+    let r = check::cached(&cache, &d, &h);
+    assert_eq!(r.apps[0].status, Status::UpToDate);
+
+    // Even handed the old candidate (from a computer that has nothing
+    // installed), installing it changes nothing.
+    let (d2, _root2) = dirs("downgrade-elsewhere");
+    let cache2 = Cache::new(root.join("cache2"));
+    let r2 = check::check(&fake, &cache2, &d2, &h, NOW + 11, true);
+    let old_cand = r2.apps[0].candidate.clone().unwrap();
+    assert_eq!(old_cand.manifest.version, "0.1.0");
+    let e = check::install_candidate(&fake, &d, &h, &old_cand, &work, &mut |_, _| {}).unwrap_err();
+    assert!(e.0.contains("older than the version you have"), "{e}");
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.2.0");
+    assert_eq!(
+        fs::read_link(d.app(ID).join("current")).unwrap(),
+        Path::new("0.2.0")
+    );
+
+    // The check before the download is not the only one: the install itself
+    // refuses to put a release over a newer version.
+    let f = write_archive(&root, &old);
+    let e = install::install_bundle(
+        &d,
+        &f,
+        &Options {
+            expect_id: Some(ID),
+            outer: Some(&old.outer),
+            origin: Origin::signed_release(REPO, "v0.1.0", &default_key().key_id()),
+            host: &h,
+        },
+    )
+    .unwrap_err();
+    assert!(e.0.contains("older than the version you have"), "{e}");
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.2.0");
+    // A file the user opened is their own decision, and shown as a replacement.
+    install_local(&d, &root, &old).unwrap();
+    assert_eq!(install::read_record(&d, ID).unwrap().version, "0.1.0");
+}
+
+#[test]
+fn the_record_names_the_key_the_release_was_signed_with() {
+    let h = host();
+    let (d, root, cache, fake) = world("signer-record");
+    let work = root.join("work");
+    fake.publish(REPO, "v0.1.0", &gates("0.1.0").build());
+    let r = check::check(&fake, &cache, &d, &h, NOW, false);
+    let cand = r.apps[0].candidate.clone().unwrap();
+    assert_eq!(cand.signer, default_key().key_id());
+    let done = check::install_candidate(&fake, &d, &h, &cand, &work, &mut |_, _| {}).unwrap();
+    assert_eq!(
+        done.signer.as_deref(),
+        Some(default_key().key_id().as_str())
+    );
+    let rec = install::read_record(&d, ID).unwrap();
+    assert_eq!(rec.origin.signer, done.signer);
+    assert_eq!(install::list(&d)[0].origin.signer, done.signer);
+
+    // A record from before releases were signed has none and still reads.
+    let path = d.app(ID).join("install.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["origin"].as_object_mut().unwrap().remove("signer");
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(install::read_record(&d, ID).unwrap().origin.signer, None);
+    // A signer that is not a key ID is dropped, not shown.
+    v["origin"]["signer"] = "<b>evil</b>".into();
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let rec = install::read_record(&d, ID).unwrap();
+    assert_eq!(rec.origin.signer, None);
+    assert_eq!(rec.origin.repo.as_deref(), Some(REPO));
+
+    // A file the user opened records none.
+    let (d2, root2) = dirs("signer-local");
+    let done = install_local(&d2, &root2, &gates("0.1.0").build()).unwrap();
+    assert_eq!(done.signer, None);
+    assert_eq!(install::read_record(&d2, ID).unwrap().origin.signer, None);
+}
+
+#[test]
+fn a_cached_answer_is_verified_again_when_it_is_read() {
+    let h = host();
+    let (d, _root, cache, fake) = world("cache-verify");
+    fake.publish(REPO, "v0.1.0", &gates("0.1.0").build());
+    check::check(&fake, &cache, &d, &h, NOW, false);
+    let name = release_cache_name(ID);
+    let (t, texts) = cache.read(&name).unwrap();
+    assert_eq!(texts.len(), 3, "release, manifest, signature");
+    assert_eq!(check::cached(&cache, &d, &h).apps.len(), 1);
+
+    // The cache is a file anyone who can write to the user's cache can edit:
+    // a changed manifest, a changed signature and a missing one are all out.
+    let write = |texts: &[&str]| cache.write(&name, t, texts);
+    let tampered = texts[1].replace("is a test app", "is an evil app");
+    write(&[&texts[0], &tampered, &texts[2]]);
+    assert!(check::cached(&cache, &d, &h).apps.is_empty());
+    write(&[&texts[0], &texts[1], &texts[2].replace('R', "Q")]);
+    assert!(check::cached(&cache, &d, &h).apps.is_empty());
+    write(&[&texts[0], &texts[1]]);
+    assert!(check::cached(&cache, &d, &h).apps.is_empty());
+    write(&[&texts[0], &texts[1], &texts[2]]);
+    assert_eq!(check::cached(&cache, &d, &h).apps.len(), 1);
+
+    // A tampered cache entry is not used by a check either: GitHub is asked.
+    write(&[&texts[0], &tampered, &texts[2]]);
+    let before = fake.requests().len();
+    let r = check::check(&fake, &cache, &d, &h, NOW + 1, false);
+    assert!(fake.requests().len() > before);
+    assert_eq!(r.apps.len(), 1);
+    assert!(
+        r.apps[0]
+            .candidate
+            .as_ref()
+            .unwrap()
+            .manifest
+            .summary
+            .contains("test app")
+    );
+}
+
+#[test]
+fn releases_signed_by_the_real_minisign_tool_are_accepted() {
+    use telamon_store_core::native::check::candidate_from;
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native/signed");
+    let read = |n: &str| fs::read(format!("{DIR}/{n}")).unwrap();
+    let key = |n: &str| {
+        let t = fs::read_to_string(format!("{DIR}/{n}")).unwrap();
+        Signer::minisign(t.lines().nth(1).unwrap()).unwrap()
+    };
+    let (a, b) = (key("a.pub"), key("b.pub"));
+    let m3 = read("gates-0.3.0.json");
+    let entry = |id: &str, signers: Vec<Signer>| Entry {
+        id: id.into(),
+        repo: REPO.into(),
+        channel: "releases".into(),
+        signers,
+    };
+    // The release the fixtures describe: the manifest, its signature and an
+    // archive of the size and name the manifest gives.
+    let manifest = Manifest::parse(&m3, Kind::Outer).unwrap();
+    let archive = manifest.archive.clone().unwrap();
+    let release = |tag: &str, sig_size: usize| {
+        let asset = |name: &str, size: usize| {
+            serde_json::json!({"name": name, "size": size, "state": "uploaded",
+            "browser_download_url": format!("https://github.com/{REPO}/releases/download/{tag}/{name}")})
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "tag_name": tag, "draft": false, "prerelease": false,
+            "assets": [asset("telamon-bundle.json", m3.len()),
+                       asset(SIGNATURE_NAME, sig_size),
+                       asset(&archive.name, archive.size as usize)]}))
+        .unwrap()
+    };
+    let sig_a = read("gates-0.3.0.by-a.minisig");
+    let rel = release("v0.3.0", sig_a.len());
+    let ok = candidate_from(&entry(ID, vec![a.clone(), b.clone()]), &rel, &m3, &sig_a).unwrap();
+    assert_eq!(ok.signer, a.key_id);
+    assert_eq!(ok.manifest.version, "0.3.0");
+    // Rotation: the second listed key signed it.
+    let sig_b = read("gates-0.3.0.by-b.minisig");
+    let ok = candidate_from(&entry(ID, vec![a.clone(), b.clone()]), &rel, &m3, &sig_b).unwrap();
+    assert_eq!(ok.signer, b.key_id);
+    // The same signed files under another app's entry.
+    let e = candidate_from(
+        &entry("net.eterneon.telamon.other", vec![a.clone()]),
+        &rel,
+        &m3,
+        &sig_a,
+    )
+    .unwrap_err();
+    assert!(e.0.contains("different app"), "{e}");
+    // The 0.2.0 signature, a key that is not listed, the legacy kind.
+    let sig2 = read("gates-0.2.0.by-a.minisig");
+    assert!(candidate_from(&entry(ID, vec![a.clone()]), &rel, &m3, &sig2).is_err());
+    let sig_c = read("gates-0.3.0.by-c.minisig");
+    assert!(candidate_from(&entry(ID, vec![a.clone(), b.clone()]), &rel, &m3, &sig_c).is_err());
+    let legacy = read("gates-0.3.0.legacy-by-a.minisig");
+    assert!(candidate_from(&entry(ID, vec![a.clone()]), &rel, &m3, &legacy).is_err());
+    // The tag of the old release, with the new manifest and signature.
+    let e = candidate_from(
+        &entry(ID, vec![a]),
+        &release("v0.2.0", sig_a.len()),
+        &m3,
+        &sig_a,
+    )
+    .unwrap_err();
+    assert!(e.0.contains("tagged v0.2.0"), "{e}");
+}
+
+#[test]
+fn a_release_is_never_installed_without_a_signer() {
+    let (d, root) = dirs("unsigned-origin");
+    let built = gates("1.0.0").build();
+    let f = write_archive(&root, &built);
+    let h = host();
+    // A release (its outer manifest given) whose origin names no key.
+    for origin in [Origin::release(REPO, "v1.0.0"), Origin::local()] {
+        let e = install::install_bundle(
+            &d,
+            &f,
+            &Options {
+                expect_id: Some(ID),
+                outer: Some(&built.outer),
+                origin,
+                host: &h,
+            },
+        )
+        .unwrap_err();
+        assert!(e.0.contains("verified signature"), "{e}");
+    }
+    assert!(install::list(&d).is_empty());
+    assert!(install::read_record(&d, ID).is_none());
 }

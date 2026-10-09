@@ -16,7 +16,7 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-image=localhost/telamon-store-dev:44
+image=${TELAMON_STORE_IMAGE:-localhost/telamon-store-dev:44}
 work=${TELAMON_STORE_WORK:-${ATLAS_STORE_WORK:-$HOME/.cache/claude-builds/telamon-store}}
 mkdir -p "$work"
 
@@ -32,7 +32,7 @@ if ! podman image exists "$image"; then
     fi
     # No SELinux relabelling (:z/:Z) of host folders: it would lock other
     # containers and tools out of them. Labels are off for the container.
-    ctr=$(podman run -d --security-opt label=disable \
+    ctr=$(podman run -d --security-opt label=disable --ulimit core=0 \
         -v "$repo/packaging":/packaging:ro \
         -v "$rpms":/telamon-rpms:ro \
         -v telamon-store-dnf:/var/cache/libdnf5 \
@@ -54,7 +54,7 @@ fi
 
 tty=()
 [ -t 0 ] && tty=(-it)
-exec podman run --rm "${tty[@]}" --security-opt label=disable \
+exec podman run --rm "${tty[@]}" --security-opt label=disable --ulimit core=0 \
     -v "$repo":/src -w /src \
     -v "$work":/work \
     -v telamon-store-cargo:/root/.cargo/registry \

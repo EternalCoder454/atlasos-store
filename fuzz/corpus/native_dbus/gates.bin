@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=net.eterneon.telamon.gates
+Exec=telamon-gates --gapplication-service
+/home/u/.local/share/telamon-apps/net.eterneon.telamon.gates/currenttelamon-gates

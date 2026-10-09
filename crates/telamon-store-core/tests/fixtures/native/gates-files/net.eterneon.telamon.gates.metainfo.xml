@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.gates</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Telamon Gates</name>
+  <summary>Chat with an AI model that runs on your own computer</summary>
+  <description>
+    <p>Telamon Gates is the AI chat of Telamon OS. Ask a question and the reply streams in as it is written, with formatted text, tables and code you can copy in one click.</p>
+    <p>Conversations are kept as plain files on your computer, grouped by day in the sidebar and easy to search. Pick a model, set a system prompt, and watch how much of your graphics card's memory is in use.</p>
+    <p>It never collects usage data.</p>
+  </description>
+  <launchable type="desktop-id">net.eterneon.telamon.gates.desktop</launchable>
+  <url type="homepage">https://github.com/EternalCoder454/telamon-gates</url>
+  <url type="vcs-browser">https://github.com/EternalCoder454/telamon-gates</url>
+  <url type="bugtracker">https://github.com/EternalCoder454/telamon-gates/issues</url>
+  <developer id="net.eterneon">
+    <name>Eterneon</name>
+  </developer>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>AI</keyword>
+    <keyword>chat</keyword>
+    <keyword>LLM</keyword>
+    <keyword>llama</keyword>
+    <keyword>assistant</keyword>
+  </keywords>
+  <provides>
+    <binary>telamon-gates</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-10-08">
+      <description>
+        <p>First release: conversations with streaming replies, a sidebar grouped by day, tokens per second and a VRAM meter.</p>
+      </description>
+    </release>
+  </releases>
+</component>

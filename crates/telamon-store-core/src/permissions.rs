@@ -10,8 +10,8 @@
 //!
 //! | Risk   | What |
 //! |--------|------|
-//! | High   | **Filesystem** (any mode, in every spelling): `host`, `host-os`, `host-etc`, `/`; home (also `home:ro`) and its ancestors; `/tmp`, `/mnt`, `/media`, `/opt`, `/srv`, `/lib32`, `/libx32`, `/nix`, `/sysroot`, `/boot`, `/etc`, `/usr`, `/var`, `/run` and anything under them (and `/bin`, `/sbin`, `/lib*`, `/dev`, `/proc`, `/sys`); `xdg-run` and `xdg-run/pipewire-0` (direct PipeWire access), `xdg-run/gvfsd`, other sub-paths of it, `xdg-run/speech-dispatcher`, `xdg-run/gvfs` and `xdg-run/app/ID` when writable, `xdg-run/app/ID` of a password or chat app (`org.keepassxc.KeePassXC`, `com.bitwarden.desktop`, `im.riot.Riot`, `org.signal.Signal`, `com.onepassword.OnePassword`, `org.telegram.desktop`, `io.element.Element`, `org.mozilla.Thunderbird`, `org.gnome.seahorse.Application`; a best-effort list) or of an invalid ID, and every `/run/user/UID` path; `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.mozilla`, `~/.local/share/keyrings`, `~/.local/share/kwalletd`, `~/.netrc`, `~/.git-credentials`, `~/.password-store`, `~/.docker`, `~/.kube`, `~/.thunderbird`, `~/.pki`, `~/.var/app`, `~/.config/{mozilla,vivaldi,microsoft-edge,opera,containers,Element,1Password,Bitwarden,keepassxc,gcloud,gh,rclone,chromium,google-chrome,BraveSoftware,Signal,discord,kdeconnect}`, and every folder that holds one (so `xdg-config`, `xdg-data`, `~/.local` even read-only). **Escape locations** when read-write or `create`: the bare `xdg-cache`, any folder that holds an escape location, any dot entry directly in `~` except `.config`, `.local`, `.cache` and the allowlist `.themes`, `.icons`, `.fonts` ("settings that other programs run"), the editor, KDE and tool files listed in `ESCAPES` (`.vimrc`, `.config/nvim`, `.config/konsolerc`, `.gitconfig`, `.cargo/bin`, `.steam`, `.wine`, `.minecraft`, `.local/share/Steam`, `.local/share/lutris`, `~/go/bin`, `.var/app` and more), `xdg-config/{autostart,systemd,environment.d,plasma-workspace,fish}`, `xdg-data/{flatpak,applications,dbus-1,systemd,kservices5,kservices6,plasma}`, `~/.local/bin`, `~/bin`, and the shell startup files `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zprofile`, `~/.zshenv`. A `..` that leaves its base, or an item that can't be read, is unknown. **Other**: `devices` all, input, kvm; `sockets` session-bus, system-bus, ssh-auth, gpg-agent; x11 or fallback-x11 without wayland; session bus talk or own to `org.freedesktop.Flatpak`, `org.freedesktop.systemd1`, `org.freedesktop.secrets`, `org.kde.kwalletd5/6`, `org.gnome.keyring*`, `ca.desrt.dconf`, `org.kde.klauncher5/6`, `org.kde.KWin`, `org.kde.plasmashell`, `org.kde.kded5/6`, `org.gnome.Shell`, `org.freedesktop.PackageKit`, `org.freedesktop.impl.portal.*`, `org.kde.kdeconnect*`, `org.kde.ksmserver`, `org.kde.krunner`, `org.kde.konsole*`, `org.kde.yakuake`, `org.kde.kglobalaccel`, `org.gnome.SettingsDaemon.*`, `org.gnome.Mutter.*`, or a wildcard that covers one of them (`org.kde.*`, `org.*`); system bus talk or own to any name; talk or own on the accessibility bus; any other `... Bus Policy` group; every unknown item |
-//! | Medium | read-only `xdg-run/speech-dispatcher`, `xdg-run/gvfs` and `xdg-run/app/ID`; any read-only path with a non-ASCII character that would be Low; the bare `xdg-cache` read-only; an unlisted dot entry in `~` read-only; other paths and xdg folders read-write; `shared` network; `sockets` pulseaudio, pcsc, cups, x11 next to wayland; `devices` usb; `features` devel, bluetooth, canbus; other session bus names (talk or own); own on a portal name; `[Environment]` that sets `LD_*` or `PATH`; `extra-data` hosts |
+//! | High   | **Filesystem** (any mode, in every spelling): `host`, `host-os`, `host-etc`, `host-root`, `/`; home (also `home:ro`) and its ancestors; `/tmp`, `/mnt`, `/media`, `/opt`, `/srv`, `/lib32`, `/libx32`, `/nix`, `/sysroot`, `/boot`, `/etc`, `/usr`, `/var`, `/run` and anything under them (and `/bin`, `/sbin`, `/lib*`, `/dev`, `/proc`, `/sys`); `xdg-run` and `xdg-run/pipewire-0` (direct PipeWire access), `xdg-run/gvfsd`, other sub-paths of it, `xdg-run/speech-dispatcher`, `xdg-run/gvfs` and `xdg-run/app/ID` when writable, `xdg-run/app/ID` of a password or chat app (`org.keepassxc.KeePassXC`, `com.bitwarden.desktop`, `im.riot.Riot`, `org.signal.Signal`, `com.onepassword.OnePassword`, `org.telegram.desktop`, `io.element.Element`, `org.mozilla.Thunderbird`, `org.gnome.seahorse.Application`; a best-effort list) or of an invalid ID, and every `/run/user/UID` path; `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.mozilla`, `~/.local/share/keyrings`, `~/.local/share/kwalletd`, `~/.netrc`, `~/.git-credentials`, `~/.password-store`, `~/.docker`, `~/.kube`, `~/.thunderbird`, `~/.pki`, `~/.var/app`, `~/.config/{mozilla,vivaldi,microsoft-edge,opera,containers,Element,1Password,Bitwarden,keepassxc,gcloud,gh,rclone,chromium,google-chrome,BraveSoftware,Signal,discord,kdeconnect}`, and every folder that holds one (so `xdg-config`, `xdg-data`, `~/.local` even read-only). **Escape locations** when read-write or `create`: the bare `xdg-cache`, any folder that holds an escape location, any dot entry directly in `~` except `.config`, `.local`, `.cache` and the allowlist `.themes`, `.icons`, `.fonts` ("settings that other programs run"), the editor, KDE and tool files listed in `ESCAPES` (`.vimrc`, `.config/nvim`, `.config/konsolerc`, `.gitconfig`, `.cargo/bin`, `.steam`, `.wine`, `.minecraft`, `.local/share/Steam`, `.local/share/lutris`, `~/go/bin`, `.var/app` and more), `xdg-config/{autostart,systemd,environment.d,plasma-workspace,fish}`, `xdg-data/{flatpak,applications,dbus-1,systemd,kservices5,kservices6,plasma}`, `~/.local/bin`, `~/bin`, and the shell startup files `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zprofile`, `~/.zshenv`. A `..` that leaves its base, or an item that can't be read, is unknown. **Other**: `devices` all, input, kvm, usb (all of `/dev/bus/usb`: a program can take a keyboard or a disk over); `sockets` session-bus, system-bus, ssh-auth, gpg-agent; x11 or fallback-x11 without wayland; session bus talk or own to `org.freedesktop.Flatpak`, `org.freedesktop.systemd1`, `org.freedesktop.secrets`, `org.kde.kwalletd5/6`, `org.gnome.keyring*`, `ca.desrt.dconf`, `org.kde.klauncher5/6`, `org.kde.KWin`, `org.kde.plasmashell`, `org.kde.kded5/6`, `org.gnome.Shell`, `org.freedesktop.PackageKit`, `org.freedesktop.impl.portal.*`, `org.kde.kdeconnect*`, `org.kde.ksmserver`, `org.kde.krunner`, `org.kde.konsole*`, `org.kde.yakuake`, `org.kde.kglobalaccel`, `org.gnome.SettingsDaemon.*`, `org.gnome.Mutter.*`, or a wildcard that covers one of them (`org.kde.*`, `org.*`); system bus talk or own to any name; talk or own on the accessibility bus; any other `... Bus Policy` group; every unknown item |
+//! | Medium | read-only `xdg-run/speech-dispatcher`, `xdg-run/gvfs` and `xdg-run/app/ID`; any read-only path with a non-ASCII character that would be Low; the bare `xdg-cache` read-only; an unlisted dot entry in `~` read-only; other paths and xdg folders read-write; `shared` network; `sockets` pulseaudio, pcsc, cups, x11 next to wayland; `features` devel, bluetooth, canbus; other session bus names (talk or own); own on a portal name; `[Environment]` that sets `LD_*` or `PATH`; `extra-data` hosts |
 //! | Low    | `sockets` wayland, inherit-wayland-socket, fallback-x11 next to wayland; `shared` ipc; `devices` dri, shm; `features` multiarch, per-app-dev-shm; other paths and xdg folders read-only; `see` on any bus; talk to portal names (including `org.freedesktop.portal.Flatpak`); persistent; other environment variables; unset-environment |
 //!
 //! The lists of escape locations and credential folders can't be complete: a
@@ -412,6 +412,7 @@ fn parse_loc(path: &str) -> Option<Loc> {
         "host" => return Some(Loc::Host("host")),
         "host-os" => return Some(Loc::Host("host-os")),
         "host-etc" => return Some(Loc::Host("host-etc")),
+        "host-root" => return Some(Loc::Host("host-root")),
         "~" => return Some(Loc::Home(Vec::new())),
         "home" => return Some(Loc::Home(Vec::new())),
         _ => {}
@@ -790,6 +791,10 @@ fn fs_text(literal: &str, loc: &Loc, rank: u8) -> (Risk, String) {
     let (mut risk, mut text) = match loc {
         Loc::Host("host") | Loc::Root => (High, format!("Can {verb} all files on your computer")),
         Loc::Host("host-os") => (High, format!("Can {verb} the system's own files")),
+        Loc::Host("host-root") => (
+            High,
+            format!("Can {verb} every file on your computer, including other drives"),
+        ),
         Loc::Host(_) => (High, format!("Can {verb} the system settings in /etc")),
         Loc::Home(r) if r.is_empty() => match &owner {
             Some(h) => (High, format!("Can {verb} files in {h}")),
@@ -1050,10 +1055,16 @@ fn unknown_item(key: String, code: String, text: String) -> Item {
 }
 
 fn unknown_value(what: &str, raw: &str) -> String {
+    let value = shown(raw, 120);
+    if value.is_empty() {
+        return format!(
+            "Asks for something the Store doesn't know ({})",
+            shown(what, 60)
+        );
+    }
     format!(
-        "Asks for something the Store doesn't know ({}): {}",
-        shown(what, 60),
-        shown(raw, 120)
+        "Asks for something the Store doesn't know ({}): {value}",
+        shown(what, 60)
     )
 }
 
@@ -1766,7 +1777,11 @@ impl Permissions {
                 High,
                 "Can read all keyboard, mouse and controller input, including what you type in other apps",
             )),
-            ("devices", "usb") => Some(("device:usb", Medium, "Can use all USB devices")),
+            ("devices", "usb") => Some((
+                "device:usb",
+                High,
+                "Can talk to every USB device directly, including keyboards and storage",
+            )),
             ("devices", "kvm") => Some(("device:kvm", High, "Can use hardware virtualization")),
             ("devices", "shm") => Some(("device:shm", Low, "Can use shared memory")),
             ("devices", "all") => {

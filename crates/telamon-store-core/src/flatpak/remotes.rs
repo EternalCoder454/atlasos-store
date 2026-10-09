@@ -507,6 +507,8 @@ pub fn fetch_repo(url: &str, cancel: &CancelToken) -> Result<FlatpakRepo, Error>
                 accept: "application/x-flatpak-repo, text/plain;q=0.8, */*;q=0.1",
                 max_bytes: MAX_FILE_BYTES as u64 + 1,
                 timeout: FETCH_TIMEOUT,
+                // A link the user was given can point at any public https host.
+                hosts: net::Hosts::Any,
             };
             let _ = tx.send(net::get(&target, &request));
         })
@@ -1106,6 +1108,102 @@ mod tests {
         let listed = list_remotes(&c);
         let r = listed.remotes.iter().find(|r| r.name == "nokey").unwrap();
         assert!(!r.signed && r.unsigned() && r.enabled);
+        reset_empty();
+    }
+    /// The keys of `[remote "name"]` in the user installation's repo config,
+    /// as libflatpak wrote them.
+    fn remote_config_keys(name: &str) -> Vec<String> {
+        let dir = std::env::var("FLATPAK_USER_DIR").expect("the test sets FLATPAK_USER_DIR");
+        let bytes = std::fs::read(Path::new(&dir).join("repo/config")).unwrap();
+        let kf = crate::keyfile::KeyFile::parse(&bytes, &crate::keyfile::Limits::default())
+            .expect("libflatpak writes a key file");
+        kf.keys(&format!("remote \"{name}\""))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn remote_config_value(name: &str, key: &str) -> Option<String> {
+        let dir = std::env::var("FLATPAK_USER_DIR").expect("the test sets FLATPAK_USER_DIR");
+        let bytes = std::fs::read(Path::new(&dir).join("repo/config")).unwrap();
+        let kf = crate::keyfile::KeyFile::parse(&bytes, &crate::keyfile::Limits::default())
+            .expect("libflatpak writes a key file");
+        kf.raw(&format!("remote \"{name}\""), key)
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn a_source_files_extras_never_reach_libflatpaks_remote_config() {
+        let Some((dir, _g)) = guard() else { return };
+        reset_empty();
+        let key = include_str!("../../tests/fixtures/flatpakref/ed.b64").trim();
+        let lock = OperationLock::try_acquire().unwrap();
+        let c = CancelToken::new();
+        // Every key flatpak reads from a .flatpakrepo that can change what the
+        // remote does. The Store refuses a file with Filter (a local path),
+        // NoEnumerate and Authenticator*, and drops NoDeps, Subset and Version.
+        for (extra, refused) in [
+            ("Filter=/etc/passwd\n", true),
+            ("NoEnumerate=true\n", true),
+            (
+                "AuthenticatorName=org.example.Auth\nAuthenticatorInstall=true\n",
+                true,
+            ),
+            ("NoDeps=true\n", false),
+            ("Subset=x\n", false),
+            ("Version=1\n", false),
+        ] {
+            let file = format!(
+                "[Flatpak Repo]\nUrl=https://dl.example.org/probe/\nTitle=Probe\n\
+                 Comment=About\nDescription=Long\nIcon=https://dl.example.org/i.svg\n\
+                 Homepage=https://example.org/\nDefaultBranch=stable\n\
+                 CollectionID=org.example.Stable\nGPGKey={key}\n{extra}"
+            );
+            match parse_repo_bytes(file.as_bytes()) {
+                Err(_) => assert!(refused, "{extra}"),
+                Ok(repo) => {
+                    assert!(!refused, "{extra}");
+                    let bytes = repo.to_bytes().unwrap();
+                    super::super::sources::add_remote_bytes(
+                        Scope::User,
+                        &norm_url(&repo.url),
+                        &bytes,
+                        "probe",
+                        &lock,
+                        &c,
+                    )
+                    .unwrap();
+                    let mut keys = remote_config_keys("probe");
+                    keys.sort();
+                    // The keys the Store chose, and nothing else.
+                    for k in &keys {
+                        assert!(
+                            [
+                                "url",
+                                "gpg-verify",
+                                "gpg-verify-summary",
+                                "collection-id",
+                                "xa.title",
+                                "xa.comment",
+                                "xa.description",
+                                "xa.icon",
+                                "xa.homepage",
+                                "xa.default-branch",
+                            ]
+                            .contains(&k.as_str()),
+                            "{extra}: libflatpak wrote {k}: {keys:?}"
+                        );
+                    }
+                    // libflatpak leaves out `gpg-verify` when it is on (the
+                    // default); the key was imported, so it must not be off.
+                    assert!(
+                        !remote_config_value("probe", "gpg-verify").is_some_and(|v| v == "false"),
+                        "{keys:?}"
+                    );
+                    must(&["remote-delete", "--force", "probe"]);
+                }
+            }
+        }
+        let _ = dir;
         reset_empty();
     }
 }

@@ -10,6 +10,7 @@ pub mod inspect;
 pub mod install;
 pub mod meta;
 pub mod origin;
+pub mod sandbox;
 pub mod sign;
 pub mod squash;
 pub mod state;

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 log.workspace = true
@@ -21,23 +22,41 @@ serde_json.workspace = true
 backhand.workspace = true
 tar.workspace = true
 zstd.workspace = true
+minisign-verify.workspace = true
+# Only for `native::fake` (see the features).
+ed25519-compact = { workspace = true, optional = true }
+blake2 = { workspace = true, optional = true }
 
 [features]
+# Lets the AppImage inspection helper read a file's contents on a processor
+# that has no seccomp filter written for it (only x86-64 has). Off by default;
+# only CI and tests on other architectures turn it on. Without it, there the
+# helper answers "could not look inside" and the facts it computed.
+unsandboxed-inspector = []
 # The hooks the integration tests use to force a branch that is otherwise a
 # matter of timing (`flatpak::transaction::test_hooks`, the `*_in` lock
 # functions). Never enabled for a normal build; the tests turn it on through
 # the self dev-dependency below.
-test-hooks = []
+test-hooks = ["dep:ed25519-compact", "dep:blake2"]
 # A fetcher that answers from a folder of recorded GitHub responses
 # (`native::fake`), for screenshots and tests of the window. Never enabled in
 # a package.
-fake-github = []
+fake-github = ["dep:ed25519-compact", "dep:blake2"]
 
 [dev-dependencies]
 telamon-store-core = { path = ".", features = ["test-hooks"] }
+# Property tests of the parsers (tests/prop_*.rs). Exact version; only `std`:
+# no `fork` or `timeout` (they spawn processes and threads), no bit-set.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 
 # Builds the folder of recorded GitHub answers (and an installed older
 # version) that the window's screenshots use; see scripts/native-shots.sh.
 [[example]]
 name = "make_native_fake"
 required-features = ["fake-github"]
+
+# Its own `main`: the test is also the inspection helper it starts, so the
+# sandboxed helper process is the real code path (see the file's header).
+[[test]]
+name = "appimage_helper"
+harness = false
