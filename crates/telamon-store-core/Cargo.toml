@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 log.workspace = true
@@ -39,6 +40,9 @@ fake-github = ["dep:ed25519-compact", "dep:blake2"]
 
 [dev-dependencies]
 telamon-store-core = { path = ".", features = ["test-hooks"] }
+# Property tests of the parsers (tests/prop_*.rs). Exact version; only `std`:
+# no `fork` or `timeout` (they spawn processes and threads), no bit-set.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 
 # Builds the folder of recorded GitHub answers (and an installed older
 # version) that the window's screenshots use; see scripts/native-shots.sh.

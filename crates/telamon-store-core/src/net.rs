@@ -367,7 +367,11 @@ pub fn redirect_target(base: &str, location: &str) -> Option<String> {
         return None;
     }
     let target = if location.starts_with('/') {
-        let host_end = base[8..]
+        // A base that is too short or cuts a character (`get` is None) would
+        // panic on a slice; the fetcher only passes URLs it fetched, but this
+        // function is public.
+        let host_end = base
+            .get(8..)?
             .find(['/', '?', '#'])
             .map_or(base.len(), |i| i + 8);
         format!("{}{}", &base[..host_end], location)

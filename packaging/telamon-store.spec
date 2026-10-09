@@ -21,6 +21,8 @@ BuildRequires:  rust
 BuildRequires:  rust-srpm-macros
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
+# readelf, for scripts/check-hardening.sh in %%check
+BuildRequires:  binutils
 BuildRequires:  cmake
 BuildRequires:  ninja-build
 BuildRequires:  corrosion
@@ -92,7 +94,12 @@ export CARGO_HOME=${CARGO_HOME:-%{_builddir}/cargo-home}
 # are Fedora's plus the same remap for the C++ CMake builds, so that two
 # builds of one commit give the same build ID. These flags split on spaces,
 # so _topdir must have none (build-rpm.sh's hasn't).
-export RUSTFLAGS="%{build_rustflags} --remap-path-prefix=$PWD=. --remap-path-prefix=$CARGO_HOME=cargo"
+# -Crelocation-model=pic is rustc's default on x86_64 Linux, set here so the
+# staticlib stays position independent (the executable is PIE) whatever
+# Fedora's macro does. RELRO, BIND_NOW, the non-executable stack and PIE are
+# decided by the final link, which is the C++ one: CMake takes %%{build_ldflags}
+# (-z relro -z now, the hardened specs) from LDFLAGS; %%check proves it.
+export RUSTFLAGS="%{build_rustflags} -Crelocation-model=pic --remap-path-prefix=$PWD=. --remap-path-prefix=$CARGO_HOME=cargo"
 export HOST_CXXFLAGS="-ffile-prefix-map=$PWD=. -ffile-prefix-map=$CARGO_HOME=cargo"
 export CFLAGS="%{build_cflags} -ffile-prefix-map=$PWD=."
 export CXXFLAGS="%{build_cxxflags} -ffile-prefix-map=$PWD=."
@@ -137,6 +144,9 @@ if [ "$rc" != 1 ]; then
     echo "telamon-store holds the build path %{_builddir} (grep status $rc)" >&2
     exit 1
 fi
+# PIE, full RELRO (BIND_NOW), non-executable stack, no text relocations,
+# stack protector: the build fails if the link lost any of them.
+scripts/check-hardening.sh %{buildroot}%{_bindir}/telamon-store
 desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.telamon.store.desktop
 desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.store.desktop
 test "$(readlink %{buildroot}%{_bindir}/atlas-store)" = telamon-store

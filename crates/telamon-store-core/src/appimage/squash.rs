@@ -200,6 +200,42 @@ pub fn check_superblock(
         .unwrap_or(used);
     walk_meta(file, base, inode_table, dir_table, limits.max_meta_blocks)?;
     walk_meta(file, base, dir_table, after_dirs, limits.max_meta_blocks)?;
+    // The id and fragment tables are arrays of offsets of metadata blocks;
+    // backhand seeks to each of them, adding the squashfs's start in the file
+    // with a plain `+`, so an offset near u64::MAX panics (overflow checks on).
+    check_lookup(file, base, id_table, le16(&sb[26..]), 4, used)?;
+    check_lookup(file, base, frag_table, frags, 16, used)?;
+    Ok(())
+}
+
+/// A lookup table of `count` entries of `entry` bytes: at `table` an array of
+/// one little-endian u64 per 8 KiB metadata block, each pointing inside the
+/// image (`used` bytes from `base`).
+fn check_lookup(
+    file: &File,
+    base: u64,
+    table: u64,
+    count: u64,
+    entry: u64,
+    used: u64,
+) -> Result<(), SquashError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let blocks = count.div_ceil(META_MAX / entry);
+    let bad = SquashError::Damaged("lookup table");
+    if !(SUPERBLOCK as u64..used).contains(&table) || table + blocks * 8 > used {
+        return Err(bad);
+    }
+    for i in 0..blocks {
+        let mut p = [0u8; 8];
+        file.read_exact_at(&mut p, base + table + i * 8)
+            .map_err(|_| SquashError::Damaged("lookup table"))?;
+        let at = u64::from_le_bytes(p);
+        if !(SUPERBLOCK as u64..used).contains(&at) {
+            return Err(bad);
+        }
+    }
     Ok(())
 }
 
@@ -305,6 +341,24 @@ impl<'a> Tree<'a> {
         let cap = max.min(self.limits.max_file);
         if size > cap {
             return Err(SquashError::TooLarge("file"));
+        }
+        // backhand allocates every block as big as its size field says before it
+        // reads it, and that field is 31 bits of the file's own: a block is never
+        // larger than the squashfs block size, so an image that says otherwise
+        // (up to 4 GiB) is refused here.
+        let block_max = u64::from(self.fs.block_size);
+        let fragment = self
+            .fs
+            .fragments
+            .as_ref()
+            .and_then(|f| f.get(file.frag_index()));
+        if file
+            .block_sizes()
+            .iter()
+            .any(|b| u64::from(b.size()) > block_max)
+            || fragment.is_some_and(|f| u64::from(f.size.size()) > block_max)
+        {
+            return Err(SquashError::Damaged("block size"));
         }
         let used = self.total.get().saturating_add(size);
         if used > self.limits.max_total {

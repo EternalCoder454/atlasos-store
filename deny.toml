@@ -1,5 +1,12 @@
-# cargo deny check advisories sources (CI: .github/workflows/audit.yml).
-# Each entry in `ignore` needs a reason and a date to look at it again.
+# cargo deny check (CI: .github/workflows/audit.yml): advisories, bans,
+# licenses and sources, all four. Each ignore and each exception needs a
+# reason and, for an ignore, a date to look at it again.
+[graph]
+# What ships is Linux on x86_64 (the Fedora-based Telamon OS image). Crates
+# only the Windows or WASI targets pull in (windows-sys, wasi, ...) are
+# left out of the checks.
+targets = ["x86_64-unknown-linux-gnu"]
+
 [advisories]
 # Unmaintained crates count only for this workspace's direct dependencies;
 # yanked versions in the lock always fail.
@@ -7,11 +14,52 @@ unmaintained = "workspace"
 yanked = "deny"
 ignore = []
 
-# Crates come from crates.io, atlas-framework's repository and Telamon
-# Updater's (telamon-updater-core) only.
+[bans]
+# More than one version of a crate is allowed (the framework crates and
+# zbus bring their own), but it is shown.
+multiple-versions = "warn"
+# No `*` requirements. The path dependency of the core crate on itself (the
+# test-hooks dev-dependency) has no version to give.
+wildcards = "deny"
+allow-wildcard-paths = true
+# TLS is rustls only (ureq's `rustls` feature, with ring). No OpenSSL, in
+# any form: its parsing of untrusted certificates is C, and the image does
+# not need a second TLS stack.
+deny = [
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "openssl-probe" },
+    { crate = "native-tls" },
+    { crate = "aws-lc-rs" },
+    { crate = "aws-lc-sys" },
+]
+
+# The licences of what is in Cargo.lock. Nothing without a licence passes.
+# Only the identifiers a crate cannot do without are listed: a crate that is
+# `A OR B` needs one of them (memchr, adler2 and r-efi are covered by MIT,
+# so Unlicense, 0BSD and LGPL-2.1-or-later stay off the list).
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # target-lexicon (build-time only)
+    "BSD-3-Clause", # subtle, zstd-safe, zstd-sys (the Zstandard sources)
+    "ISC",          # ring, rustls-webpki, untrusted
+    "Zlib",         # foldhash, zlib-rs (flate2's rust backend)
+    "Unicode-3.0",  # unicode-ident's data tables
+    "BSL-1.0",      # xxhash-rust (BSL-1.0, backhand's hash)
+    # webpki-roots: the Mozilla root list as data. It is the only crate under
+    # this licence.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+# Only crates.io, and atlas-framework's and Telamon Updater's repositories
+# (pinned by tag and by revision in Cargo.toml).
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/EternalCoder454/atlas-framework",
     "https://github.com/EternalCoder454/atlasos-updater",

@@ -1,0 +1,52 @@
+# Weekly update pull requests: Rust crates (the workspace and the fuzz
+# crate) and the pinned GitHub Actions. Updates are grouped, so one pull
+# request a week per ecosystem. The actions are pinned by commit SHA with the
+# tag in a comment, and Dependabot rewrites both. The atlas-framework and
+# Telamon Updater crates are pinned by hand (CLAUDE.md, "Moving the
+# atlas-framework pin"), so they are ignored here.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      rust-crates:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "telamon-framework-*"
+      - dependency-name: "telamon-updater-*"
+      - dependency-name: "telamon-update-engine"
+    commit-message:
+      prefix: "Dependencies"
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      fuzz-crates:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Dependencies (fuzz)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
+    ignore:
+      # The reusable workflow is pinned together with the framework crates
+      # (`framework-ref` and Cargo.toml's tag): see CLAUDE.md, "Moving the
+      # atlas-framework pin".
+      - dependency-name: "EternalCoder454/atlas-framework"
+    commit-message:
+      prefix: "CI"

@@ -1,0 +1,12 @@
+# Every change is reviewed by the owner; the places below decide what the
+# Store trusts, installs and ships, so they are listed on their own (a
+# change there must not be merged without this review, whatever else is
+# added to the file later).
+*              @EternalCoder454
+/catalog/      @EternalCoder454
+/.github/      @EternalCoder454
+/packaging/    @EternalCoder454
+/deny.toml     @EternalCoder454
+/Cargo.toml    @EternalCoder454
+/Cargo.lock    @EternalCoder454
+/fuzz/Cargo.toml @EternalCoder454

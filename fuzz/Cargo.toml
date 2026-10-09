@@ -1,0 +1,153 @@
+[package]
+name = "telamon-store-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "cargo-fuzz targets for the parsers of Telamon Store's core (not part of the workspace; needs nightly)"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace and lock file: the fuzzer builds with sanitizers on
+# nightly and must not change the application's Cargo.lock.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+# The checks (tests/harness/checks.rs) use these two besides the core crate.
+libc = "0.2"
+serde_json = "1"
+telamon-store-core = { path = "../crates/telamon-store-core" }
+tar = { version = "0.4", default-features = false }
+zstd = { version = "0.13", default-features = false }
+
+[profile.release]
+debug = 1
+overflow-checks = true
+panic = "unwind"
+
+[[bin]]
+name = "native_manifest"
+path = "fuzz_targets/native_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_catalog"
+path = "fuzz_targets/native_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "github_release"
+path = "fuzz_targets/github_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_desktop"
+path = "fuzz_targets/native_desktop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_dbus"
+path = "fuzz_targets/native_dbus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_plan"
+path = "fuzz_targets/native_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_unpack"
+path = "fuzz_targets/native_unpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_unpack_tar"
+path = "fuzz_targets/native_unpack_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "keyfile"
+path = "fuzz_targets/keyfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flatpakref"
+path = "fuzz_targets/flatpakref.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "urls"
+path = "fuzz_targets/urls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "launch_args"
+path = "fuzz_targets/launch_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "squashfs"
+path = "fuzz_targets/squashfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "appimage_file"
+path = "fuzz_targets/appimage_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icon"
+path = "fuzz_targets/icon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inspection_decode"
+path = "fuzz_targets/inspection_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "appstream_metainfo"
+path = "fuzz_targets/appstream_metainfo.rs"
+test = false
+doc = false
+bench = false

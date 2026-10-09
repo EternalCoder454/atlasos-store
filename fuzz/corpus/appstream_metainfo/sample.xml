@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.example.Sample</id>
+  <name>Sample Draw</name>
+  <summary>Draw things</summary>
+  <developer><name>Example Studio</name></developer>
+  <project_license>MIT</project_license>
+  <releases>
+    <release version="2.1.0" date="2026-09-01"/>
+    <release version="2.0.0" date="2026-01-01"/>
+  </releases>
+</component>
