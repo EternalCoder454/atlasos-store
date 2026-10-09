@@ -507,6 +507,8 @@ pub fn fetch_repo(url: &str, cancel: &CancelToken) -> Result<FlatpakRepo, Error>
                 accept: "application/x-flatpak-repo, text/plain;q=0.8, */*;q=0.1",
                 max_bytes: MAX_FILE_BYTES as u64 + 1,
                 timeout: FETCH_TIMEOUT,
+                // A link the user was given can point at any public https host.
+                hosts: net::Hosts::Any,
             };
             let _ = tx.send(net::get(&target, &request));
         })
