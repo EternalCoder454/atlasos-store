@@ -36,13 +36,13 @@ futures-util = { version = "0.3", default-features = false }
 # libflatpak, as telamon-framework-flatpak uses it (one lock entry).
 libflatpak = "0.7"
 # SHA-1 and SHA-256 for OpenPGP key fingerprints (RustCrypto, no default features).
-sha1 = { version = "0.10", default-features = false }
-sha2 = { version = "0.10", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Native Telamon app bundles (`.tar.zst`): read entry by entry and never
 # unpacked by the library; libzstd is the one backhand already builds.
 tar = { version = "0.4", default-features = false }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 # Release signatures of native Telamon apps (minisign, Ed25519): verification
 # only, no dependencies, no unsafe. Exact pin: a new version is read before it
 # is taken (see docs/DESIGN.md, "Native Telamon apps").
