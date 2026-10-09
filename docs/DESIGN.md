@@ -169,7 +169,17 @@ enters, in `telamon-store-core`:
 - AppStream XML: size cap before parsing, depth and count limits, text
   cleaned of control and bidi characters, length caps, IDs validated.
 - AppStream markup becomes blocks of plain text. Nothing is shown as QML
-  RichText or HTML. Links open through TelamonPortal, https only.
+  RichText or HTML. Links open through TelamonPortal, https only. The QML is
+  held to that by `scripts/check-qml-plaintext.sh` (`cargo test` runs it
+  too): every `Text` and `Label` sets `textFormat: Text.PlainText`; no
+  `Qt.openUrlExternally`, `Qt.createQmlObject`, `eval` or `XMLHttpRequest`; an
+  `Image` source is a `file:` URL (the backend's `iconSource`) or a literal.
+  The one place Telamon.Ui shows data as Qt's default `AutoText` is the
+  navigation stack's header, which shows a page's title: a name like
+  `<img src=...>` would be fetched as an image. `AppPage` and `NativeAppPage`
+  pass their title through `headerTitle()`, which swaps `<`, `>` and `&` for
+  look-alike characters, and the script fails on a data-built `TelamonPage`
+  title without it.
 - Images (screenshots, remote icons): https, an allowlisted host per remote
   (Flathub: `dl.flathub.org`), 15 s timeout, 8 MB cap, redirect cap, magic
   bytes and a pixel cap checked, decoded off the GUI thread, stored in a 200 MB
