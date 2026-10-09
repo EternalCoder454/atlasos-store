@@ -268,6 +268,21 @@ pub fn prepare(path: &Path) -> Result<Prepared, InspectError> {
 }
 
 impl Prepared {
+    /// The first record of the helper's output (see
+    /// [`Inspection::encode_facts`]): written and flushed before the sandbox
+    /// goes on, so nothing read from the file can change it.
+    pub fn facts_record(&self) -> Vec<u8> {
+        self.out.encode_facts()
+    }
+
+    /// The second record without reading the squashfs: the facts as they are,
+    /// not inspected, with `note` as the reason.
+    pub fn unread_record(mut self, note: &str) -> Vec<u8> {
+        self.out.inspected = false;
+        self.out.note = note.to_string();
+        self.out.encode_contents()
+    }
+
     /// Reads the squashfs: desktop entry, metainfo and icon.
     pub fn finish(self, limits: &Limits) -> Inspection {
         let Prepared {
@@ -361,9 +376,45 @@ impl Inspection {
         self.icon_kind = self.icon.as_ref().map(|i| i.kind);
     }
 
-    /// The helper's output: one line of JSON, then the icon's bytes.
+    /// The helper's whole output: [`Inspection::encode_facts`] then
+    /// [`Inspection::encode_contents`].
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = serde_json::to_vec(self).unwrap_or_default();
+        let mut out = self.encode_facts();
+        out.extend(self.encode_contents());
+        out
+    }
+
+    /// The first record, written by the helper's stage 1 before it is
+    /// sandboxed: what it computed from the file itself (format, size, hash,
+    /// name, download address, signature). One line of JSON.
+    pub fn encode_facts(&self) -> Vec<u8> {
+        let facts = Facts {
+            format: self.format,
+            size: self.size,
+            sha256: self.sha256.clone(),
+            file_name: self.file_name.clone(),
+            origin: self.origin.clone(),
+            signature: self.signature.clone(),
+        };
+        let mut out = serde_json::to_vec(&facts).unwrap_or_default();
+        out.push(b'\n');
+        out
+    }
+
+    /// The second record, written by stage 2 from inside the sandbox: what
+    /// was read out of the squashfs. One line of JSON, then the icon's bytes.
+    pub fn encode_contents(&self) -> Vec<u8> {
+        let contents = Contents {
+            inspected: self.inspected,
+            note: self.note.clone(),
+            name: self.name.clone(),
+            version: self.version.clone(),
+            publisher: self.publisher.clone(),
+            summary: self.summary.clone(),
+            app_id: self.app_id.clone(),
+            icon_kind: self.icon_kind,
+        };
+        let mut out = serde_json::to_vec(&contents).unwrap_or_default();
         out.push(b'\n');
         if let Some(i) = &self.icon {
             out.extend_from_slice(&i.bytes);
@@ -371,7 +422,13 @@ impl Inspection {
         out
     }
 
-    /// Reads [`Inspection::encode`]'s output, then sanitizes it.
+    /// Reads the helper's output, then sanitizes it. The facts come from the
+    /// first line only; the second record (written by the process that has
+    /// read the file's contents, and so the one a parser bug could take over)
+    /// can say what is inside the file and nothing else: whatever else it
+    /// claims is not read. A missing or unreadable second record means "could
+    /// not look inside", with the facts kept; a missing first record is an
+    /// error.
     pub fn decode(bytes: &[u8]) -> Result<Inspection, InspectError> {
         let end = bytes
             .iter()
@@ -381,18 +438,78 @@ impl Inspection {
             let msg = String::from_utf8_lossy(rest);
             return Err(InspectError::Helper(text::clean(&msg, 200)));
         }
-        let mut insp: Inspection = serde_json::from_slice(&bytes[..end])
+        let facts: Facts = serde_json::from_slice(&bytes[..end])
             .map_err(|_| InspectError::Helper("unreadable answer".into()))?;
-        let tail = &bytes[end + 1..];
-        if let Some(kind) = insp.icon_kind
-            && !tail.is_empty()
-        {
-            insp.icon = Some(Icon {
-                kind,
-                bytes: tail.to_vec(),
-            });
+        let file_name = facts.file_name;
+        let mut insp = Inspection {
+            format: facts.format,
+            size: facts.size,
+            sha256: facts.sha256,
+            name: name_from_file(&file_name),
+            file_name,
+            inspected: false,
+            note: NO_CONTENTS.into(),
+            version: String::new(),
+            publisher: String::new(),
+            summary: String::new(),
+            app_id: String::new(),
+            icon_kind: None,
+            signature: facts.signature,
+            origin: facts.origin,
+            icon: None,
+        };
+        let rest = &bytes[end + 1..];
+        let second = rest.iter().position(|b| *b == b'\n');
+        let contents = second.and_then(|e| serde_json::from_slice::<Contents>(&rest[..e]).ok());
+        if let (Some(c), Some(e)) = (contents, second) {
+            insp.inspected = c.inspected;
+            insp.note = c.note;
+            insp.name = c.name;
+            insp.version = c.version;
+            insp.publisher = c.publisher;
+            insp.summary = c.summary;
+            insp.app_id = c.app_id;
+            insp.icon_kind = c.icon_kind;
+            let tail = &rest[e + 1..];
+            if let Some(kind) = c.icon_kind
+                && !tail.is_empty()
+            {
+                insp.icon = Some(Icon {
+                    kind,
+                    bytes: tail.to_vec(),
+                });
+            }
         }
         insp.sanitize();
         Ok(insp)
     }
+}
+
+/// What a missing or unreadable second record says.
+pub const NO_CONTENTS: &str = "Telamon couldn't look inside this file.";
+
+/// The first record of the helper's output: what stage 1 computed.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Facts {
+    format: Format,
+    size: u64,
+    sha256: String,
+    file_name: String,
+    origin: Origin,
+    signature: Signature,
+}
+
+/// The second record: what stage 2 read out of the squashfs. Unknown fields
+/// (a forged `sha256`, `origin`, `signature`...) are ignored, not read.
+#[derive(Deserialize, Serialize)]
+struct Contents {
+    inspected: bool,
+    note: String,
+    name: String,
+    version: String,
+    publisher: String,
+    summary: String,
+    app_id: String,
+    icon_kind: Option<IconKind>,
 }

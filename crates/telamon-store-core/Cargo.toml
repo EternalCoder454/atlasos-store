@@ -28,6 +28,11 @@ ed25519-compact = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
 
 [features]
+# Lets the AppImage inspection helper read a file's contents on a processor
+# that has no seccomp filter written for it (only x86-64 has). Off by default;
+# only CI and tests on other architectures turn it on. Without it, there the
+# helper answers "could not look inside" and the facts it computed.
+unsandboxed-inspector = []
 # The hooks the integration tests use to force a branch that is otherwise a
 # matter of timing (`flatpak::transaction::test_hooks`, the `*_in` lock
 # functions). Never enabled for a normal build; the tests turn it on through

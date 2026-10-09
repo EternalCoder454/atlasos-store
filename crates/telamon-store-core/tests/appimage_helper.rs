@@ -33,6 +33,20 @@ fn main() {
     {
         helper::exit_now(helper::child_main(Path::new(path)));
     }
+    // Verifies a signature with the program given as `gpgv` (a stand-in), for
+    // as long as it takes.
+    if let [_, opt, script] = args.as_slice()
+        && opt == "--verify-with"
+    {
+        let got = telamon_store_core::appimage::sign::verify_within(
+            Path::new(script),
+            &[0x89, 1, 2, 3],
+            &[0x99, 1, 2, 3],
+            "x",
+            Duration::from_secs(300),
+        );
+        std::process::exit(if got == Signature::Unchecked { 0 } else { 1 });
+    }
     // Sandboxed, then waits for its input to close (the test looks at
     // /proc/<pid>/status meanwhile).
     if args.get(1).map(String::as_str) == Some("--sandboxed-wait") {
@@ -77,6 +91,18 @@ fn tests() -> Vec<Test> {
             every_compression_gives_the_same_answer_through_the_helper,
         ),
         (
+            "a_helper_that_lies_in_its_second_record_changes_nothing_stage_one_computed",
+            a_helper_that_lies_in_its_second_record_changes_nothing_stage_one_computed,
+        ),
+        (
+            "without_a_filter_the_contents_are_not_read",
+            without_a_filter_the_contents_are_not_read,
+        ),
+        (
+            "gpgv_dies_with_the_helper_that_started_it",
+            gpgv_dies_with_the_helper_that_started_it,
+        ),
+        (
             "a_big_image_is_read_under_the_sandbox_too",
             a_big_image_is_read_under_the_sandbox_too,
         ),
@@ -110,6 +136,10 @@ fn tests() -> Vec<Test> {
             (
                 "the_calls_the_parsers_need_still_work",
                 the_calls_the_parsers_need_still_work,
+            ),
+            (
+                "gpgv_gets_no_sockets_tracing_or_keys_and_everything_else",
+                gpgv_gets_no_sockets_tracing_or_keys_and_everything_else,
             ),
             (
                 "an_abort_ends_with_sigabrt_not_sigsys",
@@ -169,6 +199,247 @@ fn every_compression_gives_the_same_answer_through_the_helper() {
             "{name}: same answer as without the sandbox"
         );
     }
+}
+
+/// A "helper": a program that prints `bytes` whatever it is asked.
+fn fake_helper(dir: &Path, bytes: &[u8]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let out = dir.join("answer");
+    std::fs::write(&out, bytes).unwrap();
+    let script = dir.join("helper.sh");
+    std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\n", out.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+fn a_helper_that_lies_in_its_second_record_changes_nothing_stage_one_computed() {
+    let dir = build::scratch("helper-liar");
+    let p = build::write(&dir, "Sample.AppImage", &build::normal());
+    let real = in_process(&p);
+    let ask = |bytes: &[u8]| {
+        let script = fake_helper(&dir, bytes);
+        helper::run(&script, &p, Duration::from_secs(20))
+    };
+    let facts = real.encode_facts();
+    let contents = real.encode_contents();
+    // As it should be.
+    assert_eq!(
+        ask(&[facts.clone(), contents.clone()].concat()).unwrap(),
+        real
+    );
+    // Stage 2 claims another hash, size, format, origin and signature,
+    // inside its own record: the fields are not read.
+    let nl = contents.iter().position(|b| *b == b'\n').unwrap();
+    let (line, icon_and_rest) = contents.split_at(nl + 1);
+    let line = std::str::from_utf8(&line[..nl]).unwrap();
+    let forged_line = line.trim_end_matches('}').to_string()
+        + &format!(
+            r#","sha256":"{}","size":7,"format":"type1","file_name":"x","origin":{{"kind":"https","host":"trusted.example"}},"signature":{{"state":"signed","fingerprint":"{}"}}}}"#,
+            "0".repeat(64),
+            "A".repeat(40)
+        );
+    let forged = [
+        facts.clone(),
+        format!("{forged_line}\n").into_bytes(),
+        icon_and_rest.to_vec(),
+    ]
+    .concat();
+    assert_eq!(ask(&forged).unwrap(), real);
+    // It writes a whole other first record where the second goes, or a third
+    // one after: the facts are the first line's.
+    let other = {
+        let mut i = real.clone();
+        i.sha256 = "0".repeat(64);
+        i.origin = telamon_store_core::appimage::origin::Origin::Https {
+            host: "trusted.example".into(),
+        };
+        i.signature = Signature::Signed {
+            fingerprint: "A".repeat(40),
+        };
+        i
+    };
+    let got = ask(&[facts.clone(), other.encode_facts()].concat()).unwrap();
+    assert!(!got.inspected);
+    assert_eq!(
+        (got.sha256.as_str(), &got.origin, &got.signature),
+        (real.sha256.as_str(), &real.origin, &real.signature)
+    );
+    let got = ask(&[facts.clone(), contents.clone(), other.encode_facts()].concat()).unwrap();
+    assert_eq!(
+        (got.sha256.as_str(), &got.origin, &got.signature),
+        (real.sha256.as_str(), &real.origin, &real.signature)
+    );
+    // Cut short or missing: not looked into, the facts kept. No facts: fails.
+    for cut in [0, 1, 10, contents.len() / 2] {
+        let got = ask(&[facts.clone(), contents[..cut].to_vec()].concat()).unwrap();
+        assert!(!got.inspected, "cut at {cut}");
+        assert_eq!(got.sha256, real.sha256);
+        assert_eq!(got.origin, real.origin);
+    }
+    assert!(ask(&contents).is_err());
+    assert!(ask(&facts[..facts.len() / 2]).is_err());
+}
+
+fn without_a_filter_the_contents_are_not_read() {
+    use telamon_store_core::appimage::inspect::prepare;
+    let dir = build::scratch("helper-nofilter");
+    let p = build::write(&dir, "Sample.AppImage", &build::normal());
+    let decode = |entered| {
+        let prepared = prepare(&p).unwrap();
+        let facts = prepared.facts_record();
+        Inspection::decode(&[facts, helper::second_record(prepared, entered)].concat()).unwrap()
+    };
+    // A filter that could not be made: never read, on any processor.
+    let got = decode(Err("no seccomp".into()));
+    assert!(!got.inspected);
+    assert!(got.note.contains("safe place"), "{}", got.note);
+    assert_eq!(got.sha256, in_process(&p).sha256, "the facts are kept");
+    // A processor without a filter: read only with the feature that says so.
+    let got = decode(Ok(sandbox::Entered::Skipped));
+    if cfg!(feature = "unsandboxed-inspector") {
+        assert!(got.inspected);
+    } else {
+        assert!(!got.inspected);
+        assert!(got.note.contains("kind of processor"), "{}", got.note);
+        assert_eq!(got.sha256, in_process(&p).sha256);
+        assert!(got.icon.is_none() && got.app_id.is_empty());
+    }
+    // With the filter on, it is read.
+    let got = decode(Ok(sandbox::Entered::Yes));
+    assert!(got.inspected);
+    assert_eq!(got.name, "Sample Draw");
+}
+
+fn gpgv_dies_with_the_helper_that_started_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = build::scratch("gpgv-orphan");
+    let pidfile = dir.join("gpgv.pid");
+    let script = dir.join("gpgv");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec /usr/bin/sleep 300\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // This program as a stand-in for the helper, waiting for "gpgv".
+    let mut helper_like = std::process::Command::new(this_program())
+        .arg("--verify-with")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut pid = 0i32;
+    for _ in 0..200 {
+        if let Ok(t) = std::fs::read_to_string(&pidfile)
+            && let Ok(n) = t.trim().parse()
+        {
+            pid = n;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(pid > 1, "gpgv did not start");
+    // gpgv is in a group of its own, so killing the helper's group (what the
+    // timeout does) would not reach it: it has to die on its own.
+    // SAFETY: getpgid asks about a process we know.
+    assert_ne!(unsafe { libc::getpgid(pid) }, unsafe { libc::getpgid(0) });
+    helper_like.kill().unwrap();
+    let _ = helper_like.wait();
+    let gone = (0..200).any(|_| {
+        std::thread::sleep(Duration::from_millis(25));
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |s| s.contains(") Z"))
+    });
+    assert!(gone, "gpgv outlived the helper that started it");
+}
+
+fn gpgv_gets_no_sockets_tracing_or_keys_and_everything_else() {
+    use telamon_store_core::appimage::sandbox::gpgv_filter;
+    fn run(body: fn()) -> End {
+        // SAFETY: single threaded; the child allocates its own filter.
+        match unsafe { libc::fork() } {
+            -1 => panic!("fork"),
+            0 => {
+                let code = std::panic::catch_unwind(|| {
+                    gpgv_filter()
+                        .expect("a filter")
+                        .install()
+                        .expect("installed");
+                    body();
+                })
+                .map_or(99, |()| 0);
+                helper::exit_now(code)
+            }
+            pid => {
+                let mut status = 0;
+                // SAFETY: waitpid on our own child.
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                if libc::WIFSIGNALED(status) {
+                    End::Signal(libc::WTERMSIG(status))
+                } else {
+                    End::Exit(libc::WEXITSTATUS(status))
+                }
+            }
+        }
+    }
+    fn refused(nr: i64, a: [usize; 4]) {
+        let r = sys(nr, a);
+        assert_eq!(r, -1, "call {nr} went through");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM),
+            "call {nr}"
+        );
+    }
+    // Refused with EPERM, and the process lives on.
+    assert_eq!(
+        run(|| {
+            refused(
+                libc::SYS_socket,
+                [libc::AF_INET as usize, libc::SOCK_STREAM as usize, 0, 0],
+            );
+            refused(
+                libc::SYS_socket,
+                [libc::AF_UNIX as usize, libc::SOCK_STREAM as usize, 0, 0],
+            );
+            refused(libc::SYS_connect, [3, 0, 0, 0]);
+            refused(libc::SYS_ptrace, [libc::PTRACE_TRACEME as usize, 0, 0, 0]);
+            refused(libc::SYS_keyctl, [0, 0, 0, 0]);
+            refused(libc::SYS_mount, [0, 0, 0, 0]);
+            refused(libc::SYS_unshare, [libc::CLONE_NEWUSER as usize, 0, 0, 0]);
+            refused(libc::SYS_io_uring_setup, [4, 0, 0, 0]);
+            refused(libc::SYS_bpf, [0, 0, 0, 0]);
+            refused(libc::SYS_perf_event_open, [0, 0, 0, 0]);
+            refused(libc::SYS_userfaultfd, [0, 0, 0, 0]);
+            refused(libc::SYS_personality, [0xffff_ffff, 0, 0, 0]);
+        }),
+        End::Exit(0)
+    );
+    // What gpgv does still works: open and read a file, map memory, run a
+    // program (it execs itself through the filter), make a pipe.
+    assert_eq!(
+        run(|| {
+            let t = std::fs::read_to_string("/proc/self/stat").unwrap();
+            assert!(!t.is_empty());
+            let mut v = vec![0u8; 1 << 20];
+            v[5] = 1;
+            let out = std::process::Command::new("/bin/sh")
+                .args(["-c", "echo ok"])
+                .output()
+                .unwrap();
+            assert_eq!(out.stdout, b"ok\n");
+        }),
+        End::Exit(0)
+    );
+    // The other ABIs would get around a denylist: killed.
+    assert_eq!(
+        run(|| {
+            sys(libc::SYS_getpid | 0x4000_0000, [0; 4]);
+        }),
+        End::Signal(libc::SIGSYS)
+    );
 }
 
 fn a_big_image_is_read_under_the_sandbox_too() {

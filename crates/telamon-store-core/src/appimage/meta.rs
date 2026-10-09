@@ -176,7 +176,7 @@ fn svg_ok(text: &str) -> bool {
             at += end + 3;
         } else if rest.starts_with("<?") {
             // Only the XML declaration, only first.
-            let Some(len) = xml_declaration(rest).filter(|_| at == start) else {
+            let Some(len) = xml_declaration(rest, text.is_ascii()).filter(|_| at == start) else {
                 return false;
             };
             at += len;
@@ -249,8 +249,14 @@ fn name_byte(b: u8) -> bool {
 }
 
 /// `<?xml version="1.0" encoding="UTF-8" standalone="no"?>`: its length in
-/// bytes when it is well formed and the encoding, if it names one, is UTF-8.
-fn xml_declaration(rest: &str) -> Option<usize> {
+/// bytes when it is well formed and the encoding, if it names one, reads these
+/// bytes as the text they are. UTF-8 does. US-ASCII, ISO-8859-1 (`latin1`) and
+/// windows-1252 give the same text as UTF-8 when the whole document is ASCII
+/// (`ascii`), and only then: a file with other bytes would read differently.
+/// Any other encoding is refused (a parser that honored UTF-7 or UTF-16 would
+/// read other tags than these). Numeric character references stay refused
+/// (`entities_ok`), whatever the encoding: they can spell a name.
+fn xml_declaration(rest: &str, ascii: bool) -> Option<usize> {
     let end = rest.get(2..)?.find("?>")? + 2;
     let decl = rest[2..end].to_ascii_lowercase();
     if !decl.starts_with("xml") || decl.contains('<') || !decl[3..].starts_with(char::is_whitespace)
@@ -261,7 +267,12 @@ fn xml_declaration(rest: &str) -> Option<usize> {
         let value = decl[i + 8..].trim_start().strip_prefix('=')?.trim_start();
         let quote = value.chars().next().filter(|q| matches!(q, '"' | '\''))?;
         let name = value[1..].split(quote).next()?;
-        if name != "utf-8" {
+        let same_as_utf8 = match name {
+            "utf-8" => true,
+            "us-ascii" | "iso-8859-1" | "latin1" | "windows-1252" => ascii,
+            _ => false,
+        };
+        if !same_as_utf8 {
             return None;
         }
     }

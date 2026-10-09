@@ -46,6 +46,7 @@ const fn off_arg(i: u32) -> u32 {
 // BPF opcodes (`linux/bpf_common.h`).
 const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JEQ_K: u16 = 0x15;
+const BPF_JGE_K: u16 = 0x35;
 const BPF_JSET_K: u16 = 0x45;
 const BPF_RET_K: u16 = 0x06;
 
@@ -112,8 +113,20 @@ pub struct Filter {
 impl Filter {
     /// Assembles `rules`: the architecture is checked first (a call made
     /// through another ABI is killed), then each rule in turn, and anything
-    /// no rule matches kills the process.
+    /// no rule matches kills the process (an allowlist).
     pub fn new(rules: &[Rule]) -> Result<Filter, String> {
+        Filter::build(rules, false)
+    }
+
+    /// Assembles `rules` as a denylist: what a rule names is refused as it
+    /// says (`Rule::Errno` to fail the call), everything else is allowed. A
+    /// call through another ABI (the 32-bit entry, x32) is still killed, or
+    /// it would get around the list.
+    pub fn deny(rules: &[Rule]) -> Result<Filter, String> {
+        Filter::build(rules, true)
+    }
+
+    fn build(rules: &[Rule], allow_by_default: bool) -> Result<Filter, String> {
         let mut a = Asm {
             ins: Vec::new(),
             errnos: Vec::new(),
@@ -122,6 +135,11 @@ impl Filter {
         a.push(BPF_JEQ_K, AUDIT_ARCH, To::Skip(1), To::Skip(0));
         a.push(BPF_RET_K, RET_KILL_PROCESS, To::Skip(0), To::Skip(0));
         a.push(BPF_LD_W_ABS, OFF_NR, To::Skip(0), To::Skip(0));
+        if allow_by_default {
+            // The x32 ABI shares the architecture value; its numbers are
+            // these plus 0x40000000, and no list here names them.
+            a.push(BPF_JGE_K, 0x4000_0000, To::Kill, To::Skip(0));
+        }
         for rule in rules {
             match rule {
                 Rule::Allow(nr) => {
@@ -164,12 +182,13 @@ impl Filter {
                 }
             }
         }
-        // The tail: kill, allow, then one return per errno.
+        // The tail: what no rule matched, kill, allow, then one return per
+        // errno.
         let body = a.ins.len();
-        let kill_at = body;
-        let allow_at = body + 1;
-        let errno_at = |i: usize| body + 2 + i;
-        let mut prog = Vec::with_capacity(body + 2 + a.errnos.len());
+        let kill_at = body + 1;
+        let allow_at = body + 2;
+        let errno_at = |i: usize| body + 3 + i;
+        let mut prog = Vec::with_capacity(body + 3 + a.errnos.len());
         for (pos, (ins, jt, jf)) in a.ins.iter().enumerate() {
             let rel = |to: &To| -> Result<u8, String> {
                 let target = match to {
@@ -182,12 +201,20 @@ impl Filter {
             };
             let mut ins = *ins;
             // The conditional jumps only; a statement has none.
-            if ins.code == BPF_JEQ_K || ins.code == BPF_JSET_K {
+            if ins.code == BPF_JEQ_K || ins.code == BPF_JSET_K || ins.code == BPF_JGE_K {
                 ins.jt = rel(jt)?;
                 ins.jf = rel(jf)?;
             }
             prog.push(ins);
         }
+        prog.push(stmt(
+            BPF_RET_K,
+            if allow_by_default {
+                RET_ALLOW
+            } else {
+                RET_KILL_PROCESS
+            },
+        ));
         prog.push(stmt(BPF_RET_K, RET_KILL_PROCESS));
         prog.push(stmt(BPF_RET_K, RET_ALLOW));
         for e in &a.errnos {
@@ -296,6 +323,99 @@ pub fn inspector_rules(pid: u32) -> Vec<Rule> {
     ]
 }
 
+/// The denylist put on `gpgv` before it is started (`sign.rs`): it parses a
+/// key and a signature a stranger wrote, and needs files, memory and nothing
+/// else. What it has no use for fails with `EPERM`, so a bug in its parsers
+/// gets the attacker no sockets, no tracing, no keyring, no mounts, no
+/// namespaces, no module or kernel interfaces, and `gpgv` itself fails
+/// cleanly. A list, not an allowlist, because `gpgv` links libgcrypt and
+/// libc whose calls vary by version; the architecture's other ABIs are
+/// killed.
+#[cfg(target_arch = "x86_64")]
+pub fn gpgv_rules() -> Vec<Rule> {
+    use libc::*;
+    let denied = [
+        // The network: not a byte of it.
+        SYS_socket,
+        SYS_socketpair,
+        SYS_connect,
+        SYS_bind,
+        SYS_listen,
+        SYS_accept,
+        SYS_accept4,
+        SYS_sendto,
+        SYS_sendmsg,
+        SYS_sendmmsg,
+        SYS_recvfrom,
+        SYS_recvmsg,
+        SYS_recvmmsg,
+        // Looking into, or changing, other processes.
+        SYS_ptrace,
+        SYS_process_vm_readv,
+        SYS_process_vm_writev,
+        SYS_kcmp,
+        SYS_pidfd_open,
+        SYS_pidfd_getfd,
+        // Kernel interfaces that are a way out of a bug.
+        SYS_io_uring_setup,
+        SYS_io_uring_enter,
+        SYS_io_uring_register,
+        SYS_bpf,
+        SYS_perf_event_open,
+        SYS_userfaultfd,
+        // Keys.
+        SYS_keyctl,
+        SYS_add_key,
+        SYS_request_key,
+        // The file system and namespaces.
+        SYS_mount,
+        SYS_umount2,
+        SYS_pivot_root,
+        SYS_chroot,
+        SYS_unshare,
+        SYS_setns,
+        SYS_open_by_handle_at,
+        SYS_name_to_handle_at,
+        SYS_fsopen,
+        SYS_fsconfig,
+        SYS_fsmount,
+        SYS_fspick,
+        SYS_move_mount,
+        SYS_open_tree,
+        SYS_mount_setattr,
+        // The machine.
+        SYS_kexec_load,
+        SYS_kexec_file_load,
+        SYS_init_module,
+        SYS_finit_module,
+        SYS_delete_module,
+        SYS_swapon,
+        SYS_swapoff,
+        SYS_reboot,
+        SYS_ioperm,
+        SYS_iopl,
+        SYS_personality,
+    ];
+    denied
+        .into_iter()
+        .map(|nr| Rule::Errno(nr, EPERM))
+        .collect()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn gpgv_rules() -> Vec<Rule> {
+    Vec::new()
+}
+
+/// The filter for `gpgv`, or `None` where there is none (other processors).
+pub fn gpgv_filter() -> Option<Filter> {
+    let rules = gpgv_rules();
+    if rules.is_empty() {
+        return None;
+    }
+    Filter::deny(&rules).ok()
+}
+
 #[cfg(not(target_arch = "x86_64"))]
 pub fn inspector_rules(_pid: u32) -> Vec<Rule> {
     Vec::new()
@@ -347,6 +467,7 @@ mod tests {
                 BPF_LD_W_ABS => a = load(i.k),
                 BPF_JEQ_K => pc += usize::from(if a == i.k { i.jt } else { i.jf }),
                 BPF_JSET_K => pc += usize::from(if a & i.k != 0 { i.jt } else { i.jf }),
+                BPF_JGE_K => pc += usize::from(if a >= i.k { i.jt } else { i.jf }),
                 BPF_RET_K => return i.k,
                 c => panic!("opcode {c:#x}"),
             }
@@ -399,6 +520,63 @@ mod tests {
             run(&f, 0x4000_0003, 1, [1, 0, 0, 0, 0, 0]),
             RET_KILL_PROCESS
         );
+    }
+
+    #[test]
+    fn a_denylist_allows_all_but_what_it_names_and_other_abis() {
+        let f =
+            Filter::deny(&[Rule::Errno(41, libc::EPERM), Rule::Errno(101, libc::EPERM)]).unwrap();
+        let go = |arch, nr| run(&f, arch, nr, [0; 6]);
+        assert_eq!(go(ARCH, 41), RET_ERRNO | libc::EPERM as u32);
+        assert_eq!(go(ARCH, 101), RET_ERRNO | libc::EPERM as u32);
+        for nr in [0, 2, 40, 42, 100, 231, 334] {
+            assert_eq!(go(ARCH, nr), RET_ALLOW, "{nr}");
+        }
+        // The other ABIs would get around the list.
+        assert_eq!(go(ARCH, 0x4000_0000 | 41), RET_KILL_PROCESS);
+        assert_eq!(go(ARCH, 0x4000_0000), RET_KILL_PROCESS);
+        assert_eq!(go(ARCH ^ 1, 2), RET_KILL_PROCESS);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn gpgvs_list_names_the_ways_out_and_none_of_what_it_needs() {
+        let f = gpgv_filter().unwrap();
+        let go = |nr: i64| run(&f, ARCH, nr as u32, [0; 6]);
+        for nr in [
+            libc::SYS_socket,
+            libc::SYS_connect,
+            libc::SYS_bind,
+            libc::SYS_ptrace,
+            libc::SYS_io_uring_setup,
+            libc::SYS_bpf,
+            libc::SYS_keyctl,
+            libc::SYS_mount,
+            libc::SYS_unshare,
+            libc::SYS_setns,
+            libc::SYS_finit_module,
+            libc::SYS_process_vm_readv,
+            libc::SYS_userfaultfd,
+            libc::SYS_open_by_handle_at,
+            libc::SYS_personality,
+            libc::SYS_reboot,
+        ] {
+            assert_eq!(go(nr), RET_ERRNO | libc::EPERM as u32, "{nr}");
+        }
+        // What gpgv does: open, read, map, write its status, exit.
+        for nr in [
+            libc::SYS_openat,
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_mmap,
+            libc::SYS_execve,
+            libc::SYS_fstat,
+            libc::SYS_getrandom,
+            libc::SYS_exit_group,
+            libc::SYS_futex,
+        ] {
+            assert_eq!(go(nr), RET_ALLOW, "{nr}");
+        }
     }
 
     #[test]

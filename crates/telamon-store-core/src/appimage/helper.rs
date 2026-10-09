@@ -101,24 +101,58 @@ pub fn exit_now(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// The helper's `main`: inspects `path` and writes the answer to stdout.
-/// Returns the exit code. On x86-64 the process is sandboxed when this
-/// returns (use [`exit_now`] to end it).
+/// Why the contents were not read when no filter could be put on.
+pub const NOT_ON_THIS_PLATFORM: &str =
+    "Telamon couldn't look inside this file on this computer's kind of processor.";
+const NO_SANDBOX: &str = "Telamon couldn't make a safe place to look inside this file.";
+
+/// The helper's second record for `prepared`, given what [`sandbox::enter`]
+/// said. The squashfs is read only when the filter is on (or, on a processor
+/// that has none, when the build says so with the `unsandboxed-inspector`
+/// feature, which only tests on other architectures use).
+pub fn second_record(
+    prepared: inspect::Prepared,
+    entered: Result<sandbox::Entered, String>,
+) -> Vec<u8> {
+    match entered {
+        Ok(sandbox::Entered::Yes) => prepared.finish(&Limits::default()).encode_contents(),
+        Ok(sandbox::Entered::Skipped) if cfg!(feature = "unsandboxed-inspector") => {
+            prepared.finish(&Limits::default()).encode_contents()
+        }
+        Ok(sandbox::Entered::Skipped) => prepared.unread_record(NOT_ON_THIS_PLATFORM),
+        Err(_) => prepared.unread_record(NO_SANDBOX),
+    }
+}
+
+/// The helper's `main`: inspects `path` and writes the answer to stdout in
+/// two records. Returns the exit code. On x86-64 the process is sandboxed when
+/// this returns (use [`exit_now`] to end it).
+///
+/// Stage 1 (before the sandbox) computes the facts and writes and flushes the
+/// first record; stage 2 (inside it) reads the file's contents and writes the
+/// second. [`Inspection::decode`] takes the facts from the first alone, so a
+/// parser bug that takes over stage 2 cannot change the hash, the origin or
+/// the signature.
 pub fn child_main(path: &Path) -> i32 {
     use std::io::Write;
     close_inherited_fds();
     limit_self();
-    // Stage 1: everything that needs more than the open file.
-    let out = match inspect::prepare(path) {
-        Err(e) => format!("ERROR {e}\n").into_bytes(),
-        // Stage 2: the file's contents, from inside the sandbox.
-        Ok(prepared) => match sandbox::enter() {
-            Ok(_) => prepared.finish(&Limits::default()).encode(),
-            Err(e) => format!("ERROR {e}\n").into_bytes(),
-        },
-    };
     let mut so = std::io::stdout().lock();
-    if so.write_all(&out).and_then(|()| so.flush()).is_err() {
+    let mut put = |bytes: &[u8]| so.write_all(bytes).and_then(|()| so.flush()).is_ok();
+    let prepared = match inspect::prepare(path) {
+        Ok(p) => p,
+        Err(e) => {
+            return if put(format!("ERROR {e}\n").as_bytes()) {
+                0
+            } else {
+                2
+            };
+        }
+    };
+    if !put(&prepared.facts_record()) {
+        return 2;
+    }
+    if !put(&second_record(prepared, sandbox::enter())) {
         return 2;
     }
     0
@@ -170,7 +204,9 @@ pub fn run(exe: &Path, path: &Path, timeout: Duration) -> Result<Inspection, Ins
             cmd.env(var, v);
         }
     }
-    // Its own process group: a timeout ends `gpgv` too, not only the helper.
+    // Its own process group, so the timeout can end everything the helper
+    // started that stayed in it. (`gpgv` is in a group of its own and dies
+    // with the helper through PR_SET_PDEATHSIG; see `sign.rs`.)
     let mut child = cmd
         .process_group(0)
         .stdin(Stdio::null())

@@ -805,6 +805,34 @@ mod gpgv_run {
         assert!(!std::path::Path::new(home).parent().unwrap().exists());
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_gpgv_cannot_open_a_socket() {
+        // The stand-in tries to connect to a listener of ours through bash's
+        // /dev/tcp; with the filter on `socket` fails and nobody arrives.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = scratch("gpgv-socket");
+        let out = dir.join("seen");
+        let gpgv = fake_gpgv(
+            &dir,
+            &out,
+            &format!(
+                "if exec 3<>/dev/tcp/127.0.0.1/{port}; then echo connected > '{r}.net'; else echo blocked > '{r}.net'; fi 2>/dev/null",
+                r = out.display()
+            ),
+        );
+        let (key, sig) = key_and_sig();
+        let _ = verify_within(&gpgv, &sig, &key, "abc", Duration::from_secs(20));
+        let net = std::fs::read_to_string(format!("{}.net", out.display())).unwrap();
+        assert_eq!(net.trim(), "blocked");
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "gpgv connected to the listener"
+        );
+    }
+
     #[test]
     fn a_gpgv_that_floods_its_output_does_not_stall_or_pass() {
         let dir = scratch("gpgv-flood");

@@ -258,12 +258,21 @@ fn run_gpgv(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    // SAFETY: the closure only calls setrlimit and prctl, which are safe
-    // between fork and exec.
+    // A denylist of the system calls it has no use for, built here (it
+    // allocates) and put on in the child, so `gpgv` inherits it across exec:
+    // the parsers of the key and the signature run with no sockets, no
+    // tracing, no keyring, no mounts. Where it cannot be put on, `gpgv` is
+    // not run.
+    let filter = super::sandbox::gpgv_filter();
+    // SAFETY: the closure only calls setrlimit, prctl and seccomp, which are
+    // safe between fork and exec (the filter was built before the fork).
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             limit_gpgv();
-            Ok(())
+            match &filter {
+                Some(f) => f.install(),
+                None => Ok(()),
+            }
         });
     }
     let Ok(mut child) = cmd.spawn() else {

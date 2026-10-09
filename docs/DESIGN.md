@@ -346,7 +346,9 @@ tokenizer, not searched for words: it is accepted only when the whole document
 is understood, so what a real XML parser would read differently is refused.
 The entities are the five predefined ones (no `&#..;` that could spell a
 name, no DOCTYPE); the only declaration is `<?xml ...?>` first, with no
-encoding but UTF-8 (a UTF-7 parser would read other tags); no element
+encoding but UTF-8 (a UTF-7 parser would read other tags; US-ASCII,
+ISO-8859-1 and windows-1252 are accepted too, for a document that is all
+ASCII, where they read the same); no element
 `script`, `style`, `image`, `use`, `a`, `feImage`, `foreignObject`, `iframe`,
 `animate`, `set`, `handler` and the like, whatever its prefix or case; no
 event-handler attribute (`on...`), no `xml:base`, no backslash (a CSS
@@ -360,9 +362,9 @@ its colour type allows and the only compression and filter methods PNG has.
 start plus 1 GiB), `RLIMIT_CPU` 150 s, `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 1 MiB
 and no new privileges, started with an empty environment (but the runtime
 folder, `TMPDIR` and the language), in a process group of its own, and a 180 s
-timeout on the Store's side that kills the whole group. It prints one
-line of JSON and then the icon's bytes; the Store reads at most 2 MiB of it
-and treats it as untrusted again (`Inspection::sanitize`: texts cleaned again,
+timeout on the Store's side that kills the whole group (`gpgv` is in a group
+of its own and dies with the helper). It prints two records, and the Store
+reads at most 2 MiB of them and treats them as untrusted again (`Inspection::sanitize`: texts cleaned again,
 IDs, hash, host and fingerprint checked, an icon that is not an image
 dropped). A helper that fails (out of memory, too long) means "Telamon
 couldn't look at this file" and no Install.
@@ -375,9 +377,22 @@ whole file (and the variant with the signature sections zeroed) and runs
 `gpgv`, the one child it ever starts. Then it puts a **seccomp-bpf
 allowlist** on itself (hand-written, no crate; `SECCOMP_RET_KILL_PROCESS` for
 everything else, the architecture checked first; x86-64 only, elsewhere it
-logs and goes on with the limits above) and only then does stage 2: the
+the helper then answers "could not look inside" instead of reading the
+file, unless the build has the `unsandboxed-inspector` feature, which only
+tests on other architectures use) and only then does stage 2: the
 squashfs walk, the decompressors (zlib, liblzma, libzstd) and the XML,
-desktop-entry and icon parsing, and writes its answer. After the filter it can
+desktop-entry and icon parsing.
+
+The two stages write **two records**. Stage 1 writes and flushes the first
+(one line of JSON: format, size, SHA-256, file name, download address,
+signature) before the sandbox goes on; stage 2 writes the second (one line:
+whether it looked inside, the note, name, version, publisher, summary, app ID
+and icon kind, then the icon's bytes). `Inspection::decode` takes the facts
+from the first record alone and reads nothing but those eight fields from the
+second, so a parser bug that takes over stage 2 cannot forge the hash (and so
+the de-duplication), the origin or the signature. A missing or unreadable
+second record is "could not look inside" with the facts kept; a missing first
+record is a failure. After the filter it can
 read the file it holds (`read`, `pread64`, `lseek`, `fcntl` to duplicate or
 read the flags of a descriptor), write to standard output and error, manage
 memory (`brk`, `mmap` that is never executable, `munmap`, `mremap`, `madvise`),
@@ -408,7 +423,13 @@ red and the Install button the red kind:
   timeout that kills its whole process group. It runs in a process group of
   its own with `RLIMIT_CPU` 20 s, `RLIMIT_AS` 1 GiB, `RLIMIT_FSIZE` 1 MiB,
   `RLIMIT_NOFILE` 64, no core file and no new privileges, and dies with the
-  helper that started it (`PR_SET_PDEATHSIG`). `gpgv` has no configuration
+  helper that started it (`PR_SET_PDEATHSIG`). It starts under a seccomp
+  denylist (inherited across exec) that fails with `EPERM` the calls it has
+  no use for and a bug in its key or signature parser could use: sockets and
+  every network call, `ptrace` and `process_vm_*`, `io_uring`, `bpf`,
+  `perf_event_open`, `userfaultfd`, the keyring, mounts and namespaces, kernel
+  modules and `kexec`, `personality`, `reboot`; other system call ABIs are
+  killed. `strace` shows `gpgv` using none of them. `gpgv` has no configuration
   file, no agent and no network; its status output is read as it comes and at
   most 64 KiB of it. A signature that is not detached (`gpgv` says so) reads as
   wrong, never as signed. The user's keyring is never read or changed and the
