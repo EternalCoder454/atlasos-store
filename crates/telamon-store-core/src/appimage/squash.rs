@@ -205,6 +205,30 @@ pub fn check_superblock(
     // with a plain `+`, so an offset near u64::MAX panics (overflow checks on).
     check_lookup(file, base, id_table, le16(&sb[26..]), 4, used)?;
     check_lookup(file, base, frag_table, frags, 16, used)?;
+    // backhand reads directory blocks from `dir_table` until it reaches a
+    // pointer it takes from a lookup table: the first entry of the fragment
+    // table, else of the export table (when the superblock says there is
+    // one), else of the id table. A pointer that is not on a block boundary of
+    // the directory table makes it read on, block after block, past the image.
+    let flags = le16(&sb[24..]);
+    let chosen = if frags > 0 && frag_table != absent {
+        frag_table
+    } else if flags & 0x0080 != 0 && export_table != absent {
+        export_table
+    } else {
+        id_table
+    };
+    if chosen.checked_add(8).is_none_or(|e| e > used) {
+        return Err(SquashError::Damaged("lookup table"));
+    }
+    let mut p = [0u8; 8];
+    file.read_exact_at(&mut p, base + chosen)
+        .map_err(|_| SquashError::Damaged("lookup table"))?;
+    let end_ptr = u64::from_le_bytes(p);
+    if !(dir_table + 1..=used).contains(&end_ptr) {
+        return Err(SquashError::Damaged("directory table"));
+    }
+    walk_meta(file, base, dir_table, end_ptr, limits.max_meta_blocks)?;
     Ok(())
 }
 

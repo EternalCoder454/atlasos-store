@@ -318,3 +318,28 @@ fn a_block_log_over_63_is_refused_not_a_panic() {
         assert!(matches!(r, Ok(Err(_))), "block_log {log}: {r:?}");
     }
 }
+
+/// FINDING (low): backhand reads directory blocks until it reaches the first
+/// pointer of a lookup table (the fragment table's); one that is not on a block
+/// boundary of the directory table made it read on past the image, a tiny block
+/// at a time. The pointer is now checked against the chain in
+/// `check_superblock`, before backhand reads anything.
+#[test]
+fn a_lookup_pointer_off_the_directory_chain_is_refused() {
+    let mut bytes = image::normal_squash().build();
+    let at = u64::from_le_bytes(bytes[80..88].try_into().unwrap()) as usize;
+    let good = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    // One byte into a block, not at its start.
+    bytes[at..at + 8].copy_from_slice(&(good + 1).to_le_bytes());
+    let file = checks::memfile(&bytes);
+    let r = squash::with_tree(&file, 0, bytes.len() as u64, &Limits::default(), |_| ());
+    assert!(
+        matches!(
+            r,
+            Err(squash::SquashError::Damaged(
+                "directory table" | "metadata tables"
+            ))
+        ),
+        "{r:?}"
+    );
+}
