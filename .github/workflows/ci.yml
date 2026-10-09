@@ -46,12 +46,12 @@ jobs:
       - id: month
         run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /atlas-framework-rpms
           key: atlas-framework-rpms-f44-8e6a53569363aec3d7e42920875d03ca113ef3eb-${{ steps.month.outputs.month }}
       - if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: EternalCoder454/atlas-framework
@@ -69,7 +69,7 @@ jobs:
           # Nothing unlisted is uploaded either.
           diff <(ls -1 -- *.rpm) <(awk '{print $2}' SHA256SUMS | sort)
         shell: bash
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: atlas-framework-rpms
           path: /atlas-framework-rpms/*.rpm
@@ -84,10 +84,10 @@ jobs:
     steps:
       - name: Tools for checkout and cache
         run: dnf -y install git-core tar zstd
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: atlas-framework-rpms
           # In the container: runner.temp would be the host's path.
@@ -98,7 +98,7 @@ jobs:
             /tmp/atlas-framework-rpms/telamon-ui-[0-9]*.rpm \
             /tmp/atlas-framework-rpms/telamon-symbols-fonts-[0-9]*.rpm
           dnf -y builddep packaging/telamon-store.spec
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Only the downloads: an old target dir would grow without bound.
           path: |
@@ -123,10 +123,10 @@ jobs:
     steps:
       - name: Tools for checkout
         run: dnf -y install git-core tar
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: atlas-framework-rpms
           # In the container: runner.temp would be the host's path.
@@ -148,7 +148,7 @@ jobs:
             echo "the package holds a setuid, setgid or world-writable file" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: telamon-store-rpm
           path: out/*.rpm
