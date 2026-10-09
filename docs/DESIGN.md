@@ -257,6 +257,14 @@ runs (the dialog then offers "Close and Remove": SIGTERM, 3 s, SIGKILL, on the
 worker, after the user confirms) and never while another branch of it is installed; a runtime an
 installed app uses is refused (only "remove unused" removes runtimes).
 
+**Permissions shown:** the install dialog lists everything flatpak applies
+from the app's metadata, read the way flatpak reads it (`permissions.rs`);
+what the Store does not know, whether flatpak reads it or not, is shown as
+unknown and High, never dropped. `host-root` (new in flatpak 1.18) and raw USB
+access (`devices=usb` binds all of `/dev/bus/usb`) are High. A runtime's own
+permissions are not inherited by its apps in flatpak (only environment
+variables are), so the dialog lists the app's metadata alone.
+
 ## Opening an app
 
 Open asks the window system for an XDG activation token on the GUI thread
