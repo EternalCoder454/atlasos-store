@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.gates</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Release Notes Example</name>
+  <summary>An app whose releases have notes</summary>
+  <launchable type="desktop-id">net.eterneon.telamon.gates.desktop</launchable>
+  <releases>
+    <release version="1.2" date="2026-09-01" type="stable" urgency="medium">
+      <description>
+        <p>This release fixes:</p>
+        <ul>
+          <li>Crash on start</li>
+          <li>A slow search</li>
+        </ul>
+      </description>
+      <url type="details">https://example.org/releases/1.2</url>
+      <issues>
+        <issue url="https://example.org/issues/12">#12</issue>
+        <issue type="cve">CVE-2026-0001</issue>
+      </issues>
+    </release>
+    <release version="1.1" date="2026-06-01">
+      <description>
+        <p>First stable release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

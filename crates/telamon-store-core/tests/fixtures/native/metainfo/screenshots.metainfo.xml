@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.gates.desktop</id>
+  <name>Screenshots Example</name>
+  <summary>An app with screenshots</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LGPL-2.1+</project_license>
+  <description><p>An app that shows what it looks like.</p></description>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The main window</caption>
+      <caption xml:lang="de">Das Hauptfenster</caption>
+      <image type="source" width="1600" height="900">https://example.org/shots/main.png</image>
+      <image type="thumbnail" width="752" height="423">https://example.org/shots/main-752.png</image>
+    </screenshot>
+    <screenshot>
+      <video codec="av1" container="webm" width="1280" height="720">https://example.org/shots/demo.webm</video>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#ff00ff</color>
+    <color type="primary" scheme_preference="dark">#993d3d</color>
+  </branding>
+</component>

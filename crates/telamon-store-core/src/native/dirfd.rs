@@ -27,6 +27,9 @@ use sha2::{Digest, Sha256};
 
 /// How deep [`Dir::remove_all`] goes before giving up.
 const MAX_DEPTH: usize = 256;
+// A tree the unpacker made is never deeper than the cap on its paths, so
+// `remove_all` always gets to the bottom of it.
+const _: () = assert!(super::manifest::MAX_PATH_PARTS * 4 < MAX_DEPTH);
 
 fn errno() -> io::Error {
     io::Error::last_os_error()
@@ -59,6 +62,8 @@ pub enum Kind {
 /// `fstatat` of one entry, links not followed.
 #[derive(Debug, Clone, Copy)]
 pub struct Meta {
+    dev: u64,
+    ino: u64,
     pub kind: Kind,
     pub uid: u32,
     pub mode: u32,
@@ -66,6 +71,11 @@ pub struct Meta {
 }
 
 impl Meta {
+    /// Which file this is (device and inode).
+    fn ident(&self) -> (u64, u64) {
+        (self.dev, self.ino)
+    }
+
     fn from_stat(st: &libc::stat) -> Meta {
         let kind = match st.st_mode & libc::S_IFMT {
             libc::S_IFREG => Kind::File,
@@ -74,6 +84,8 @@ impl Meta {
             _ => Kind::Other,
         };
         Meta {
+            dev: st.st_dev,
+            ino: st.st_ino,
             kind,
             uid: st.st_uid,
             mode: st.st_mode & 0o7777,
@@ -105,6 +117,20 @@ pub enum Refused {
 #[derive(Debug)]
 pub struct Dir {
     fd: OwnedFd,
+}
+
+/// Tests force the paths that depend on the file system.
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks {
+    use std::cell::{Cell, RefCell};
+    /// What a test runs at a point of a swap.
+    pub type Callback = Box<dyn Fn()>;
+    thread_local! {
+        /// Make `renameat2` with a flag fail as a file system without it does.
+        pub static NO_RENAME_FLAGS: Cell<bool> = const { Cell::new(false) };
+        /// Run between a swap and the check of what was swapped out.
+        pub static ON_SWAP: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -240,6 +266,14 @@ impl Dir {
         Ok(st)
     }
 
+    /// Whether `path` (links followed) is this very folder.
+    pub fn is_same_dir(&self, path: &Path) -> bool {
+        let (Ok(st), Ok(md)) = (self.fstat(), std::fs::metadata(path)) else {
+            return false;
+        };
+        ident_of(&md) == (st.st_dev, st.st_ino)
+    }
+
     /// Fails unless the folder belongs to this user.
     pub fn require_owner(&self) -> io::Result<()> {
         if self.fstat()?.st_uid != crate::appimage::fsutil::euid() {
@@ -340,7 +374,10 @@ impl Dir {
         // SAFETY: `fd` is a fresh descriptor nobody else owns.
         let f = unsafe { File::from_raw_fd(fd) };
         if !f.metadata()?.is_file() {
-            return Err(io::Error::other("not a regular file"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a regular file",
+            ));
         }
         Ok(f)
     }
@@ -461,6 +498,10 @@ impl Dir {
 
     fn rename2(&self, from: &str, to_dir: &Dir, to: &str, flags: libc::c_uint) -> io::Result<()> {
         let (f, t) = (name_c(from)?, name_c(to)?);
+        #[cfg(feature = "test-hooks")]
+        if flags != 0 && test_hooks::NO_RENAME_FLAGS.with(|h| h.get()) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
         // SAFETY: both are NUL-terminated names that outlive the call; both
         // descriptors are open.
         let rc = unsafe {
@@ -489,18 +530,56 @@ impl Dir {
         self.rename2(from, to_dir, to, 0)
     }
 
-    /// Like [`Dir::rename`] but `AlreadyExists` instead of replacing.
+    /// Like [`Dir::rename`] but `AlreadyExists` instead of replacing
+    /// (`RENAME_NOREPLACE`). On a file system without that flag (NFS, some
+    /// FUSE, vfat) a file is hard-linked into place and the old name unlinked,
+    /// which is still atomic about "not replacing"; a folder, or a file system
+    /// without hard links, is checked for the name and then renamed, and a name
+    /// made in between is replaced (an empty folder or a file the Store is
+    /// about to look at anyway): narrower, and only where the file system
+    /// leaves no other way.
     pub fn rename_noreplace(&self, from: &str, to_dir: &Dir, to: &str) -> io::Result<()> {
-        self.rename2(from, to_dir, to, libc::RENAME_NOREPLACE)
+        match self.rename2(from, to_dir, to, libc::RENAME_NOREPLACE) {
+            Err(e) if unsupported(&e) => self.noreplace_fallback(from, to_dir, to),
+            r => r,
+        }
+    }
+
+    fn noreplace_fallback(&self, from: &str, to_dir: &Dir, to: &str) -> io::Result<()> {
+        let exists = || -> io::Result<()> {
+            if to_dir.stat_opt(to)?.is_some() {
+                Err(io::ErrorKind::AlreadyExists.into())
+            } else {
+                Ok(())
+            }
+        };
+        if self.stat(from)?.kind != Kind::Dir {
+            let (f, t) = (name_c(from)?, name_c(to)?);
+            // SAFETY: as in `rename2`.
+            let rc = unsafe { libc::linkat(self.raw(), f.as_ptr(), to_dir.raw(), t.as_ptr(), 0) };
+            if rc == 0 {
+                return self.unlink(from);
+            }
+            let e = errno();
+            match e.raw_os_error() {
+                Some(libc::EEXIST) => return Err(io::ErrorKind::AlreadyExists.into()),
+                Some(libc::EPERM)
+                | Some(libc::EOPNOTSUPP)
+                | Some(libc::EMLINK)
+                | Some(libc::ENOSYS)
+                | Some(libc::EINVAL) => {}
+                _ => return Err(e),
+            }
+        }
+        exists()?;
+        self.rename(from, to_dir, to)
     }
 
     /// Swaps two entries atomically (`RENAME_EXCHANGE`). `Unsupported` when the
     /// file system cannot.
     fn exchange(&self, a: &str, b: &str) -> io::Result<()> {
         match self.rename2(a, self, b, libc::RENAME_EXCHANGE) {
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) => {
-                Err(io::ErrorKind::Unsupported.into())
-            }
+            Err(e) if unsupported(&e) => Err(io::ErrorKind::Unsupported.into()),
             r => r,
         }
     }
@@ -639,7 +718,12 @@ impl Dir {
     /// `RENAME_EXCHANGE` (or `RENAME_NOREPLACE` for an empty place), so the old
     /// file ends up under the temporary name where it is read and hashed
     /// through the descriptor; if it is not what was expected the swap is
-    /// undone. Returns the old content (at most `max_old` bytes).
+    /// undone. On a file system without those flags the file is read first and
+    /// then renamed into place, which leaves a short window (narrower). If a
+    /// writer puts a file at `name` while the swap is undone, that file is
+    /// kept as `<name>.orig-<pid>` and [`ReplaceError::Displaced`] says so;
+    /// nothing is unlinked that the Store did not make. Returns the old
+    /// content (at most `max_old` bytes).
     pub fn replace_checked(
         &self,
         name: &str,
@@ -651,12 +735,16 @@ impl Dir {
         let tmp = temp_name(name);
         let io = ReplaceError::Io;
         let mut f = self.create_new(&tmp, mode).map_err(io)?;
+        let ours = f.metadata().map(|m| ident_of(&m));
         let wrote = f.write_all(bytes).and_then(|()| f.sync_all());
         drop(f);
-        if let Err(e) = wrote {
-            let _ = self.unlink(&tmp);
-            return Err(ReplaceError::Io(e));
-        }
+        let ours = match (wrote, ours) {
+            (Ok(()), Ok(ours)) => ours,
+            (Err(e), _) | (_, Err(e)) => {
+                let _ = self.unlink(&tmp);
+                return Err(ReplaceError::Io(e));
+            }
+        };
         let outcome = match expect {
             Expect::Absent => match self.rename_noreplace(&tmp, self, name) {
                 Ok(()) => Ok(None),
@@ -665,10 +753,15 @@ impl Dir {
                 }
                 Err(e) => Err(ReplaceError::Io(e)),
             },
-            Expect::Sha(want) => self.swap_and_verify(&tmp, name, want, max_old),
+            Expect::Sha(want) => self.swap_and_verify(&tmp, name, want, max_old, ours),
         };
-        // `Stranded` leaves the temporary name alone: the user's file is there.
-        if outcome.is_err() && !matches!(outcome, Err(ReplaceError::Stranded)) {
+        // These two leave the temporary name alone: someone's file is there.
+        if outcome.is_err()
+            && !matches!(
+                outcome,
+                Err(ReplaceError::Stranded) | Err(ReplaceError::Displaced(_))
+            )
+        {
             let _ = self.unlink(&tmp);
         }
         outcome
@@ -680,6 +773,7 @@ impl Dir {
         name: &str,
         want: &str,
         max_old: u64,
+        ours: (u64, u64),
     ) -> Result<Option<Vec<u8>>, ReplaceError> {
         match self.exchange(tmp, name) {
             Ok(()) => {
@@ -687,18 +781,38 @@ impl Dir {
                 let verdict = self
                     .open_read(tmp)
                     .and_then(|mut f| hash_reader(&mut f, max_old, true));
-                match verdict {
+                let reason = match verdict {
                     Ok((sha, old)) if sha == want => {
                         let _ = self.unlink(tmp);
-                        Ok(Some(old))
+                        return Ok(Some(old));
                     }
-                    _ => {
-                        // Not what was expected: put it back.
-                        if self.exchange(tmp, name).is_err() {
-                            return Err(ReplaceError::Stranded);
-                        }
-                        Err(ReplaceError::Refused(Refused::Changed))
+                    Ok(_) => None,
+                    Err(e) if is_not_ours(&e) => None,
+                    Err(e) => Some(e),
+                };
+                #[cfg(feature = "test-hooks")]
+                test_hooks::ON_SWAP.with(|h| {
+                    if let Some(f) = h.borrow().as_ref() {
+                        f()
                     }
+                });
+                // Not what was expected: put it back.
+                if self.exchange(tmp, name).is_err() {
+                    return Err(ReplaceError::Stranded);
+                }
+                // What is at `tmp` now should be the file made here. If a
+                // writer put its own file at `name` meanwhile, that is what
+                // came back: keep it where it can be seen.
+                match self.stat(tmp) {
+                    Ok(m) if m.ident() == ours => {
+                        let _ = self.unlink(tmp);
+                    }
+                    Ok(_) => return Err(ReplaceError::Displaced(self.keep_visible(tmp, name)?)),
+                    Err(_) => {}
+                }
+                match reason {
+                    Some(e) => Err(ReplaceError::Io(e)),
+                    None => Err(ReplaceError::Refused(Refused::Changed)),
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -714,7 +828,10 @@ impl Dir {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
                         return Err(ReplaceError::Refused(Refused::Gone));
                     }
-                    Err(_) => return Err(ReplaceError::Refused(Refused::Changed)),
+                    Err(e) if is_not_ours(&e) => {
+                        return Err(ReplaceError::Refused(Refused::Changed));
+                    }
+                    Err(e) => return Err(ReplaceError::Io(e)),
                 };
                 if sha != want {
                     return Err(ReplaceError::Refused(Refused::Changed));
@@ -726,29 +843,111 @@ impl Dir {
         }
     }
 
+    /// Gives the entry `tmp` a name that shows (`<name>.orig-<pid>`, then
+    /// `-2`...) and returns it.
+    fn keep_visible(&self, tmp: &str, name: &str) -> Result<String, ReplaceError> {
+        for n in 0..100 {
+            let shown = if n == 0 {
+                format!("{name}.orig-{}", std::process::id())
+            } else {
+                format!("{name}.orig-{}-{n}", std::process::id())
+            };
+            match self.rename_noreplace(tmp, self, &shown) {
+                Ok(()) => return Ok(shown),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => break,
+            }
+        }
+        Err(ReplaceError::Stranded)
+    }
+
     /// Removes the regular file `name` only if it has the SHA-256 `want`. The
     /// file is first moved to a temporary name (so nothing can be swapped in
     /// between), read and hashed there through the descriptor, and unlinked;
-    /// if it is not what was expected it is moved back.
-    pub fn remove_checked(&self, name: &str, want: &str) -> Result<(), Refused> {
+    /// if it is not what was expected it is moved back, or, if something took
+    /// its place meanwhile, kept as `<name>.orig-<pid>`. An error of the file
+    /// system is [`RemoveError::Io`], not "changed".
+    pub fn remove_checked(&self, name: &str, want: &str) -> Result<(), RemoveError> {
         let tmp = temp_name(name);
         match self.rename_noreplace(name, self, &tmp) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Refused::Gone),
-            Err(_) => return Err(Refused::Changed),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(RemoveError::Refused(Refused::Gone));
+            }
+            Err(e) => return Err(RemoveError::Io(e)),
         }
-        let ours = self
+        let verdict = self
             .open_read(&tmp)
-            .and_then(|mut f| hash_reader(&mut f, u64::MAX, false))
-            .is_ok_and(|(sha, _)| sha == want);
-        if ours {
-            let _ = self.unlink(&tmp);
-            Ok(())
-        } else {
-            // Back where it was (if something took the place meanwhile, the
-            // file stays under its temporary name rather than replacing it).
-            let _ = self.rename_noreplace(&tmp, self, name);
-            Err(Refused::Changed)
+            .and_then(|mut f| hash_reader(&mut f, u64::MAX, false));
+        match verdict {
+            Ok((sha, _)) if sha == want => {
+                let _ = self.unlink(&tmp);
+                Ok(())
+            }
+            other => {
+                let reason = match other {
+                    Err(e) if !is_not_ours(&e) => Some(e),
+                    _ => None,
+                };
+                match self.rename_noreplace(&tmp, self, name) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        let _ = self.keep_visible(&tmp, name);
+                    }
+                }
+                match reason {
+                    Some(e) => Err(RemoveError::Io(e)),
+                    None => Err(RemoveError::Refused(Refused::Changed)),
+                }
+            }
+        }
+    }
+
+    /// Removes the temporary files an interrupted [`Dir::write_atomic`],
+    /// [`Dir::replace_checked`] or [`Dir::remove_checked`] left for `base`:
+    /// exactly `.<base>.<digits>.<digits>.tmp`, and only a regular file of
+    /// this user. (The caller holds the install lock, so none is in use.)
+    pub fn sweep_temps(&self, base: &str) {
+        let prefix = format!(".{base}.");
+        let Ok(names) = self.list_text() else { return };
+        for name in names {
+            let Some(mid) = name
+                .strip_prefix(&prefix)
+                .and_then(|r| r.strip_suffix(".tmp"))
+            else {
+                continue;
+            };
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            if mid
+                .split_once('.')
+                .is_some_and(|(a, b)| digits(a) && digits(b))
+                && self
+                    .stat(&name)
+                    .is_ok_and(|m| m.kind == Kind::File && m.uid == crate::appimage::fsutil::euid())
+            {
+                let _ = self.unlink(&name);
+            }
+        }
+    }
+
+    /// Removes the links an interrupted switch of a link left:
+    /// `<prefix><digits>-<digits>`, only links of this user.
+    pub fn sweep_link_temps(&self, prefix: &str) {
+        let Ok(names) = self.list_text() else { return };
+        for name in names {
+            let Some(rest) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            if rest
+                .split_once('-')
+                .is_some_and(|(a, b)| digits(a) && digits(b))
+                && self
+                    .stat(&name)
+                    .is_ok_and(|m| m.kind == Kind::Link && m.uid == crate::appimage::fsutil::euid())
+            {
+                let _ = self.unlink(&name);
+            }
         }
     }
 
@@ -761,11 +960,46 @@ impl Dir {
     }
 }
 
+/// Why [`Dir::remove_checked`] did not remove.
+#[derive(Debug)]
+pub enum RemoveError {
+    Refused(Refused),
+    /// The file system failed (not "the file is something else").
+    Io(io::Error),
+}
+
+/// Whether an error means "this is not what the Store wrote" (a link, a
+/// folder, a FIFO, a file that is too big) and not a failure of the file
+/// system.
+fn is_not_ours(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::InvalidData
+        || matches!(
+            e.raw_os_error(),
+            Some(libc::ELOOP | libc::ENXIO | libc::EISDIR | libc::ENOTDIR | libc::ENOENT)
+        )
+}
+
+/// `renameat2` flags the file system does not know.
+fn unsupported(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+    )
+}
+
+fn ident_of(m: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (m.dev(), m.ino())
+}
+
 /// Why [`Dir::replace_checked`] did not replace.
 #[derive(Debug)]
 pub enum ReplaceError {
     Refused(Refused),
     Io(io::Error),
+    /// A writer put a file at the name while a swap was undone; it was kept
+    /// under this visible name next to it.
+    Displaced(String),
     /// A swap could not be undone: the file that was in the place is under a
     /// hidden temporary name next to it, and is left there.
     Stranded,
@@ -922,6 +1156,14 @@ mod tests {
         assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
     }
 
+    fn refused(r: Result<(), RemoveError>) -> Option<Refused> {
+        match r {
+            Ok(()) => None,
+            Err(RemoveError::Refused(r)) => Some(r),
+            Err(RemoveError::Io(e)) => panic!("an I/O error: {e}"),
+        }
+    }
+
     #[test]
     fn remove_checked_removes_only_the_expected_file() {
         let root = scratch("rmchecked");
@@ -929,19 +1171,216 @@ mod tests {
         std::fs::write(root.join("f"), b"mine").unwrap();
         let sha = hex(&Sha256::digest(b"mine"));
         assert_eq!(
-            d.remove_checked("f", &"0".repeat(64)),
-            Err(Refused::Changed)
+            refused(d.remove_checked("f", &"0".repeat(64))),
+            Some(Refused::Changed)
         );
         assert_eq!(std::fs::read(root.join("f")).unwrap(), b"mine");
         d.remove_checked("f", &sha).unwrap();
-        assert_eq!(d.remove_checked("f", &sha), Err(Refused::Gone));
+        assert_eq!(refused(d.remove_checked("f", &sha)), Some(Refused::Gone));
         symlink("/etc/hostname", root.join("l")).unwrap();
-        assert_eq!(d.remove_checked("l", &sha), Err(Refused::Changed));
+        assert_eq!(refused(d.remove_checked("l", &sha)), Some(Refused::Changed));
         assert!(
             std::fs::symlink_metadata(root.join("l"))
                 .unwrap()
                 .is_symlink()
         );
+        // A folder and a FIFO are "something else", not an error of the system.
+        std::fs::create_dir(root.join("dir")).unwrap();
+        assert_eq!(
+            refused(d.remove_checked("dir", &sha)),
+            Some(Refused::Changed)
+        );
+        assert!(root.join("dir").is_dir());
+        let fifo = std::ffi::CString::new(root.join("fifo").as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            refused(d.remove_checked("fifo", &sha)),
+            Some(Refused::Changed)
+        );
+        assert!(root.join("fifo").exists());
+    }
+
+    #[test]
+    fn a_failure_of_the_file_system_is_not_called_a_change() {
+        for (e, ours) in [
+            (io::Error::from_raw_os_error(libc::EIO), false),
+            (io::Error::from_raw_os_error(libc::EACCES), false),
+            (io::Error::from_raw_os_error(libc::ENOSPC), false),
+            (io::Error::from_raw_os_error(libc::ELOOP), true),
+            (io::Error::from_raw_os_error(libc::ENXIO), true),
+            (io::Error::from_raw_os_error(libc::EISDIR), true),
+            (
+                io::Error::new(io::ErrorKind::InvalidData, "too large"),
+                true,
+            ),
+        ] {
+            assert_eq!(is_not_ours(&e), ours, "{e}");
+        }
+        // Not a regular file is `InvalidData`, which is "something else".
+        let root = scratch("classify");
+        let d = Dir::open_following(&root).unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        assert!(is_not_ours(&d.open_read("dir").unwrap_err()));
+    }
+
+    #[test]
+    fn without_renameat2_flags_the_same_things_happen_as_far_as_the_system_allows() {
+        test_hooks::NO_RENAME_FLAGS.with(|h| h.set(true));
+        let root = scratch("noflags");
+        let d = Dir::open_following(&root).unwrap();
+        let sha = |b: &[u8]| hex(&Sha256::digest(b));
+        // NOREPLACE: a file is linked into place, a folder is renamed, neither over something.
+        std::fs::write(root.join("a"), b"a").unwrap();
+        std::fs::write(root.join("b"), b"b").unwrap();
+        assert_eq!(
+            d.rename_noreplace("a", &d, "b").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(root.join("a")).unwrap(), b"a");
+        assert_eq!(std::fs::read(root.join("b")).unwrap(), b"b");
+        d.rename_noreplace("a", &d, "c").unwrap();
+        assert!(!root.join("a").exists());
+        assert_eq!(std::fs::read(root.join("c")).unwrap(), b"a");
+        std::fs::create_dir(root.join("d1")).unwrap();
+        std::fs::create_dir(root.join("d2")).unwrap();
+        assert_eq!(
+            d.rename_noreplace("d1", &d, "d2").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        d.rename_noreplace("d1", &d, "d3").unwrap();
+        assert!(root.join("d3").is_dir() && !root.join("d1").exists());
+        // A link is moved as a link.
+        symlink("c", root.join("l1")).unwrap();
+        d.rename_noreplace("l1", &d, "l2").unwrap();
+        assert_eq!(std::fs::read_link(root.join("l2")).unwrap(), Path::new("c"));
+        // replace_checked: absent, then exchange-less swap with a check.
+        assert!(
+            d.replace_checked("n", b"one", 0o644, Expect::Absent, 100)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            d.replace_checked("n", b"x", 0o644, Expect::Absent, 100),
+            Err(ReplaceError::Refused(Refused::Changed))
+        ));
+        assert_eq!(
+            d.replace_checked("n", b"two", 0o644, Expect::Sha(&sha(b"one")), 100)
+                .unwrap()
+                .as_deref(),
+            Some(&b"one"[..])
+        );
+        assert!(matches!(
+            d.replace_checked("n", b"three", 0o644, Expect::Sha(&sha(b"one")), 100),
+            Err(ReplaceError::Refused(Refused::Changed))
+        ));
+        assert!(matches!(
+            d.replace_checked("missing", b"x", 0o644, Expect::Sha(&sha(b"one")), 100),
+            Err(ReplaceError::Refused(Refused::Gone))
+        ));
+        symlink("c", root.join("lk")).unwrap();
+        assert!(
+            d.replace_checked("lk", b"x", 0o644, Expect::Sha(&sha(b"a")), 100)
+                .is_err()
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("lk"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(root.join("n")).unwrap(), b"two");
+        // remove_checked (moves aside, then NOREPLACE back if needed).
+        assert_eq!(
+            refused(d.remove_checked("n", &"0".repeat(64))),
+            Some(Refused::Changed)
+        );
+        assert_eq!(std::fs::read(root.join("n")).unwrap(), b"two");
+        d.remove_checked("n", &sha(b"two")).unwrap();
+        assert!(!root.join("n").exists());
+        let names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        test_hooks::NO_RENAME_FLAGS.with(|h| h.set(false));
+    }
+
+    #[test]
+    fn a_file_a_writer_puts_there_while_a_swap_is_undone_is_kept_in_sight() {
+        let root = scratch("displaced");
+        let d = Dir::open_following(&root).unwrap();
+        std::fs::write(root.join("f.desktop"), b"user edit").unwrap();
+        let r = root.clone();
+        test_hooks::ON_SWAP.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                // An editor saves its file over the name, as editors do.
+                std::fs::write(r.join(".editor"), b"editor save").unwrap();
+                std::fs::rename(r.join(".editor"), r.join("f.desktop")).unwrap();
+            }))
+        });
+        let want = hex(&Sha256::digest(b"what the Store wrote"));
+        let r = d.replace_checked("f.desktop", b"new", 0o644, Expect::Sha(&want), 100);
+        test_hooks::ON_SWAP.with(|h| *h.borrow_mut() = None);
+        let Err(ReplaceError::Displaced(kept)) = r else {
+            panic!("{r:?}");
+        };
+        assert_eq!(kept, format!("f.desktop.orig-{}", std::process::id()));
+        // The editor's file is there to see; the file the Store moved aside is back.
+        assert_eq!(std::fs::read(root.join(&kept)).unwrap(), b"editor save");
+        assert_eq!(std::fs::read(root.join("f.desktop")).unwrap(), b"user edit");
+        let names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        // Without a writer the Store's own file is unlinked, as before.
+        std::fs::remove_file(root.join(&kept)).unwrap();
+        assert!(matches!(
+            d.replace_checked("f.desktop", b"new", 0o644, Expect::Sha(&want), 100),
+            Err(ReplaceError::Refused(Refused::Changed))
+        ));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn only_exact_temporary_names_of_this_user_are_swept() {
+        let root = scratch("sweep");
+        let d = Dir::open_following(&root).unwrap();
+        for ok in [".x.desktop.123.4.tmp", ".x.desktop.1.0.tmp"] {
+            std::fs::write(root.join(ok), b"left").unwrap();
+        }
+        let keep_files = [
+            ".x.desktop.123.tmp",
+            ".x.desktop.a.4.tmp",
+            ".x.desktop.1.2.3.tmp",
+            ".x.desktop.1.2.tmp.bak",
+            ".y.desktop.1.2.tmp",
+            "x.desktop.1.2.tmp",
+            ".x.desktop..2.tmp",
+            "x.desktop.orig-1",
+        ];
+        for k in keep_files {
+            std::fs::write(root.join(k), b"keep").unwrap();
+        }
+        // A link and a folder with the exact pattern are not files.
+        symlink("x", root.join(".x.desktop.5.6.tmp")).unwrap();
+        std::fs::create_dir(root.join(".x.desktop.7.8.tmp")).unwrap();
+        d.sweep_temps("x.desktop");
+        assert!(!root.join(".x.desktop.123.4.tmp").exists());
+        assert!(!root.join(".x.desktop.1.0.tmp").exists());
+        for k in keep_files {
+            assert!(root.join(k).exists(), "{k}");
+        }
+        assert!(std::fs::symlink_metadata(root.join(".x.desktop.5.6.tmp")).is_ok());
+        assert!(root.join(".x.desktop.7.8.tmp").is_dir());
+        // Links of an interrupted switch.
+        symlink("1.0", root.join(".current.12-3")).unwrap();
+        symlink("1.0", root.join(".current.x-3")).unwrap();
+        std::fs::write(root.join(".current.9-9"), b"file").unwrap();
+        d.sweep_link_temps(".current.");
+        assert!(std::fs::symlink_metadata(root.join(".current.12-3")).is_err());
+        assert!(std::fs::symlink_metadata(root.join(".current.x-3")).is_ok());
+        assert!(root.join(".current.9-9").exists());
     }
 
     #[test]

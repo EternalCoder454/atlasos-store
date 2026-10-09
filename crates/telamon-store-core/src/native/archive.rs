@@ -464,31 +464,39 @@ enum Resolved {
 /// Follows `path` (and every link on the way) by hand from `root`, one name at
 /// a time, so that nothing is resolved by the kernel behind the folder's back:
 /// a `..` that would leave `root`, an absolute target or a loop is not
-/// inside; a name that is missing is nowhere.
+/// inside; a name that is missing is nowhere. The folders on the way are kept
+/// open in a stack (a step is one `fstatat`, and one `openat` when it is a
+/// folder), so the work is in step with the length of the path, not its
+/// square.
 fn resolve_inside(root: &Dir, path: &str) -> Resolved {
     let mut queue: VecDeque<String> = path.split('/').map(str::to_string).collect();
-    let mut stack: Vec<String> = Vec::new();
+    // The real names so far; the folder behind each is open, a file has none.
+    let mut stack: Vec<Option<Dir>> = Vec::new();
     let mut hops = 0;
     while let Some(part) = queue.pop_front() {
         match part.as_str() {
             "" | "." => continue,
             ".." => {
-                if stack.pop().is_none() {
-                    return Resolved::Outside;
+                match stack.pop() {
+                    None => return Resolved::Outside,
+                    // `file/..` is not a path.
+                    Some(None) => return Resolved::Nowhere,
+                    Some(Some(_)) => {}
                 }
                 continue;
             }
             _ => {}
         }
-        // The folder the name is in: the stack is made of real folders only.
-        let mut dir: Option<Dir> = None;
-        for p in &stack {
-            match dir.as_ref().unwrap_or(root).sub(p) {
-                Ok(d) => dir = Some(d),
-                Err(_) => return Resolved::Nowhere,
-            }
+        if stack.len() >= manifest::MAX_PATH_PARTS * 2 {
+            return Resolved::Nowhere;
         }
-        let dir = dir.as_ref().unwrap_or(root);
+        // The folder the name is in: the last one on the stack.
+        let dir = match stack.last() {
+            None => root,
+            Some(Some(d)) => d,
+            // Below a file.
+            Some(None) => return Resolved::Nowhere,
+        };
         match dir.stat(&part) {
             Err(_) => return Resolved::Nowhere,
             Ok(m) if m.kind == super::dirfd::Kind::Link => {
@@ -506,7 +514,11 @@ fn resolve_inside(root: &Dir, path: &str) -> Resolved {
                     queue.push_front(piece.to_string());
                 }
             }
-            Ok(_) => stack.push(part),
+            Ok(m) if m.kind == super::dirfd::Kind::Dir => match dir.sub(&part) {
+                Ok(d) => stack.push(Some(d)),
+                Err(_) => return Resolved::Nowhere,
+            },
+            Ok(_) => stack.push(None),
         }
     }
     Resolved::Inside
