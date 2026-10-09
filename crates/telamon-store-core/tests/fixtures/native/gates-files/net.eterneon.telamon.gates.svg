@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Telamon Gates</title>
+  <!-- A stone archway opening onto a violet glow, with a spark in it: a gate
+       to a model. Part of the Telamon app icons: no tile, own hue, same
+       light and shadow. -->
+  <defs>
+    <radialGradient id="shadow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="stone" gradientUnits="userSpaceOnUse" x1="0" y1="14" x2="0" y2="112">
+      <stop offset="0" stop-color="#7C86A0"/>
+      <stop offset="1" stop-color="#454C62"/>
+    </linearGradient>
+    <linearGradient id="step" gradientUnits="userSpaceOnUse" x1="0" y1="106" x2="0" y2="116">
+      <stop offset="0" stop-color="#A9B1C1"/>
+      <stop offset="1" stop-color="#7D8699"/>
+    </linearGradient>
+    <linearGradient id="portal" gradientUnits="userSpaceOnUse" x1="0" y1="34" x2="0" y2="108">
+      <stop offset="0" stop-color="#C3B8FF"/>
+      <stop offset="0.45" stop-color="#7B6BF0"/>
+      <stop offset="1" stop-color="#3A2C9C"/>
+    </linearGradient>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="64" cy="76" r="30">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <ellipse cx="64" cy="116" rx="48" ry="6" fill="url(#shadow)"/>
+  <path fill="url(#stone)" d="M16 110V60C16 33.5 37.5 12 64 12C90.5 12 112 33.5 112 60V110Z"/>
+  <path fill="none" stroke="#9AA3B9" stroke-width="2" stroke-linecap="round" d="M30 30C38 20 50 14 64 14C78 14 90 20 98 30"/>
+  <path fill="url(#portal)" d="M31 110V62C31 43.8 45.8 29 64 29C82.2 29 97 43.8 97 62V110Z"/>
+  <circle cx="64" cy="76" r="30" fill="url(#glow)"/>
+  <path fill="#FFFFFF" d="M64 56C65.6 69 69 72.4 82 74C69 75.6 65.6 79 64 92C62.4 79 59 75.6 46 74C59 72.4 62.4 69 64 56Z"/>
+  <path fill="#FFFFFF" fill-opacity="0.85" d="M83 47C83.7 52 85 53.3 90 54C85 54.7 83.7 56 83 61C82.3 56 81 54.7 76 54C81 53.3 82.3 52 83 47Z"/>
+  <rect x="58" y="10" width="12" height="9" rx="2.5" fill="#8E97AE"/>
+  <rect x="10" y="106" width="108" height="10" rx="4" fill="url(#step)"/>
+</svg>
