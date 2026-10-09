@@ -423,28 +423,45 @@ connect an app is `docs/CONNECT-AN-APP.md`.
 **Connecting an app is one line in `catalog/native-apps.json`** of this
 repository (a pull request; no Store release). The Store fetches the file from
 the main branch (`raw.githubusercontent.com`, through `net::get`), caches it for
-6 hours and parses it: `{ "schema": 1, "apps": [ { "id", "repo", "channel" } ] }`.
+6 hours and parses it:
+`{ "schema": 1, "apps": [ { "id", "repo", "channel", "signers" } ] }`.
 `repo` is `Owner/name` with an owner in `native::ALLOWED_OWNERS` (today
 `EternalCoder454`; adding one is a Store release), `channel` is `releases`
-(the latest published release that is not a draft or a prerelease). An entry
-that is malformed, for another owner, with another channel or listed twice is
-skipped and logged, never half-used. At most 200 entries.
+(the latest published release that is not a draft or a prerelease), `signers`
+is 1 to 4 keys that may sign the app's releases: `{ "type": "minisign", "key":
+"RW..." }`, the public key as `minisign -G` writes it. A `type` the Store does
+not know is ignored (see "Integrity"), a `minisign` key that cannot be read
+skips the entry, and an entry left with no signer is skipped with the reason
+"no signer": a release is never installed or offered without a signature check.
+An entry that is malformed, for another owner, with another channel or listed
+twice is skipped and logged, never half-used. At most 200 entries. `signers` is
+an addition to schema 1, so `schema` stays 1; a Store from before it ignores
+the field and the signature file, and keeps the behavior it was released with.
 
 **What the Store checks about a release** (`github.rs`, `check.rs`): the
 answer of `api.github.com/repos/<repo>/releases/latest` (1 MiB cap); a release
 file counts only when its address is exactly
 `https://github.com/<repo>/releases/download/<tag>/<name>`, so the files are
 the catalog's repository's own and the same release's; the release has a
-`telamon-bundle.json` (1 MiB cap), the outer manifest, whose `id` must equal
-the catalog entry's, whose archive name must be `<id>-<version>-x86_64.tar.zst`
+`telamon-bundle.json` (1 MiB cap), the outer manifest, and a
+`telamon-bundle.json.minisig` (4 KiB cap) signing it, and the signature is
+verified over the manifest's bytes, as downloaded, with the entry's keys
+**before the manifest is read for anything** (see "Integrity"). A release with a
+manifest and no signature is an error shown for that app ("not signed"). The
+manifest's `id` must equal
+the catalog entry's, its archive name must be `<id>-<version>-x86_64.tar.zst`
 and exist in the release with the manifest's size (and GitHub's own `digest`,
-when the API gives one, must equal the manifest's SHA-256), and whose version
-must match the tag (`v<version>` or `<version>`). Anything else is "no bundle
+when the API gives one, must equal the manifest's SHA-256), and its version
+must match the tag (`v<version>` or `<version>`). A release older than the
+installed version is ignored (see "Integrity"). Anything else is "no bundle
 in this release" or an error shown for that app only; the others still list.
 No release at all (404) is not an error: the app is simply not shown yet.
-Answers are cached under `$XDG_CACHE_HOME/telamon-store/native/` for 6 hours
-(a check by hand ignores the cache); with no network the cache is used however
-old and the page says so.
+Answers (release, manifest, signature) are cached under
+`$XDG_CACHE_HOME/telamon-store/native/` for 6 hours (a check by hand ignores
+the cache); with no network the cache is used however old and the page says so.
+The cache is read back through the same checks, signature included, against
+the keys the catalog lists now: a cache file that was edited, or an answer
+signed by a key the catalog has since dropped, is not used.
 
 **What the Store checks about a bundle** (`manifest.rs`, `archive.rs`,
 `desktop.rs`). The download is streamed to a private file (`net::download`,
@@ -475,15 +492,94 @@ minimum that cannot be looked up is not held against the app). All of this runs
 in the install worker, so a failure leaves nothing: the private folder is
 removed (also when the worker panics: the cleanup and the undo are `Drop`s).
 
-**Integrity and what it is not.** Today integrity is HTTPS to GitHub, the
-SHA-256 in the manifest of the same release, the catalog naming the one
-repository per app and the owner allowlist. The checksum and the file come from
-the same place, so it detects damage and a mixed-up release, not a hijacked
-repository or release: the install dialog says so. A later step can add
-GitHub artifact attestations or a minisign key per app; the manifest and the
-catalog are versioned (`schema`) for that. Nothing is signed today and the
-dialog never calls an app safe: it says the app is not sandboxed and runs as
-the user, as any program does.
+**Integrity.** A release is used only when its `telamon-bundle.json` carries a
+valid [minisign](https://jedisct1.github.io/minisign/) signature (Ed25519 over
+the BLAKE2b-512 hash, `sign.rs`, the `minisign-verify` crate pinned to an exact
+version) by one of the keys the app's catalog entry lists. The manifest names
+the archive's SHA-256, size and name, so the signature covers the archive; the
+download is then checked against the manifest as before. Enforced:
+
+- The signature is verified over exactly the manifest bytes as downloaded,
+  before the manifest is parsed or any of its content decides anything (only
+  the release's file list is read to find the two files). A good signature by
+  a key the entry does not list is a failure, as are a missing, oversize
+  (over 4 KiB), non-UTF-8, truncated or edited signature file, and the legacy
+  signature kind (`Ed`, the file itself signed). The trusted comment is signed
+  but is never read: the version, file name and time it carries mean nothing.
+- The signed manifest binds what the Store acts on: `id` must equal the
+  catalog entry's (a manifest signed for app A is refused at app B's entry,
+  even when one key signs both), the archive name, size and SHA-256 are the
+  download's, and the tag must equal the version (a signature of an older
+  version cannot be replayed under a newer tag, and a signature does not
+  verify a different manifest).
+- **No downgrade.** A release older than the installed version is never
+  offered as an update, never shown as a candidate, and never installed: the
+  check ignores it (logged), `install_candidate` refuses it before downloading,
+  and `install_bundle` refuses a release over a newer version under the lock.
+  So a validly signed old release served as "latest" does not roll an app
+  back. (A bundle file the user opens is their own decision and may replace a
+  newer version; the dialog says what it replaces.)
+- The cache is verified again on every read (above).
+- `install.json` records the key ID (16 hex digits, as `minisign` prints it)
+  the release was installed on (`origin.signer`; absent for a local file and
+  for installs from before releases were signed). The install dialog says
+  "Signed with key <ID> that Telamon's list names for this app" in plain text;
+  on an update whose signing key differs from the recorded one it says so
+  (still allowed: the catalog lists the key, and rotating is a catalog
+  decision). A file opened with `--install-bundle` is not signed: the dialog
+  keeps its red warning, shows the SHA-256 and says it is not signed.
+- The dialog never calls an app safe: it says the app is not sandboxed and runs
+  as the user, as any program does.
+
+**Trust roots.** Three places decide what the Store will install, and a
+compromise of one is not a compromise of the others:
+
+1. *The Store binary:* `native::ALLOWED_OWNERS` (which GitHub accounts a
+   catalog entry may name; adding one is a Store release) and the signature
+   code.
+2. *The catalog on this repository's main branch:* which repository supplies
+   an app, and which keys may sign it. It is fetched at run time, so a merged
+   line is live; changes to it are pull requests to this repository.
+3. *The app owner's signing key,* generated off the repository, kept in the
+   release workflow's secrets (or on the owner's machine), never in a
+   repository.
+
+What each compromise can and cannot do:
+
+| Compromised | Can | Cannot |
+|---|---|---|
+| The app's repository (code, workflows) without the signing key | Publish releases, which are refused (no valid signature); change the source of future releases | Get any release installed or offered. It can only deny updates. |
+| A release asset (manifest, archive, signature replaced by an attacker) | Make the Store refuse the release (deny updates) | Make the Store install code:  the signature must verify the manifest, the manifest names the archive's hash. An older signed release can be re-served; the Store never installs one over a newer version |
+| The CI secret (the signing key) | Sign and publish a malicious release that installs everywhere the key is listed | Do it silently for ever: the owner removes the key from the catalog (a pull request) and Stores stop trusting releases signed by it once they refetch the catalog (at most 6 hours, or at once on Check for Updates). Nothing installed earlier is removed. |
+| A catalog pull request (merged) | Change which repository and which keys supply an app, so whoever holds a newly listed key can have a release installed | Add an owner outside `ALLOWED_OWNERS`, or get anything installed without a signature by a key the entry lists. A catalog change is as safe as the review of its pull request |
+| `raw.githubusercontent.com` / the main branch | The same as a catalog change, for as long as it lasts | Anything on a computer whose Store has not refetched, and nothing outside the allowlisted owners |
+
+Limits worth knowing: a first install of an app has nothing to compare with, so
+a validly signed old release that is still the latest can be offered to a
+computer that has none installed (it is no downgrade there); there is no
+freshness signal (an attacker who can block or replay GitHub's answers can keep
+a computer on an old signed release). Neither lets an attacker install code the
+owner did not sign.
+
+**Key rotation.** A catalog entry may list up to four keys. To rotate: add the
+new public key to `signers` (pull request, live when merged), sign new releases
+with it, and when the old key is no longer needed (or is lost or leaked) remove
+it in a second pull request; Stores that refetch stop accepting what the old
+key signs, including their cached answers. While both are listed either may
+sign. Users updating across a rotation see "signed with a different key" in the
+dialog; that is expected and not a refusal.
+
+**Sigstore, later.** GitHub artifact attestations (Sigstore) were weighed
+against pinned keys. Verifying one offline needs the Fulcio certificate chain,
+a Rekor inclusion proof or signed entry timestamp, a pinned and rotating
+Sigstore trusted root, and x509 and ECDSA code: too much code and moving
+trust data to ship now. The extension point is in the catalog: `signers` is a
+typed list, and `{ "type": "sigstore", ... }` entries (issuer, repository or
+workflow identity) can sit beside `minisign` ones, because a `type` the Store
+does not know is ignored. A Store that learns `sigstore` can then require it
+in addition to, or instead of, minisign for entries that list it, without a new
+catalog schema, and an older Store keeps verifying the minisign signers it
+knows.
 
 **Where things go** (`install.rs`, all under `$XDG_DATA_HOME`, never a
 system path, no privilege):
@@ -592,8 +688,8 @@ content must match its recorded SHA-256. One install runs at a time (`flock` on
 **Local bundles** (`--install-bundle`): for trying a bundle before it is
 published. The file is looked into without installing (unpacked into a scratch
 folder under the cache, checked, removed), and the dialog says in red that it
-did not come from Telamon's list and was not checked by Telamon, with its
-SHA-256. After the user's answer it installs like any bundle; an app installed
+did not come from Telamon's list and was not checked by Telamon, that it is
+not signed, with its SHA-256. After the user's answer it installs like any bundle; an app installed
 this way has no source and is updated only if the catalog also lists its ID.
 
 **In the window.** Home shows a "Telamon Apps" shelf (and a Telamon Apps tile
@@ -611,8 +707,9 @@ request that comes while a check runs (a local bundle) waits for it.
 
 **Not done yet.** Telamon Updater's tray and Telamon Settings' Updates page do
 not know these apps, so no background notification or Settings entry; they
-would need the engine (`telamon-updater-core`) to learn the catalog. Signatures
-and attestations (above). More than one release channel.
+would need the engine (`telamon-updater-core`) to learn the catalog. Sigstore
+attestations (above). A freshness signal for the "latest" release. More than
+one release channel.
 
 ## Names before the rename (0.2.0)
 

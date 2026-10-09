@@ -9,12 +9,15 @@
 use serde::Deserialize;
 
 use super::manifest::{self, Manifest};
+use super::sign;
 use super::{Error, err};
 
 /// Largest API answer read.
 pub const MAX_RELEASE_JSON: u64 = 1024 * 1024;
 /// Largest `telamon-bundle.json` downloaded.
 pub const MAX_MANIFEST_DOWNLOAD: u64 = manifest::MAX_MANIFEST;
+/// Largest `telamon-bundle.json.minisig` downloaded.
+pub const MAX_SIGNATURE_DOWNLOAD: u64 = sign::MAX_SIGNATURE;
 /// Assets looked at in one release.
 const MAX_ASSETS: usize = 300;
 
@@ -153,6 +156,20 @@ impl Release {
         Ok(a)
     }
 
+    /// The release's `telamon-bundle.json.minisig`, or why there is none. A
+    /// release without one is not used: see [`super::sign`].
+    pub fn signature_asset(&self) -> Result<&Asset, Error> {
+        let a = self
+            .asset(sign::SIGNATURE_NAME)
+            .ok_or_else(|| err("The latest release is not signed."))?;
+        if a.size == 0 || a.size > MAX_SIGNATURE_DOWNLOAD {
+            return Err(err(
+                "The release's signature is larger than the Store accepts.",
+            ));
+        }
+        Ok(a)
+    }
+
     /// The archive `manifest` names, checked against what GitHub says about
     /// the file (size, and its SHA-256 when it gives one) and against the
     /// tag: `v<version>` or `<version>`.
@@ -262,6 +279,25 @@ mod tests {
             let r = Release::parse(&release("v1", json!([other(url)])), REPO).unwrap();
             assert!(r.manifest_asset().is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn the_signature_is_the_releases_own_small_file() {
+        let sig = "telamon-bundle.json.minisig";
+        let r = Release::parse(&release("v1", json!([asset("v1", sig, 330)])), REPO).unwrap();
+        assert_eq!(r.signature_asset().unwrap().size, 330);
+        // Missing, empty or too large.
+        let none = Release::parse(&release("v1", json!([])), REPO).unwrap();
+        assert!(none.signature_asset().unwrap_err().0.contains("not signed"));
+        for size in [0, 4097, 1 << 20] {
+            let r = Release::parse(&release("v1", json!([asset("v1", sig, size)])), REPO).unwrap();
+            assert!(r.signature_asset().is_err(), "{size}");
+        }
+        // From another release or repository it is not there at all.
+        let other = json!({"name": sig, "size": 330, "browser_download_url":
+            format!("https://github.com/Other/repo/releases/download/v1/{sig}")});
+        let r = Release::parse(&release("v1", json!([other])), REPO).unwrap();
+        assert!(r.signature_asset().is_err());
     }
 
     #[test]

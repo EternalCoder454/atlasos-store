@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "net.eterneon.telamon.gates",
+  "name": "Telamon Gates",
+  "version": "0.3.0",
+  "summary": "Chat with a local AI model",
+  "homepage": "https://github.com/EternalCoder454/telamon-gates",
+  "license": "MIT",
+  "arch": "x86_64",
+  "min_telamon_ui": "2.0.0",
+  "min_os_version": "44",
+  "files": [
+    {
+      "path": "bin/gates",
+      "size": 24,
+      "sha256": "9fe9fd11e3136fc5dcc34d9c77623334c2206adb49971e2891622211a1f121d9",
+      "executable": true
+    }
+  ],
+  "links": [],
+  "archive": {
+    "name": "net.eterneon.telamon.gates-0.3.0-x86_64.tar.zst",
+    "sha256": "8e8b5448e821a04b424908b2821fe5f3cac6178d91e8f1f622856b8ab403a207",
+    "size": 5000
+  }
+}

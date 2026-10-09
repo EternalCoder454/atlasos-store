@@ -10,6 +10,8 @@
 //!   the bundle's;
 //! - [`manifest`]: `telamon-bundle.json`, the outer one (a release file) and
 //!   the inner one (in the archive);
+//! - [`sign`]: the minisign signature over the outer manifest, checked
+//!   against the keys the catalog lists for the app;
 //! - [`archive`]: the `.tar.zst`, checked and unpacked into a private folder;
 //! - [`dirfd`]: folders held open by descriptor, which everything below
 //!   `telamon-apps` goes through (no path is walked twice, no link followed);
@@ -32,6 +34,7 @@ pub mod fetch;
 pub mod github;
 pub mod install;
 pub mod manifest;
+pub mod sign;
 pub mod version;
 
 #[cfg(any(test, feature = "fake-github", feature = "test-hooks"))]

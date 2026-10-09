@@ -249,6 +249,12 @@ fn rows(list: &[Listed]) -> Value {
                     }
                 };
                 let inst = l.installed.as_ref();
+                // The key the release being offered verified with, the key
+                // the installed copy was installed on (none for a local file
+                // or an install from before releases were signed), and
+                // whether those are two keys.
+                let signer = l.candidate.as_ref().map(|c| c.signer.clone()).unwrap_or_default();
+                let installed_signer = inst.and_then(|i| i.origin.signer.clone()).unwrap_or_default();
                 json!({
                     "id": l.id,
                     "name": l.name,
@@ -261,6 +267,9 @@ fn rows(list: &[Listed]) -> Value {
                     "installedVersion": inst.map(|i| i.version.clone()).unwrap_or_default(),
                     "availableVersion": l.candidate.as_ref().map(|c| c.manifest.version.clone()).unwrap_or_default(),
                     "size": l.candidate.as_ref().and_then(|c| c.manifest.archive.as_ref()).map(|a| human_size(a.size)).unwrap_or_default(),
+                    "signer": signer,
+                    "installedSigner": installed_signer,
+                    "signerChanged": !installed_signer.is_empty() && !signer.is_empty() && installed_signer != signer,
                     "installedSize": inst.map(|i| human_size(i.size)).unwrap_or_default(),
                     "installed": inst.is_some(),
                     "present": inst.is_none_or(|i| i.present),
@@ -391,6 +400,8 @@ fn run_job(job: Job, progress: &mut dyn FnMut(i32, &str)) -> Outcome {
                             "fileName": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                             "size": human_size(size),
                             "sha256": sha,
+                            // A file the user opened has no signature to check.
+                            "signed": false,
                             "files": m.files.len(),
                             "replaces": installed.is_some(),
                             "installedVersion": installed.as_ref().map(|r| r.version.clone()).unwrap_or_default(),
@@ -662,7 +673,7 @@ impl qobject::NativeApps {
 mod tests {
     use super::*;
     use telamon_store_core::native::check::build_list;
-    use telamon_store_core::native::fake::{BundleBuilder, Fake};
+    use telamon_store_core::native::fake::{BundleBuilder, Fake, Signing, TestKey, default_key};
     use telamon_store_core::native::version::Version;
 
     fn host() -> Host {
@@ -702,6 +713,10 @@ mod tests {
         assert_eq!(row["state"], "available");
         assert_eq!(row["availableVersion"], "0.2.0");
         assert_eq!(row["installed"], false);
+        // Who vouches for it: the key that verified, and nothing to compare.
+        assert_eq!(row["signer"], default_key().key_id());
+        assert_eq!(row["installedSigner"], "");
+        assert_eq!(row["signerChanged"], false);
         assert!(
             row["size"].as_str().unwrap().ends_with("kB")
                 || row["size"].as_str().unwrap().ends_with(" B")
@@ -710,6 +725,59 @@ mod tests {
             rows(&build_list(&[], &[], &Default::default(), &host())),
             json!([])
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rows_say_when_the_signing_key_changed() {
+        let id = "net.eterneon.telamon.gates";
+        let repo = "EternalCoder454/telamon-gates";
+        let (old, new) = (TestKey::new(1), TestKey::new(2));
+        let fake = Fake::new();
+        let bundle = |v: &str| {
+            BundleBuilder::new(id, "Telamon Gates", v)
+                .exe("telamon-gates")
+                .build()
+        };
+        let root = std::env::temp_dir().join(format!("native-rows-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs = Dirs {
+            data: root.join("data"),
+            home: root.join("home"),
+            system: Vec::new(),
+        };
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        std::fs::create_dir_all(&dirs.home).unwrap();
+        let cache = Cache::new(root.join("cache"));
+        // Installed on a release signed with the old key.
+        fake.catalog_with_keys(&[(id, repo, vec![&old, &new])]);
+        fake.publish_with(repo, "v0.1.0", &bundle("0.1.0"), Signing::With(&old));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_000, false);
+        let cand = report.apps[0].candidate.clone().unwrap();
+        check::install_candidate(
+            &fake,
+            &dirs,
+            &host(),
+            &cand,
+            &root.join("work"),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        // The next release is signed with the same key: nothing to say.
+        fake.publish_with(repo, "v0.2.0", &bundle("0.2.0"), Signing::With(&old));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_100, true);
+        let row = &rows(&report.apps)[0];
+        assert_eq!(row["state"], "update");
+        assert_eq!(row["installedSigner"], old.key_id());
+        assert_eq!(row["signer"], old.key_id());
+        assert_eq!(row["signerChanged"], false);
+        // Signed with the other listed key (a rotation): the dialog says so.
+        fake.publish_with(repo, "v0.3.0", &bundle("0.3.0"), Signing::With(&new));
+        let report = check::check(&fake, &cache, &dirs, &host(), 1_800_000_200, true);
+        let row = &rows(&report.apps)[0];
+        assert_eq!(row["state"], "update");
+        assert_eq!(row["signer"], new.key_id());
+        assert_eq!(row["signerChanged"], true);
         let _ = std::fs::remove_dir_all(&root);
     }
 

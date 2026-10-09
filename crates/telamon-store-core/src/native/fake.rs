@@ -9,13 +9,103 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
+use blake2::Blake2b512;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::archive::hex;
 use super::fetch::Fetcher;
 use super::manifest::{ArchiveInfo, FileEntry, Kind, LinkEntry, Manifest, archive_name};
+use super::sign::SIGNATURE_NAME;
 use crate::net::NetError;
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+        for _ in chunk.len()..3 {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// A throw-away minisign key for tests and screenshots, made from a one-byte
+/// seed: its secret half is in this file on purpose, so what it signs proves
+/// nothing outside those. Signatures are the format `minisign -S` writes
+/// (hashed, `ED`), which the tests against files made by the real tool
+/// (`tests/fixtures/native/signed`) keep honest.
+pub struct TestKey {
+    pair: ed25519_compact::KeyPair,
+    id: [u8; 8],
+}
+
+impl TestKey {
+    /// The key for `n`; a different `n` is a different key.
+    pub fn new(n: u8) -> TestKey {
+        TestKey {
+            pair: ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([n; 32])),
+            id: [0x54, 0x45, 0x53, 0x54, n, n, n, n],
+        }
+    }
+
+    /// The `RW...` string a catalog entry lists.
+    pub fn public(&self) -> String {
+        let mut bytes = b"Ed".to_vec();
+        bytes.extend_from_slice(&self.id);
+        bytes.extend_from_slice(self.pair.pk.as_ref());
+        b64(&bytes)
+    }
+
+    /// The key ID as `minisign` and the Store print it.
+    pub fn key_id(&self) -> String {
+        self.id.iter().rev().map(|b| format!("{b:02X}")).collect()
+    }
+
+    /// A signature file for `file`, with the given trusted comment.
+    pub fn sign_with_comment(&self, file: &[u8], trusted: &str) -> Vec<u8> {
+        let hash = Blake2b512::digest(file);
+        let sig = self.pair.sk.sign(hash.as_slice(), None);
+        let mut head = b"ED".to_vec();
+        head.extend_from_slice(&self.id);
+        head.extend_from_slice(sig.as_ref());
+        let mut global = sig.as_ref().to_vec();
+        global.extend_from_slice(trusted.as_bytes());
+        let global = self.pair.sk.sign(&global, None);
+        format!(
+            "untrusted comment: signature from a Telamon test key\n{}\ntrusted comment: {trusted}\n{}\n",
+            b64(&head),
+            b64(global.as_ref())
+        )
+        .into_bytes()
+    }
+
+    /// A signature file for `file`.
+    pub fn sign(&self, file: &[u8]) -> Vec<u8> {
+        self.sign_with_comment(file, "timestamp:0\tfile:telamon-bundle.json\thashed")
+    }
+}
+
+/// The key `Fake::catalog` lists and `Fake::publish` signs with.
+pub fn default_key() -> TestKey {
+    TestKey::new(1)
+}
+
+/// How a published release is signed.
+pub enum Signing<'a> {
+    /// A good signature by this key.
+    With(&'a TestKey),
+    /// The release has no signature file.
+    Unsigned,
+}
 
 /// Answers by address. Unknown addresses are a 404.
 #[derive(Default)]
@@ -71,10 +161,27 @@ impl Fake {
         self.seen.lock().unwrap().clone()
     }
 
+    /// The catalog, each app listing [`default_key`] as its signer.
     pub fn catalog(&self, apps: &[(&str, &str)]) {
+        let key = default_key();
+        let apps: Vec<_> = apps
+            .iter()
+            .map(|(id, repo)| (*id, *repo, vec![&key]))
+            .collect();
+        self.catalog_with_keys(&apps);
+    }
+
+    /// The catalog, each app listing the given keys as its signers.
+    pub fn catalog_with_keys(&self, apps: &[(&str, &str, Vec<&TestKey>)]) {
         let list: Vec<_> = apps
             .iter()
-            .map(|(id, repo)| json!({"id": id, "repo": repo, "channel": "releases"}))
+            .map(|(id, repo, keys)| {
+                let signers: Vec<_> = keys
+                    .iter()
+                    .map(|k| json!({"type": "minisign", "key": k.public()}))
+                    .collect();
+                json!({"id": id, "repo": repo, "channel": "releases", "signers": signers})
+            })
             .collect();
         self.set(
             super::CATALOG_URL,
@@ -82,21 +189,38 @@ impl Fake {
         );
     }
 
-    /// Publishes `bundle` as the latest release of `repo` under `tag`.
+    /// Publishes `bundle` as the latest release of `repo` under `tag`, its
+    /// manifest signed with [`default_key`].
     pub fn publish(&self, repo: &str, tag: &str, bundle: &Built) {
+        self.publish_with(repo, tag, bundle, Signing::With(&default_key()));
+    }
+
+    /// Publishes `bundle` as the latest release of `repo` under `tag`.
+    pub fn publish_with(&self, repo: &str, tag: &str, bundle: &Built, signing: Signing<'_>) {
         let base = format!("https://github.com/{repo}/releases/download/{tag}");
         let archive_file = bundle.outer.archive.as_ref().unwrap().name.clone();
         let manifest_bytes = serde_json::to_vec_pretty(&bundle.outer).unwrap();
+        let mut assets = vec![
+            json!({"name": "telamon-bundle.json", "size": manifest_bytes.len(), "state": "uploaded",
+             "browser_download_url": format!("{base}/telamon-bundle.json")}),
+            json!({"name": archive_file, "size": bundle.archive.len(), "state": "uploaded",
+             "digest": format!("sha256:{}", bundle.sha256),
+             "browser_download_url": format!("{base}/{archive_file}")}),
+        ];
+        if let Signing::With(key) = signing {
+            let sig = key.sign(&manifest_bytes);
+            assets.push(
+                json!({"name": SIGNATURE_NAME, "size": sig.len(), "state": "uploaded",
+                 "browser_download_url": format!("{base}/{SIGNATURE_NAME}")}),
+            );
+            self.set(&format!("{base}/{SIGNATURE_NAME}"), sig);
+        } else {
+            self.remove(&format!("{base}/{SIGNATURE_NAME}"));
+        }
         let release = json!({
         "tag_name": tag, "draft": false, "prerelease": false,
         "html_url": format!("https://github.com/{repo}/releases/tag/{tag}"),
-        "assets": [
-            {"name": "telamon-bundle.json", "size": manifest_bytes.len(), "state": "uploaded",
-             "browser_download_url": format!("{base}/telamon-bundle.json")},
-            {"name": archive_file, "size": bundle.archive.len(), "state": "uploaded",
-             "digest": format!("sha256:{}", bundle.sha256),
-             "browser_download_url": format!("{base}/{archive_file}")}
-        ]});
+        "assets": assets});
         self.set(
             &super::github::latest_url(repo),
             serde_json::to_vec(&release).unwrap(),
