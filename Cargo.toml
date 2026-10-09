@@ -49,6 +49,11 @@ zstd = { version = "0.13", default-features = false }
 backhand = { version = "0.25", default-features = false, features = ["gzip", "zstd", "xz"] }
 
 [profile.release]
+# Secure phase: integer overflow on numbers that come from files and the
+# network (sizes, counts, offsets) panics, where the worker catches it, instead
+# of wrapping silently. panic stays "unwind": the workers' catch_unwind needs it.
+# The cost is to be measured in the Performant phase.
+overflow-checks = true
 lto = "thin"
 codegen-units = 4
 strip = true

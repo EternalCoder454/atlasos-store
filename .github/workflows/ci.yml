@@ -133,6 +133,21 @@ jobs:
           path: /tmp/atlas-framework-rpms
       - name: Build the RPM
         run: TELAMON_LOCAL_RPMS=/tmp/atlas-framework-rpms packaging/build-rpm.sh "$GITHUB_WORKSPACE/out"
+      # The spec's %check has checked the binary in the build root; this looks
+      # at the one in the package that is uploaded: position independent, full
+      # RELRO (BIND_NOW), no executable stack, no text relocations, stack
+      # protector, and no setuid/setgid or world-writable file in the package.
+      - name: Check the package's hardening and modes
+        run: |
+          dnf -y install binutils cpio
+          mkdir "/tmp/rpm-root"
+          for rpm in out/*.rpm; do rpm2cpio "$rpm" | (cd "/tmp/rpm-root" && cpio -idm --quiet); done
+          scripts/check-hardening.sh "/tmp/rpm-root/usr/bin/telamon-store"
+          # Symbolic links are always rwxrwxrwx: they are not files that can be written.
+          if find "/tmp/rpm-root" -type f \( -perm /6000 -o -perm -0002 \) -print | grep .; then
+            echo "the package holds a setuid, setgid or world-writable file" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: telamon-store-rpm

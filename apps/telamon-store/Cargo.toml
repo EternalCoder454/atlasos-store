@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Never published: lets cargo deny accept the path dependency without a version.
+publish = false
 build = "build.rs"
 
 # CMake (Corrosion) links the static library into the C++ executable.
