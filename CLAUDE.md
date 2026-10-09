@@ -51,6 +51,10 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
   (`$XDG_RUNTIME_DIR/telamon-updater-apps.lock`, and for this release
   `atlas-updater-apps.lock`) from a worker before changing
   installations.
+- **Security**: the threat model, what is enforced and where each defense is
+  tested is `docs/SECURITY.md`; change it with the code. A release of a native
+  app is installed only with a minisign signature from a key its catalog entry
+  lists (`signers`).
 - **Native Telamon apps** (`crates/telamon-store-core/src/native/`,
   `docs/DESIGN.md`, "Native Telamon apps"): everything from GitHub and every
   bundle is untrusted. Nothing is unpacked by the tar library; a bundle may
@@ -88,6 +92,10 @@ logging, crash reports, Flatpak updates), which the Store takes from there.
 | Search smoke | `STORE_OFFLINE=1`-style offline container run: `scripts/dev.sh scripts/smoke-search.sh /work/cmake/dev/telamon-store` (types a whole word into Home's search with xdotool; fails if the field keeps only the first letter) |
 | RPM | `podman run --rm --security-opt label=disable -v "$PWD":/src -v <framework rpms>:/telamon-rpms:ro -e TELAMON_LOCAL_RPMS=/telamon-rpms -v telamon-store-cargo:/root/.cargo/registry -v telamon-store-cargo-git:/root/.cargo/git -e CARGO_HOME=/root/.cargo registry.fedoraproject.org/fedora:44 /src/packaging/build-rpm.sh /src/out` |
 | Native app screenshots | `scripts/dev.sh scripts/native-shots.sh` (builds with `-DTELAMON_STORE_FAKE_GITHUB=ON`, answers GitHub from recorded files, writes `/work/shots/native`) |
+| Hardening of the built RPM | `scripts/check-hardening.sh <elf>...` (PIE, BIND_NOW, RELRO, non-exec stack; the spec's %check and CI's rpm job run it) |
+| QML plain-text check | `scripts/check-qml-plaintext.sh` (no rich text, no remote sources, no unchecked titles; `tests/qml_plaintext.rs` runs it) |
+| Supply chain | `cargo deny --locked check` (advisories, bans, licenses, sources; CI: audit.yml) |
+| Fuzz the parsers | `fuzz/run.sh [seconds] [target...]` on nightly with cargo-fuzz (CI: fuzz.yml); the same invariants run as property tests in `cargo test` (`PROPTEST_CASES=100000` for a soak) |
 | Telamon checks | `git -C ~/Documents/Atlas\ Framework archive v2.0.0 tools ui \| tar -x -C <dir>`, then `<dir>/tools/lint-app.sh apps/telamon-store` and `<dir>/tools/check-app-names.sh apps/telamon-store` |
 
 `<framework rpms>` is the out dir of atlas-framework's `packaging/build-rpm.sh`:

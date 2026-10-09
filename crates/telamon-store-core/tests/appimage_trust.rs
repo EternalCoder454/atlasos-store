@@ -411,6 +411,10 @@ fn svg_icons_that_hide_a_way_out_are_refused() {
     };
     // What the earlier substring check let through, and the usual tricks.
     for bad in [
+        // A closing tag that is not the open element's (not XML; parsers differ).
+        "<scriptRRR>alert(1)</script>",
+        "<g><rect></g></rect>",
+        "<g></g></g>",
         // A namespace prefix on the element.
         "<s:script>alert(1)</s:script>",
         "<s:style>rect{fill:url(http://x/y)}</s:style>",

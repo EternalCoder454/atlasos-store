@@ -14,9 +14,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-# The checks (tests/harness/checks.rs) use these two besides the core crate.
+# The checks (tests/harness/checks.rs) use these besides the core crate.
 libc = "0.2"
 serde_json = "1"
+quick-xml = { version = "0.42", default-features = false }
 telamon-store-core = { path = "../crates/telamon-store-core" }
 tar = { version = "0.4", default-features = false }
 zstd = { version = "0.13", default-features = false }

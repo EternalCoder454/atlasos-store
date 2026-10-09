@@ -152,7 +152,9 @@ fn svg_ok(text: &str) -> bool {
     }
     let start = if text.starts_with('\u{feff}') { 3 } else { 0 };
     let mut at = start;
-    let mut depth = 0usize;
+    // The names of the elements still open: a closing tag must be the last
+    // one's (a mismatch is not XML, and parsers differ in what they do with it).
+    let mut open: Vec<&str> = Vec::new();
     let mut elements = 0usize;
     let mut root = false;
     while let Some(off) = text[at..].find('<') {
@@ -185,10 +187,9 @@ fn svg_ok(text: &str) -> bool {
             if end == close.len() || !close[..end].trim_end().bytes().all(name_byte) {
                 return false;
             }
-            let Some(d) = depth.checked_sub(1) else {
+            if open.pop() != Some(close[..end].trim_end()) {
                 return false;
-            };
-            depth = d;
+            }
             at += 2 + end + 1;
         } else {
             let Some((len, name, empty)) = open_tag(rest) else {
@@ -206,7 +207,7 @@ fn svg_ok(text: &str) -> bool {
                 return false;
             }
             // One root, and it is the svg.
-            if depth == 0 {
+            if open.is_empty() {
                 if root || local != "svg" {
                     return false;
                 }
@@ -217,15 +218,15 @@ fn svg_ok(text: &str) -> bool {
                 return false;
             }
             if !empty {
-                depth += 1;
-                if depth > SVG_MAX_DEPTH {
+                open.push(name);
+                if open.len() > SVG_MAX_DEPTH {
                     return false;
                 }
             }
             at += len;
         }
     }
-    root && depth == 0
+    root && open.is_empty()
 }
 
 /// Only `&amp; &lt; &gt; &quot; &apos;`.

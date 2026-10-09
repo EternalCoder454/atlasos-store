@@ -163,6 +163,8 @@ and it ignores input for its first half second.
 
 ## Trust
 
+The threat model (attackers, defenses, tests, what is not done) is `docs/SECURITY.md`.
+
 Everything from the network or a file is untrusted, and checked where it
 enters, in `telamon-store-core`:
 

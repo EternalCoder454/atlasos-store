@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-store
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Telamon Store, the app store of Telamon OS
 License:        MIT
@@ -170,6 +170,22 @@ appstream-util validate-relax --nonet \
 %{_datadir}/knotifications6/telamon-store.notifyrc
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.5.0-1
+- Secure phase. Native Telamon apps now need a signature: a release is offered
+  and installed only when its telamon-bundle.json carries a minisign signature
+  from a key the catalog lists for that app, and never over a newer version.
+  Bundles are unpacked and installed through open directories (no symlink
+  races), cannot shadow system menu entries, D-Bus services or notification
+  files, and have their desktop, metainfo and notification files checked.
+  The AppImage inspector runs under a seccomp allowlist, gpgv under a syscall
+  denylist; SVG icons are tokenized and checked. Fetches go only to GitHub's
+  and Flathub's hosts, redirects included. flatpak and systemd-run are started
+  from /usr/bin, a removal acts on the installation the dialog named, and only
+  Flathub's own address can mark an app Verified. The RPM is checked for
+  PIE/BIND_NOW/RELRO, release builds check integer overflow, CI runs
+  cargo-deny, property tests and fuzz targets for the parsers. See
+  docs/SECURITY.md.
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.0-1
 - Native Telamon apps: apps that are not in the OS image (Telamon Gates) are
   installed for the user from the GitHub release of their repository, with no

@@ -1028,10 +1028,28 @@ fn check_meta(m: &meta::Meta) {
     }
 }
 
+/// backhand's panics inside `squash::with_tree` are contained there (an image
+/// that makes it slice out of range is "damaged"), so they are not findings:
+/// the panic hook libFuzzer installs would abort on them anyway. Panics from
+/// anywhere else still reach the previous hook.
+fn contain_backhand_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if squash::in_contained_backhand_call() {
+                return;
+            }
+            previous(info);
+        }));
+    });
+}
+
 /// The squashfs at the start of `bytes`: superblock checks, the tree it
 /// yields, every kept path read back. Never reads more than the limits, never
 /// panics, and a path it lists is a plain relative one.
 pub fn squashfs(bytes: &[u8]) {
+    contain_backhand_panics();
     let file = memfile(bytes);
     let len = bytes.len() as u64;
     let limits = small_limits();
@@ -1079,6 +1097,7 @@ pub fn squashfs(bytes: &[u8]) {
 /// An AppImage-shaped file: the ELF runtime, then the squashfs where the ELF
 /// says it ends.
 pub fn appimage_file(bytes: &[u8]) {
+    contain_backhand_panics();
     let file = memfile(bytes);
     let len = bytes.len() as u64;
     let _ = format::sniff_file(&file);
@@ -1101,6 +1120,75 @@ pub fn appimage_file(bytes: &[u8]) {
     }
 }
 
+fn svg_seen_by_a_real_parser(text: &str) {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut open = 0usize;
+    loop {
+        let event = match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => return,
+            Ok(e) => e,
+        };
+        let tag = match &event {
+            Event::Start(t) => {
+                open += 1;
+                Some(t)
+            }
+            Event::Empty(t) => Some(t),
+            Event::End(_) => {
+                open = open.saturating_sub(1);
+                None
+            }
+            Event::DocType(_) | Event::PI(_) => {
+                // Only the XML declaration is a PI the validator lets by.
+                if let Event::PI(p) = &event {
+                    let target = p.to_ascii_lowercase();
+                    assert!(
+                        target
+                            .strip_prefix("xml")
+                            .is_some_and(|r| r.starts_with(char::is_whitespace)),
+                        "accepted an SVG with a PI"
+                    );
+                } else {
+                    panic!("accepted an SVG with a DOCTYPE");
+                }
+                None
+            }
+            _ => None,
+        };
+        let Some(tag) = tag else { continue };
+        let name = tag.name().as_ref().to_ascii_lowercase();
+        let local = name.rsplit(':').next().unwrap_or_default();
+        assert!(
+            ![
+                "script",
+                "image",
+                "use",
+                "style",
+                "a",
+                "iframe",
+                "foreignobject",
+                "feimage",
+            ]
+            .contains(&local),
+            "accepted an SVG with <{name}>"
+        );
+        for attr in tag.attributes() {
+            // Attributes it cannot read in full: a document a strict parser
+            // refuses, which no renderer shows.
+            let Ok(attr) = attr else { return };
+            let key = attr.key.as_ref().to_ascii_lowercase();
+            let value = attr.value.to_ascii_lowercase();
+            let key_local = key.rsplit(':').next().unwrap_or_default();
+            assert!(!key_local.starts_with("on"), "accepted an SVG with {key}");
+            if key_local == "href" {
+                assert!(value.starts_with('#'), "href={value:.40}");
+            }
+            assert!(!value.contains("javascript:"), "{key}={value:.40}");
+        }
+    }
+}
+
 /// Icons: PNG header and SVG screening.
 pub fn icon(bytes: &[u8]) {
     let size = meta::png_size(bytes);
@@ -1115,42 +1203,11 @@ pub fn icon(bytes: &[u8]) {
         Some(meta::IconKind::Svg) => {
             assert!(size.is_none());
             assert!(bytes.len() <= 512 << 10 && !bytes.contains(&0));
-            let lower = std::str::from_utf8(bytes)
-                .expect("an SVG is UTF-8")
-                .to_ascii_lowercase();
-            for refused in [
-                "<script",
-                "<!entity",
-                "<!doctype",
-                "<image",
-                ":image",
-                "feimage",
-                "<use",
-                ":use",
-                "foreignobject",
-                "<style",
-                "@import",
-                "<a ",
-                ":a ",
-                "javascript:",
-                "<iframe",
-            ] {
-                assert!(!lower.contains(refused), "accepted an SVG with {refused:?}");
-            }
-            // Every href stays inside the document.
-            let mut rest = lower.as_str();
-            while let Some(i) = rest.find("href") {
-                let after = rest[i + 4..].trim_start();
-                let value = after
-                    .strip_prefix('=')
-                    .expect("href without =")
-                    .trim_start();
-                assert!(
-                    value.starts_with("\"#") || value.starts_with("'#"),
-                    "{value:.40}"
-                );
-                rest = &rest[i + 4..];
-            }
+            let text = std::str::from_utf8(bytes).expect("an SVG is UTF-8");
+            // What an independent XML parser sees in what was accepted. A
+            // document it cannot read is one no renderer reads either; one it
+            // reads has no element, attribute or reference the icon may not have.
+            svg_seen_by_a_real_parser(text);
         }
         None => {}
     }
